@@ -21,6 +21,8 @@ jobs:
     env:
       # The one test that drives a real browser skips itself here.
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Hosted runners are several times slower than a desktop on the suites that write many files.
+      TEST_TIMEOUT_MS: "180000"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
