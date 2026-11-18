@@ -1,0 +1,179 @@
+import { logger } from '../logger.js';
+
+// Remove only structural trailing commas. A regex cannot distinguish
+// `{"text":"literal ,} marker"}` from `{"text":"value",}`, and the old
+// cleanup silently changed the former's data before parsing it. Keep this
+// deliberately small and string-aware rather than trying to guess at ambiguous
+// model mistakes such as missing separators or unescaped quotation marks.
+function removeStructuralTrailingCommas(value) {
+  const source = String(value || '');
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ',') {
+      let next = index + 1;
+      while (next < source.length && /\s/.test(source[next])) next += 1;
+      if (source[next] === '}' || source[next] === ']') continue;
+    }
+    result += char;
+  }
+
+  return result;
+}
+
+// Line/column of the position a V8 JSON error message names, or null.
+function jsonErrorPosition(error, source) {
+  const positionMatch = String(error?.message || '').match(/(?:at\s+)?position\s+(\d+)/i);
+  if (!positionMatch) return null;
+  const position = Math.max(0, Math.min(Number(positionMatch[1]), source.length));
+  if (!Number.isFinite(position)) return null;
+  const before = source.slice(0, position);
+  return { position, line: before.split('\n').length, column: position - before.lastIndexOf('\n') };
+}
+
+function jsonErrorLocation(error, source) {
+  const at = jsonErrorPosition(error, source);
+  return at ? ` near line ${at.line}, column ${at.column}` : '';
+}
+
+// Diagnostics go into the application's bug-report event log. Keep them
+// content-free: the response itself can contain a user's career details, job
+// listings, or other private text. Location and shape are enough to distinguish
+// a truncation from a serializer error without exporting any response fragment.
+function jsonErrorMetadata(error, source) {
+  const at = jsonErrorPosition(error, source);
+  return at
+    ? `position=${at.position} line=${at.line} column=${at.column} length=${source.length}`
+    : `position=unknown length=${source.length}`;
+}
+
+function jsonParseErrorCategory(error) {
+  const message = String(error?.message || '');
+  if (/unexpected end/i.test(message)) return 'unexpected-end';
+  if (/unterminated/i.test(message)) return 'unterminated-string';
+  if (/expected/i.test(message)) return 'expected-structure';
+  if (/unexpected token/i.test(message)) return 'unexpected-token';
+  return 'parse-failure';
+}
+
+/**
+ * Parse raw LLM response text into JSON, stripping markdown fences if present
+ * and recovering from a handful of common malformations (trailing commas,
+ * conversational prose wrapping the JSON, a stray bracket/brace in that prose
+ * mis-anchoring the span). Handles both ```json and bare ``` wrappers.
+ *
+ * Despite living under a Gemini-sounding name for a while (parseGeminiJSON),
+ * this parser is provider-agnostic: nonApiAi.js calls it on whatever text the
+ * user pastes back from their own chosen chat application (Claude, Gemini,
+ * or anything else), not a specific provider's output. Relocated to
+ * this neutral file so that isn't a readability trap for the next reader.
+ */
+export function parseAiJson(raw) {
+  if (!raw) return null;
+
+  // Resilient JSON extraction: Find the first code block or the outer-most { } pair.
+  // This handles instances where the model adds markdown fences OR conversational text.
+  let jsonStr = raw;
+  // Prefer an explicitly-labelled JSON fence wherever it appears. The old
+  // optional `json` token allowed any first fenced block (for example a prose
+  // or shell example) to win, and it missed uppercase ```JSON labels. Only use
+  // an unlabelled fence as the fallback; other language-labelled blocks are
+  // not plausible response payloads.
+  const match = raw.match(/```[ \t]*json\b[ \t]*(?:\r?\n)?([\s\S]*?)\s*```/i)
+    || raw.match(/```[ \t]*\r?\n([\s\S]*?)\s*```/);
+  if (match) {
+    jsonStr = match[1];
+  } else {
+    // If no markdown block, try to find the first { or [ and the last } or ]
+    const firstBrace = raw.indexOf('{');
+    const firstBracket = raw.indexOf('[');
+    const lastBrace = raw.lastIndexOf('}');
+    const lastBracket = raw.lastIndexOf(']');
+
+    let start = -1;
+    let end = -1;
+
+    if (firstBrace !== -1 && firstBracket !== -1) {
+      start = Math.min(firstBrace, firstBracket);
+    } else if (firstBrace !== -1) {
+      start = firstBrace;
+    } else if (firstBracket !== -1) {
+      start = firstBracket;
+    }
+
+    if (lastBrace !== -1 && lastBracket !== -1) {
+      end = Math.max(lastBrace, lastBracket);
+    } else if (lastBrace !== -1) {
+      end = lastBrace;
+    } else if (lastBracket !== -1) {
+      end = lastBracket;
+    }
+
+    if (start !== -1 && end !== -1 && end > start) {
+      jsonStr = raw.substring(start, end + 1);
+    }
+  }
+
+  // Clean structural trailing commas that V8's JSON.parse chokes on without
+  // touching comma/brace text inside otherwise-valid JSON strings.
+  jsonStr = removeStructuralTrailingCommas(jsonStr);
+
+  try {
+    const parsed = JSON.parse(jsonStr.trim());
+    return parsed;
+  } catch (error) {
+    // Strictly-additive fallback: the first-open/last-close span above can
+    // mis-bracket when the model prefixes the JSON with prose that contains a
+    // stray '{', '[', '}' or ']' (e.g. "use [ ] for arrays: {…}"), so it starts
+    // the span at the stray delimiter and JSON.parse fails. Retry with a
+    // brace-only then bracket-only span. This runs ONLY after the primary parse
+    // already threw, so it can never regress a response that parsed cleanly.
+    for (const [open, close] of [['{', '}'], ['[', ']']]) {
+      const s = raw.indexOf(open);
+      const e = raw.lastIndexOf(close);
+      if (s !== -1 && e > s) {
+        try {
+          const recovered = JSON.parse(removeStructuralTrailingCommas(raw.substring(s, e + 1)).trim());
+          // Reject a trivially-empty literal here. This loop runs ONLY after the
+          // primary parse already failed (mis-bracketed prose), so an empty {}/[]
+          // almost always came from a STRAY delimiter pair in the prose — e.g.
+          // "use [ ] for arrays: {…}", where the bracket span grabs the prose's
+          // "[ ]" and parses it to []. Returning that would silently fabricate an
+          // empty result and mask the failure; fall through to the fail-loud throw.
+          const isEmptyLiteral = recovered && typeof recovered === 'object'
+            && (Array.isArray(recovered) ? recovered.length === 0 : Object.keys(recovered).length === 0);
+          if (!isEmptyLiteral) return recovered;
+        } catch { /* try the next delimiter pair, then fall through to the throw */ }
+      }
+    }
+    logger.error(
+      `[jsonRepair] Failed to parse JSON response: category=${jsonParseErrorCategory(error)} `
+      + `${jsonErrorMetadata(error, jsonStr)}`,
+    );
+    const friendly = new Error(
+      `AI returned invalid JSON${jsonErrorLocation(error, jsonStr)}. `
+      + 'A text value may contain an unescaped double quote or line break, a comma may be missing, or the response may have been cut off. '
+      + 'Regenerate the complete response as strict JSON and validate it before replying; no partial result was used.',
+      { cause: error },
+    );
+    friendly.code = 'AI_JSON_INVALID';
+    throw friendly;
+  }
+}

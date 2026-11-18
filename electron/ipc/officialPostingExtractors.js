@@ -1,0 +1,526 @@
+// Pure parsers for host-fetched posting data. No page code or network runs here.
+import { JSDOM } from 'jsdom';
+import { parse as parseHtml } from 'parse5';
+import { htmlToText } from 'html-to-text';
+import { walkJsonLdJobPostings } from '../extractors/jobPostingJsonLd.js';
+import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
+import { normalizeCountry } from '../../src/utils/jobLocation.js';
+import { OFFICIAL_SEARCH_PARAM, extractAtsTenant, isOfficialCareersUrl, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
+import { CLOSED_POSTING_TEXT } from './officialPostingFields.js';
+import { extractOfficialPostingVendorCandidates } from './officialPostingVendorAdapters.js';
+import { extractOfficialPostingCurrentJobData, extractOfficialPostingPageData } from './officialPostingPageData.js';
+import { scanEmbeddedOfficialJobLinks } from './officialPostingEmbeddedLinks.js';
+import { extractOfficialCareersCmsFacts } from './officialPostingCareersCms.js';
+import { phenomSearchForm, phenomSearchJobLinks } from './officialPostingPhenom.js';
+import { scanOfficialPostingPaylocityInventory } from './officialPostingPaylocityLinks.js';
+import { scanOfficialPostingSsgNavigationInventory } from './officialPostingSsgNavigation.js';
+
+const MAX_RAW_BYTES = 3 * 1024 * 1024;
+const plain = value => typeof value === 'string' ? value.trim() : '';
+const array = value => Array.isArray(value) ? value : value == null ? [] : [value];
+const unknownSalary = () => ({ text: '', provenance: 'unknown' });
+
+function rawText(body) {
+  if (typeof body !== 'string' || Buffer.byteLength(body, 'utf8') > MAX_RAW_BYTES || body.includes('\0')) {
+    const error = new Error('Official posting source is not bounded raw text.');
+    error.code = 'OFFICIAL_POSTING_EXTRACTION_REJECTED';
+    throw error;
+  }
+  return body;
+}
+
+function structured(body) {
+  try { return JSON.parse(rawText(body)); } catch { return null; }
+}
+
+function plainDescription(value) {
+  return typeof value === 'string' ? rawText(value).replace(/\r\n?/gu, '\n').trim() : '';
+}
+
+export function officialDescriptionText(value, { encoded = false } = {}) {
+  const source = rawText(typeof value === 'string' ? value : '');
+  const fragment = JSDOM.fragment(encoded ? decodeHtmlEntities(source) : source);
+  for (const node of fragment.querySelectorAll('script,style,template,noscript')) node.remove();
+  // Reject pathological nesting instead of letting the converter shorten it.
+  const elements = fragment.querySelectorAll('*');
+  for (const element of elements) {
+    let depth = 0;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) depth += 1;
+    if (depth > 50) throw new Error('Official posting markup is too deeply nested.');
+  }
+  const container = fragment.ownerDocument.createElement('div');
+  container.append(fragment);
+  return htmlToText(container.innerHTML, {
+    wordwrap: false,
+    limits: { maxInputLength: Infinity, maxDepth: 60, maxChildNodes: Infinity },
+    selectors: [{ selector: 'a', options: { ignoreHref: true } }, { selector: 'img', format: 'skip' }],
+  }).replace(/\r\n?/gu, '\n').trim();
+}
+
+function httpsUrl(value, base) {
+  try {
+    const url = new URL(String(value || ''), base);
+    if (!value || url.protocol !== 'https:' || url.username || url.password) return '';
+    url.hash = '';
+    return url.href;
+  } catch { return ''; }
+}
+
+function identifier(value) {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+  if (Array.isArray(value)) return value.map(identifier).filter(Boolean).join(' | ');
+  return value && typeof value === 'object' ? identifier(value.value ?? '') : '';
+}
+
+function addressText(value) {
+  if (typeof value === 'string') return plain(value);
+  if (!value || typeof value !== 'object') return '';
+  const address = value.address || value.postalAddress || value;
+  if (typeof address === 'string') return plain(address);
+  const statedCountry = plain(typeof address.addressCountry === 'object' ? address.addressCountry?.name : address.addressCountry);
+  // CA is ambiguous only in free text. This field is explicitly a country;
+  // leave the independently typed region untouched unless it repeats it.
+  const country = normalizeCountry(/^CA$/iu.test(statedCountry) ? 'Canada' : statedCountry);
+  const statedRegion = plain(address.addressRegion);
+  const region = country && normalizeCountry(statedRegion).toLocaleLowerCase() === country.toLocaleLowerCase() ? '' : statedRegion;
+  const parts = [address.addressLocality, region, country].map(plain).filter(Boolean);
+  return [...new Set(parts)].join(', ') || plain(value.name);
+}
+
+function location(display, { remote, workMode = '', remoteCountry = '', remoteRegion = '' } = {}) {
+  return { display: plain(display), workMode: workMode || (remote === true ? 'remote' : ''),
+    ...(typeof remote === 'boolean' ? { remote } : /^(?:remote|onsite|hybrid)$/u.test(workMode) ? { remote: workMode === 'remote' } : {}),
+    remoteCountry: plain(remoteCountry), remoteRegion: plain(remoteRegion) };
+}
+
+function jsonLocation(node) {
+  const display = [...new Set(array(node.jobLocation).map(addressText).filter(Boolean))].join(' | ');
+  const declared = plain(node.jobLocationType).toLowerCase().replace(/^on[- ]site$/u, 'onsite');
+  const workMode = declared === 'telecommute' ? 'remote' : /^(?:remote|onsite|hybrid)$/u.test(declared) ? declared : '';
+  const remote = workMode ? workMode === 'remote' : undefined;
+  const countries = array(node.applicantLocationRequirements).map(value => typeof value === 'string' ? value : value?.name).map(plain).filter(Boolean);
+  return location(display || (remote ? 'Remote' : ''), { remote, workMode, remoteCountry: remote ? [...new Set(countries)].join(' | ') : '' });
+}
+
+const SALARY_UNITS = Object.freeze({
+  YEAR: '/yr', ANNUAL: '/yr', YEARLY: '/yr', '1 YEAR': '/yr', 'PER-YEAR-SALARY': '/yr',
+  HOUR: '/hr', HOURLY: '/hr', '1 HOUR': '/hr', 'PER-HOUR-WAGE': '/hr',
+  MONTH: '/mo', MONTHLY: '/mo', '1 MONTH': '/mo', 'PER-MONTH-SALARY': '/mo',
+  WEEK: '/wk', WEEKLY: '/wk', '1 WEEK': '/wk', DAY: '/day', DAILY: '/day', '1 DAY': '/day',
+});
+function numericSalary({ min, max, value, currency = '', interval = '' }) {
+  const number = input => ['number', 'string'].includes(typeof input) && String(input).trim() !== ''
+    && Number.isFinite(Number(input)) && Number(input) >= 0 ? Number(input) : null;
+  const low = number(min); const high = number(max); const fixed = number(value);
+  if (low != null && high != null && low > high) return unknownSalary();
+  let amount = '';
+  if (low != null && high != null) amount = low === high ? String(low) : `${low} - ${high}`;
+  else if (fixed != null) amount = String(fixed);
+  else if (low != null) amount = `From ${low}`;
+  else if (high != null) amount = `Up to ${high}`;
+  if (!amount) return unknownSalary();
+  return { text: `${plain(currency)} ${amount}${SALARY_UNITS[String(interval).trim().toUpperCase()] || ''}`.trim(), provenance: 'posted' };
+}
+
+function jsonSalary(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return unknownSalary();
+  const range = value.value && typeof value.value === 'object' ? value.value : value;
+  return numericSalary({ min: range.minValue, max: range.maxValue, value: typeof value.value === 'number' ? value.value : range.value, currency: value.currency, interval: range.unitText });
+}
+
+function posting(values, options = {}) {
+  const sourceUrl = httpsUrl(values.sourceUrl);
+  if (!plain(values.title) || !sourceUrl) return null;
+  const route = extractAtsTenant(sourceUrl, { html: options.html || '' });
+  const validThrough = plain(values.validThrough);
+  const now = typeof options.now === 'function' ? options.now() : options.now ?? Date.now();
+  const expiry = Date.parse(validThrough);
+  const employer = plain(values.employer);
+  return {
+    title: plain(values.title), employer,
+    hiringOrganization: values.hiringOrganization || { name: employer, sameAs: '' },
+    sameAs: values.sameAs || '', location: values.location || location(''), salary: values.salary || unknownSalary(),
+    identifier: identifier(values.identifier), validThrough, description: values.description,
+    sourceUrl, officialApplyUrl: httpsUrl(values.officialApplyUrl, sourceUrl),
+    ats: options.ats || route?.ats || '', tenant: options.tenant || route?.tenant || '',
+    isListed: values.isListed !== false, live: values.isListed !== false && Number.isFinite(Number(now)) && (!Number.isFinite(expiry) || expiry >= Number(now)),
+  };
+}
+
+export function extractJsonLdPostings(html, options = {}) {
+  rawText(html);
+  const canonicalUrl = value => {
+    const valid = httpsUrl(value, options.sourceUrl);
+    if (!valid) return '';
+    const url = new URL(valid);
+    for (const key of [...url.searchParams.keys()]) if (/^utm_/iu.test(key)) url.searchParams.delete(key);
+    // Some first-party careers pages repeat their numeric path identifier in
+    // Greenhouse's gh_jid query parameter while their JSON-LD uses the clean
+    // canonical URL. Drop only the redundant, single matching identifier;
+    // other query parameters and mismatched IDs remain identity-bearing.
+    const pathId = /^\/jobs\/(\d+)(?:\/|$)/u.exec(url.pathname)?.[1];
+    const greenhouseIds = url.searchParams.getAll('gh_jid');
+    if (pathId && greenhouseIds.length === 1 && greenhouseIds[0] === pathId) url.searchParams.delete('gh_jid');
+    url.pathname = url.pathname.replace(/\/+$/u, '') || '/';
+    return url.href;
+  };
+  const source = canonicalUrl(options.sourceUrl);
+  const nodes = walkJsonLdJobPostings(html);
+  const bound = nodes.filter(node => node.url && canonicalUrl(node.url) === source);
+  // A related posting's JSON-LD is not this fetched posting. Select one
+  // URL-bound node, or one unambiguous node that supplies no URL at all.
+  const uniqueBound = [...new Map(bound.map(node => [JSON.stringify(node), node])).values()];
+  const selected = uniqueBound.length === 1 ? uniqueBound
+    : uniqueBound.length === 0 && nodes.length === 1 && !nodes[0].url ? nodes : [];
+  return selected.map(node => posting({
+    title: officialDescriptionText(node.title), employer: officialDescriptionText(node.hiringOrganization.name),
+    hiringOrganization: node.hiringOrganization, sameAs: node.hiringOrganization.sameAs,
+    location: jsonLocation(node), salary: jsonSalary(node.baseSalary), identifier: node.identifier,
+    validThrough: node.validThrough, description: officialDescriptionText(node.description),
+    sourceUrl: options.sourceUrl, officialApplyUrl: options.sourceUrl,
+  }, { ...options, html })).filter(Boolean);
+}
+
+function preferCompleteCurrentJob(html, jsonLd, options) {
+  const native = extractOfficialPostingCurrentJobData({ body: html, ...options });
+  if (native.length !== 1 || jsonLd.length !== 1) return jsonLd;
+  const current = native[0]; const fromJsonLd = jsonLd[0];
+  const sameText = (a, b) => plain(a).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase()
+    === plain(b).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase();
+  if (!current.identifier || current.identifier !== fromJsonLd.identifier
+    || !sameText(current.title, fromJsonLd.title) || !strictEmployerEqual(current.employer, fromJsonLd.employer)) return jsonLd;
+  const canonical = value => {
+    const valid = httpsUrl(value, options.sourceUrl); if (!valid) return '';
+    const url = new URL(valid); url.pathname = url.pathname.replace(/\/+$/u, '') || '/'; return url.href;
+  };
+  const closedText = value => CLOSED_POSTING_TEXT.test(value || '');
+  let bound = false; let explicitlyClosed = false;
+  const rawRecords = [];
+  walkJsonLdJobPostings(html, raw => { rawRecords.push(raw); });
+  // The ordinary normalized JSON-LD result intentionally has a small schema.
+  // Inspect closure only on this same URL/title/employer/requisition record;
+  // related roles cannot contribute status or any other replacement facts.
+  for (const raw of rawRecords) {
+    const org = Array.isArray(raw.hiringOrganization) ? raw.hiringOrganization[0] : raw.hiringOrganization;
+    const samePage = raw.url ? canonical(raw.url) === canonical(options.sourceUrl) : rawRecords.length === 1;
+    if (!samePage
+      || identifier(raw.identifier) !== current.identifier || !sameText(officialDescriptionText(raw.title), current.title)
+      || !strictEmployerEqual(officialDescriptionText(typeof org === 'string' ? org : org?.name), current.employer)) continue;
+    bound = true;
+    const falseFlags = ['isListed', 'is_listed', 'active', 'published'].some(key => raw[key] === false);
+    const trueFlags = ['closed', 'is_closed'].some(key => raw[key] === true);
+    const closedStatus = ['status', 'jobStatus', 'employmentStatus'].some(key =>
+      /^(?:closed|filled|unpublished|inactive|archived)$/iu.test(plain(raw[key])));
+    explicitlyClosed ||= falseFlags || trueFlags || closedStatus || closedText(officialDescriptionText(raw.description));
+  }
+  if (!bound) return jsonLd;
+  // Choose one whole representation. Only conservative status/expiry cues from
+  // that same role survive the choice; salary/location/identity are not merged.
+  const preferred = current.description.length > fromJsonLd.description.length ? current : fromJsonLd;
+  return [{ ...preferred, validThrough: fromJsonLd.validThrough || '',
+    isListed: current.isListed !== false && fromJsonLd.isListed !== false && !explicitlyClosed,
+    live: current.live !== false && fromJsonLd.live !== false && !explicitlyClosed }];
+}
+
+function ashbySalary(job) {
+  if (job.shouldDisplayCompensationOnJobPostings === false) return unknownSalary();
+  const compensation = job.compensation;
+  if (!compensation || typeof compensation !== 'object') return unknownSalary();
+  if (plain(compensation.scrapeableCompensationSalarySummary)) {
+    return { text: officialDescriptionText(compensation.scrapeableCompensationSalarySummary), provenance: 'posted' };
+  }
+  const salaries = array(compensation.summaryComponents).filter(component => component?.compensationType === 'Salary')
+    .map(component => numericSalary({ min: component.minValue, max: component.maxValue, currency: component.currencyCode, interval: component.interval })).filter(item => item.text);
+  return salaries.length ? { text: salaries.map(item => item.text).join(' | '), provenance: 'posted' } : unknownSalary();
+}
+
+export function extractAshbyPostings(body, options = {}) {
+  const data = structured(body);
+  if (!data || !Array.isArray(data.jobs)) return [];
+  return data.jobs.filter(job => job && typeof job === 'object').map(job => {
+    const places = [plain(job.location), ...array(job.secondaryLocations).map(value => typeof value === 'string' ? value : value?.location).map(plain)].filter(Boolean);
+    const workplaceType = plain(job.workplaceType).toLowerCase();
+    const knownWorkplaceType = /^(?:remote|hybrid|onsite)$/u.test(workplaceType);
+    // Some boards keep the legacy remote flag set for hybrid postings. The
+    // explicit workplace type supplies the more precise work arrangement.
+    const remote = knownWorkplaceType ? workplaceType === 'remote' : typeof job.isRemote === 'boolean' ? job.isRemote : undefined;
+    return posting({
+      title: job.title, employer: job.hiringOrganization?.name || job.companyName || options.employer || '',
+      hiringOrganization: job.hiringOrganization, sameAs: job.hiringOrganization?.sameAs || '',
+      location: location([...new Set(places)].join(' | '), { remote, workMode: knownWorkplaceType ? workplaceType : '' }),
+      salary: ashbySalary(job), identifier: job.id, description: plainDescription(job.descriptionPlain) || officialDescriptionText(job.descriptionHtml),
+      sourceUrl: job.jobUrl, officialApplyUrl: job.applyUrl || job.jobUrl, isListed: job.isListed,
+    }, { ...options, ats: 'ashby' });
+  }).filter(Boolean);
+}
+
+export function extractGreenhousePostings(body, options = {}) {
+  const data = structured(body);
+  const jobs = Array.isArray(data?.jobs) ? data.jobs : data && typeof data === 'object' && !Array.isArray(data) && data.id != null ? [data] : [];
+  return jobs.filter(job => job && typeof job === 'object').map(job => {
+    const ranges = array(job.pay_input_ranges).map(range => numericSalary({ min: typeof range?.min_cents === 'number' ? range.min_cents / 100 : null, max: typeof range?.max_cents === 'number' ? range.max_cents / 100 : null, currency: range?.currency_type, interval: range?.interval })).filter(salary => salary.text);
+    return posting({ title: job.title, employer: job.company_name || options.employer || '',
+      location: location(job.location?.name), salary: ranges.length ? { text: ranges.map(range => range.text).join(' | '), provenance: 'posted' } : unknownSalary(),
+      identifier: job.requisition_id || job.id, validThrough: job.application_deadline,
+      description: officialDescriptionText(job.content, { encoded: true }), sourceUrl: job.absolute_url, officialApplyUrl: job.absolute_url,
+    }, { ...options, ats: 'greenhouse' });
+  }).filter(Boolean);
+}
+
+export function extractLeverPostings(body, options = {}) {
+  const data = structured(body);
+  const jobs = Array.isArray(data) ? data : data && typeof data === 'object' && data.id != null ? [data] : [];
+  return jobs.filter(job => job && typeof job === 'object').map(job => {
+    const textOrHtml = (text, html) => plainDescription(text) || officialDescriptionText(html);
+    const description = [textOrHtml(job.openingPlain, job.opening), textOrHtml(job.descriptionBodyPlain || job.descriptionPlain, job.descriptionBody || job.description),
+      ...array(job.lists).filter(item => item && typeof item === 'object').map(item => [plain(item.text), officialDescriptionText(item.content)].filter(Boolean).join('\n')),
+      textOrHtml(job.additionalPlain, job.additional)].filter(Boolean).join('\n\n');
+    const range = job.salaryRange;
+    return posting({ title: job.text, employer: job.company || options.employer || '',
+      location: location([...new Set([plain(job.categories?.location), ...array(job.categories?.allLocations).map(plain)].filter(Boolean))].join(' | '), {
+        workMode: /^(?:remote|hybrid|onsite)$/iu.test(job.workplaceType || '') ? job.workplaceType.toLowerCase() : '',
+      }), salary: range && typeof range === 'object' ? numericSalary({ min: range.min, max: range.max, currency: range.currency, interval: range.interval }) : unknownSalary(),
+      identifier: job.id, description, sourceUrl: job.hostedUrl, officialApplyUrl: job.applyUrl || job.hostedUrl,
+    }, { ...options, ats: 'lever' });
+  }).filter(Boolean);
+}
+
+function smartRecruitersPostingRoute(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hostname !== 'jobs.smartrecruiters.com') return null;
+  const parts = url.pathname.split('/').filter(Boolean);
+  if (parts.length !== 2 || !/^[a-z0-9][a-z0-9_.-]{0,119}$/iu.test(parts[0])) return null;
+  const id = /^(\d+)(?:-[^/]*)?$/u.exec(parts[1])?.[1];
+  return id ? { tenant: parts[0], id } : null;
+}
+
+/** The documented public detail API needs only the observed tenant and id.
+ * Never enumerate an unbounded employer board or guess a company identifier. */
+export function officialSmartRecruitersAdapterUrl(route, value) {
+  const source = smartRecruitersPostingRoute(value);
+  return route?.ats === 'smartrecruiters' && source && source.tenant.toLowerCase() === route.tenant?.toLowerCase()
+    ? `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(source.tenant)}/postings/${source.id}` : '';
+}
+
+/** SmartRecruiters PostingDetails, as documented in its public Posting API.
+ * Bind response identity to the exact fetched detail route before using it. */
+export function extractSmartRecruitersPostings(body, options = {}) {
+  const job = structured(body);
+  let source;
+  try { source = new URL(options.sourceUrl); } catch { return []; }
+  const path = /^\/v1\/companies\/([a-z0-9][a-z0-9_.-]{0,119})\/postings\/(\d+)\/?$/iu.exec(source.pathname);
+  if (source.protocol !== 'https:' || source.hostname !== 'api.smartrecruiters.com' || source.port || source.username || source.password
+    || source.search || !path || !job || typeof job !== 'object' || Array.isArray(job) || String(job.id) !== path[2]
+    || typeof job.active !== 'boolean' || !job.jobAd?.sections || typeof job.jobAd.sections !== 'object' || Array.isArray(job.jobAd.sections)) return [];
+  const linked = smartRecruitersPostingRoute(job.postingUrl);
+  const tenant = path[1].toLowerCase();
+  if (!linked || linked.tenant.toLowerCase() !== tenant || linked.id !== path[2]
+    || (options.tenant && options.tenant.toLowerCase() !== tenant)
+    || typeof job.company?.identifier !== 'string' || job.company.identifier.toLowerCase() !== tenant) return [];
+  const sections = job.jobAd.sections;
+  const description = ['companyDescription', 'jobDescription', 'qualifications', 'additionalInformation'].flatMap(key => {
+    const section = sections[key];
+    return section && typeof section === 'object' ? [officialDescriptionText(section.title), officialDescriptionText(section.text)].filter(Boolean) : [];
+  }).join('\n\n');
+  const result = posting({ title: job.name, employer: job.company.name,
+    location: location(addressText({ addressLocality: job.location?.city, addressRegion: job.location?.region,
+      addressCountry: job.location?.country }), { remote: typeof job.location?.remote === 'boolean' ? job.location.remote : undefined }),
+    salary: unknownSalary(), identifier: job.refNumber || job.id, description,
+    sourceUrl: job.postingUrl, officialApplyUrl: job.applyUrl || job.postingUrl, isListed: job.active,
+  }, { ...options, ats: 'smartrecruiters', tenant });
+  return result ? [result] : [];
+}
+
+/** Public SmartRecruiters ads expose static schema.org microdata even when
+ * they omit JSON-LD. Only explicit schema fields become posting facts. */
+export function extractSmartRecruitersHtmlPostings(body, options = {}) {
+  const route = smartRecruitersPostingRoute(options.sourceUrl);
+  if (!route || (options.tenant && options.tenant.toLowerCase() !== route.tenant.toLowerCase())) return [];
+  rawText(body);
+  const document = JSDOM.fragment(body);
+  const declaredUrls = [...document.querySelectorAll('link[rel~="canonical"],meta[property="og:url"]')]
+    .map(node => node.getAttribute('href') || node.getAttribute('content') || '').filter(Boolean);
+  if (declaredUrls.some(value => {
+    const declared = smartRecruitersPostingRoute(value);
+    return !declared || declared.id !== route.id || declared.tenant.toLowerCase() !== route.tenant.toLowerCase();
+  })) return [];
+  const nodes = [...document.querySelectorAll('[itemscope][itemtype]')]
+    .filter(node => /^https?:\/\/schema\.org\/JobPosting\/?$/iu.test(node.getAttribute('itemtype')));
+  if (nodes.length !== 1) return [];
+  const node = nodes[0];
+  const field = (parent, name) => {
+    const element = parent?.querySelector(`[itemprop~="${name}"]`);
+    return element?.getAttribute('content') || element?.textContent || '';
+  };
+  const organization = node.querySelector('[itemprop~="hiringOrganization"]');
+  const address = node.querySelector('[itemprop~="address"]');
+  const description = node.querySelector('[itemprop~="description"]');
+  const employer = field(organization, 'name');
+  if (!employer || !description) return [];
+  const workplace = node.querySelector('spl-job-location')?.getAttribute('workplaceType')?.toLowerCase() || '';
+  const workMode = /^(?:remote|hybrid|onsite)$/u.test(workplace) ? workplace : '';
+  // A brand logo is not schema sameAs and must not silently grant ownership.
+  const sameAs = organization?.querySelector('[itemprop~="sameAs"]')?.getAttribute('href') || field(organization, 'sameAs');
+  const result = posting({ title: field(node, 'title'), employer, hiringOrganization: { name: employer, sameAs }, sameAs,
+    location: location(addressText({ addressLocality: field(address, 'addressLocality'),
+      addressRegion: field(address, 'addressRegion'), addressCountry: field(address, 'addressCountry') }), {
+      workMode,
+    }), salary: unknownSalary(), description: officialDescriptionText(description.innerHTML),
+    sourceUrl: options.sourceUrl, officialApplyUrl: options.sourceUrl,
+  }, { ...options, ats: 'smartrecruiters', tenant: route.tenant.toLowerCase() });
+  return result ? [result] : [];
+}
+
+export function extractTeamtailorRss(body, options = {}) {
+  rawText(body);
+  if (/<!DOCTYPE|<!ENTITY/iu.test(body)) return [];
+  let document;
+  try { document = new JSDOM(body, { contentType: 'text/xml' }).window.document; } catch { return []; }
+  if (!document.querySelector('rss > channel')) return [];
+  const read = (node, name) => [...node.children].find(child => child.localName === name)?.textContent || '';
+  return [...document.querySelectorAll('channel > item')].map(item => {
+    const link = httpsUrl(read(item, 'link'), options.sourceUrl);
+    const content = read(item, 'encoded') || read(item, 'description');
+    const locations = [...item.children].find(child => child.localName === 'locations');
+    const places = locations ? [...locations.children].filter(child => child.localName === 'location')
+      .map(place => [...new Set([read(place, 'name'), read(place, 'city'), read(place, 'country')].map(plain).filter(Boolean))].join(', ')) : [];
+    const remoteStatus = read(item, 'remoteStatus');
+    return posting({ title: read(item, 'title'), employer: options.employer || '',
+      location: location(places.join(' | ') || read(item, 'location'), {
+        remote: ['fully', 'hybrid', 'none'].includes(remoteStatus) ? remoteStatus === 'fully' : undefined,
+        workMode: remoteStatus === 'hybrid' ? 'hybrid' : '',
+      }), salary: unknownSalary(), identifier: read(item, 'guid'),
+      description: officialDescriptionText(content), sourceUrl: link, officialApplyUrl: link,
+    }, { ...options, ats: 'teamtailor' });
+  }).filter(Boolean);
+}
+
+export function scanOfficialCareersPage(html, sourceUrl) {
+  rawText(html);
+  // Keep JSDOM's script-disabled HTML grammar without constructing browser
+  // elements: their inline-style setters parse CSS that this scan never uses.
+  const document = parseHtml(html, { scriptingEnabled: false });
+  const attributeValue = (node, name) => node.attrs?.find(attribute => attribute.name === name && !attribute.prefix)?.value ?? null;
+  const textContent = node => {
+    const parts = []; const pending = [node];
+    while (pending.length) {
+      const child = pending.pop();
+      if (child.nodeName === '#text') parts.push(child.value);
+      for (let index = (child.childNodes?.length || 0) - 1; index >= 0; index--) pending.push(child.childNodes[index]);
+    }
+    return parts.join('');
+  };
+  // Public board inventories precede navigation filters. This is authored
+  // source order only; every detail still passes normal fetch/ownership gates.
+  const inventory = scanOfficialPostingPaylocityInventory({ body: html, sourceUrl });
+  const links = inventory.links;
+  const seen = new Set(links.map(link => link.url)); const searchForms = [];
+  const organizationNames = new Set(); const organizations = [];
+  let organizationOverflow = false;
+  let siteName = ''; let title = ''; let foundSiteName = false; let foundTitle = false;
+  const pending = [document];
+  while (pending.length) {
+    const node = pending.pop(); const tag = node.tagName;
+    if (tag === 'title' && !foundTitle) {
+      foundTitle = true; title = plain(textContent(node));
+    }
+    if (tag === 'meta' && !foundSiteName && attributeValue(node, 'property') === 'og:site_name') {
+      foundSiteName = true; siteName = plain(attributeValue(node, 'content'));
+    }
+    if (tag === 'script' && /^application\/ld\+json$/iu.test(attributeValue(node, 'type') || '')) {
+      try {
+        const records = [JSON.parse(textContent(node))]; let visited = 0;
+        while (records.length && visited++ < 4096) {
+          const record = records.pop();
+          if (!record || typeof record !== 'object') continue;
+          if (array(record['@type']).some(type => /^(?:Organization|Corporation)$/u.test(type))) {
+            const claimed = httpsUrl(record.url || record['@id'], sourceUrl);
+            if (claimed && new URL(claimed).pathname === '/' && sameOwnershipHost(claimed, sourceUrl)
+              && plain(record.name) && record.name.length <= 500) {
+              const name = plain(record.name); organizationNames.add(name);
+              const legalName = typeof record.legalName === 'string' && record.legalName.length <= 500 ? plain(record.legalName) : '';
+              const alternateNames = array(record.alternateName).filter(value => typeof value === 'string' && value.length <= 500).slice(0, 8).map(plain).filter(Boolean);
+              organizations.push({ name, legalName, alternateNames });
+            }
+          }
+          for (const value of Object.values(record)) if (value && typeof value === 'object') records.push(...(Array.isArray(value) ? value : [value]));
+        }
+        if (records.length) organizationOverflow = true;
+      } catch { /* Invalid structured branding cannot establish ownership. */ }
+    }
+    // A plain GET search form is a keyword-search entry point. Reported separately from links: following it is the resolver's decision.
+    if (tag === 'form' && /^(?:get)?$/iu.test(String(attributeValue(node, 'method') || '').trim()) && searchForms.length < 4) {
+      const action = httpsUrl(String(attributeValue(node, 'action') || '').trim() || sourceUrl, sourceUrl);
+      const inner = [...(node.childNodes || [])]; let visited = 0; let param = '';
+      while (inner.length && visited++ < 512 && !param) {
+        const child = inner.shift();
+        if (child.tagName === 'input' && /^(?:|text|search)$/iu.test(attributeValue(child, 'type') || '')
+          && OFFICIAL_SEARCH_PARAM.test(attributeValue(child, 'name') || '')) param = attributeValue(child, 'name');
+        inner.push(...(child.childNodes || []));
+      }
+      if (action && param) searchForms.push({ url: action, param });
+    }
+    if (tag === 'a' || tag === 'script' || tag === 'iframe') {
+      const attribute = tag === 'a' ? 'href' : 'src';
+      const rawHref = String(attributeValue(node, attribute) || '').trim();
+      // A bare "name@host" is an email address, not a relative path.
+      const bareEmail = tag === 'a' && rawHref.includes('@') && !/^[a-z][a-z0-9+.-]*:/iu.test(rawHref) && !/[/.?#]/u.test(rawHref[0]) && !rawHref.includes('/');
+      const url = bareEmail ? '' : httpsUrl(attributeValue(node, attribute), sourceUrl);
+      if (url && !seen.has(url)) { seen.add(url); links.push({ url, tag, attribute }); }
+      // Phenom's public careers links can carry their destination in this
+      // typed action attribute instead of href. Limit it to the observed anchor
+      // action shape and hosted ATS destinations; it still goes through the
+      // normal branded-root and exact-tenant ownership checks.
+      if (tag === 'a' && attributeValue(node, 'ph-href') && attributeValue(node, 'ph-tevent') === 'static_content_click') {
+        const destination = httpsUrl(attributeValue(node, 'data-ph-href'), sourceUrl);
+        if (destination && extractAtsTenant(destination) && !seen.has(destination)) {
+          seen.add(destination); links.push({ url: destination, tag, attribute: 'data-ph-href' });
+        }
+      }
+    }
+    // Template content belongs to its separate fragment and was never part of
+    // document.querySelectorAll. Ordinary childNodes retain document order.
+    for (let index = (node.childNodes?.length || 0) - 1; index >= 0; index--) pending.push(node.childNodes[index]);
+  }
+  // Keep actual anchor receipts when authored navigation declares the same
+  // destination. Typed menu data adds navigation, never employer authority.
+  const ssgNavigation = scanOfficialPostingSsgNavigationInventory({ body: html, sourceUrl });
+  for (const link of ssgNavigation.links) {
+    if (!seen.has(link.url)) { seen.add(link.url); links.push(link); }
+  }
+  if (isOfficialCareersUrl(sourceUrl)) {
+    for (const link of scanEmbeddedOfficialJobLinks(html, sourceUrl)) {
+      if (!seen.has(link.url)) { seen.add(link.url); links.push(link); }
+    }
+    // Phenom: the site's own keyword search (a lead) and, on a search page, the result jobs' detail links.
+    const phenomForm = phenomSearchForm(html, sourceUrl);
+    if (phenomForm && searchForms.length < 4) searchForms.push(phenomForm);
+    // Result jobs go first: the resolver follows a bounded number of links per page, and page chrome must not crowd them out.
+    const results = phenomSearchJobLinks(html, sourceUrl).filter(link => !seen.has(link.url));
+    for (const link of results) seen.add(link.url);
+    links.unshift(...results);
+    for (const link of extractOfficialCareersCmsFacts({ body: html, sourceUrl })?.links || []) {
+      if (!seen.has(link.url)) { seen.add(link.url); links.push({ url: link.url, tag: 'declaration', attribute: 'url' }); }
+    }
+  }
+  if (!foundSiteName && !organizationOverflow && organizationNames.size === 1) siteName = [...organizationNames][0];
+  return { links, siteName, title, teamtailor: extractAtsTenant(sourceUrl, { html })?.ats === 'teamtailor', ...(searchForms.length ? { searchForms } : {}),
+    ...(inventory.coverageIncomplete === true || ssgNavigation.coverageIncomplete === true ? { coverageIncomplete: true } : {}),
+    ...(!organizationOverflow && organizationNames.size === 1 ? { organizations } : {}) };
+}
+
+export function extractOfficialPostingCandidates({ body, sourceUrl, contentType = '', ats = '', tenant = '', employer = '', now } = {}) {
+  const options = { sourceUrl, ats, tenant, employer, now };
+  const vendorCandidates = extractOfficialPostingVendorCandidates({ body, contentType, ...options });
+  if (vendorCandidates.length) return vendorCandidates;
+  const json = /json/iu.test(contentType) || (typeof body === 'string' && /^\s*[[{]/u.test(body));
+  if (ats === 'ashby') return json ? extractAshbyPostings(body, options) : extractJsonLdPostings(body, options);
+  if (ats === 'greenhouse') return json ? extractGreenhousePostings(body, options) : extractJsonLdPostings(body, options);
+  if (ats === 'lever') return json ? extractLeverPostings(body, options) : extractJsonLdPostings(body, options);
+  if (ats === 'smartrecruiters') return json ? extractSmartRecruitersPostings(body, options)
+    : [...extractJsonLdPostings(body, options), ...extractSmartRecruitersHtmlPostings(body, options)];
+  if (ats === 'teamtailor' && /(?:xml|rss)/iu.test(contentType)) return extractTeamtailorRss(body, options);
+  const jsonLd = extractJsonLdPostings(body, options);
+  return jsonLd.length ? preferCompleteCurrentJob(body, jsonLd, options) : extractOfficialPostingPageData({ body, ...options });
+}

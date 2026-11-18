@@ -1,0 +1,54 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+node_modules
+
+# Build output
+dist-interview
+dist-electron-interview
+release-interview/
+native/*/build/
+*.tsbuildinfo
+main.cjs
+out/
+tmp/
+temp/
+scratch/
+
+# Sensitive: secrets, signing keys, env variants
+.env
+.env.*
+service-account.json
+credentials.json
+secrets.json
+*.secret
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+*.keystore
+*.local
+
+# Test / coverage output
+coverage/
+.nyc_output/
+
+# Agent / editor local config
+.claude/
+.codex/
+.cursor/
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.sw?
+*~
+*.bak
+*.orig
+._*
+.cache/
+.eslintcache

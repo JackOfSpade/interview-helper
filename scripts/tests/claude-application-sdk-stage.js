@@ -1,0 +1,953 @@
+import assert from 'node:assert/strict';
+import { runClaudeSdkStage } from '../../electron/ipc/claudeApplicationSdkStage.js';
+import { CLAUDE_HANDOFF_SYSTEM_PROMPT, CLAUDE_STAGE_TIMEOUT_MS, claudeCliArgs } from '../../electron/ipc/claudeApplicationRunner.js';
+import { CLAUDE_TASK_PROFILES, profile } from '../../electron/ipc/claudeTaskProfiles.js';
+
+const SONNET = 'claude-sonnet-5-5';
+const OPUS = 'claude-opus-5-5';
+const SAFE_SUMMARY = 'Use a concrete example for the opening paragraph.';
+
+function assistant(content = [{ type: 'text', text: 'answer' }], model = SONNET, extra = {}) {
+  return { type: 'assistant', parent_tool_use_id: null, message: { model, content, stop_reason: 'end_turn' }, ...extra };
+}
+
+function result(extra = {}) {
+  return { type: 'result', subtype: 'success', is_error: false, result: 'answer', duration_ms: 42, modelUsage: { [SONNET]: {} }, ...extra };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function fakeQuery(messages = [assistant(), result()]) {
+  const calls = [];
+  const queryImpl = options => {
+    const call = { ...options, closed: false };
+    calls.push(call);
+    const generator = typeof messages === 'function'
+      ? messages(call)
+      : (async function* produce() { yield* messages; }());
+    generator.close = () => { call.closed = true; };
+    return generator;
+  };
+  return { calls, queryImpl };
+}
+
+function stage(queryImpl, options = {}) {
+  return runClaudeSdkStage({
+    text: 'private prompt', binary: '/bin/claude', env: { PATH: '/bin' }, cwd: '/tmp/application', queryImpl, ...options,
+  });
+}
+
+async function rejected(promise, code) {
+  try {
+    await promise;
+  } catch (error) {
+    assert.equal(error.code, code, error.message);
+    return error;
+  }
+  assert.fail(`expected ${code}`);
+}
+
+export default [
+  {
+    name: 'claude SDK: uses the native summarized display with restricted options, no ultracode by default and no fallback',
+    async run() {
+      const fake = fakeQuery();
+      const value = await stage(fake.queryImpl);
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+      const { prompt, options, closed } = fake.calls[0];
+      assert.equal(prompt, 'private prompt');
+      assert.equal(closed, true);
+      const assertRestricted = (options_, { tools, settings }) => {
+        assert.deepEqual(options_.thinking, { type: 'adaptive', display: 'summarized' });
+        assert.deepEqual(options_.tools, tools);
+        assert.deepEqual(options_.allowedTools, tools);
+        assert.deepEqual(options_.settings, settings);
+        assert.equal(options_.permissionMode, 'dontAsk');
+        assert.equal(options_.effort, 'high', 'ultracode is a setting; the stage effort is unchanged');
+        assert.deepEqual(options_.mcpServers, {});
+        assert.deepEqual(options_.settingSources, []);
+        assert.deepEqual(options_.extraArgs, { restricted: null });
+        assert.deepEqual(options_.systemPrompt, { type: 'preset', preset: 'claude_code', append: CLAUDE_HANDOFF_SYSTEM_PROMPT });
+        assert.equal(options_.strictMcpConfig, true);
+        assert.equal(options_.persistSession, true);
+        assert.equal(options_.maxTurns, 1);
+        assert.equal(options_.pathToClaudeCodeExecutable, '/bin/claude');
+        assert.equal(options_.cwd, '/tmp/application');
+        assert.deepEqual(options_.env, { PATH: '/bin' });
+        assert.equal('fallbackModel' in options_, false);
+        assert.equal('sessionId' in options_, false);
+        assert.equal('resume' in options_, false);
+      };
+      assertRestricted(options, { tools: [], settings: {} });
+      // Only an explicit opt-in adds the ultracode setting and the Workflow tool.
+      const optIn = fakeQuery();
+      const optInValue = await stage(optIn.queryImpl, { ultracode: true });
+      assert.deepEqual(optInValue, value);
+      assertRestricted(optIn.calls[0].options, { tools: ['Workflow'], settings: { ultracode: true } });
+    },
+  },
+  {
+    name: 'claude SDK: ultracode is off by default and drops the ultracode setting and Workflow but keeps every other option; an explicit opt-in adds both',
+    async run() {
+      const parallel = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      const off = fakeQuery();
+      await stage(off.queryImpl, {
+        tools: ['WebFetch', 'Workflow', 'mcp__parallel__web_search'],
+        mcpServers: { parallel },
+        allowBuiltInWebTools: true,
+      });
+      const offOptions = off.calls[0].options;
+      assert.deepEqual(offOptions.settings, {});
+      assert.equal(offOptions.tools.includes('Workflow'), false, 'ultracode off offers no Workflow');
+      assert.deepEqual(offOptions.tools, ['WebFetch']);
+      assert.deepEqual(offOptions.allowedTools, ['WebFetch', 'mcp__parallel__web_search']);
+      assert.deepEqual(offOptions.mcpServers, { parallel });
+
+      const on = fakeQuery();
+      await stage(on.queryImpl, { ultracode: true, tools: ['WebFetch', 'mcp__parallel__web_search'], mcpServers: { parallel }, allowBuiltInWebTools: true });
+      const onOptions = on.calls[0].options;
+      assert.deepEqual(onOptions.settings, { ultracode: true });
+      assert.deepEqual(onOptions.tools, ['WebFetch', 'Workflow']);
+      assert.deepEqual(onOptions.allowedTools, ['WebFetch', 'Workflow', 'mcp__parallel__web_search']);
+
+      // Every option except the three ultracode ones is identical, key for key.
+      const differs = new Set(['settings', 'tools', 'allowedTools', 'abortController']);
+      assert.deepEqual(Object.keys(offOptions).sort(), Object.keys(onOptions).sort());
+      for (const key of Object.keys(onOptions)) {
+        if (differs.has(key)) continue;
+        assert.deepEqual(offOptions[key], onOptions[key], `option ${key} changed with ultracode`);
+      }
+    },
+  },
+  {
+    name: 'claude SDK: ultracode:false returns the first plain result and expects no workflow follow-up',
+    async run() {
+      const fake = fakeQuery([assistant(), result()]);
+      const value = await stage(fake.queryImpl, { ultracode: false });
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+      assert.deepEqual(fake.calls[0].options.settings, {});
+    },
+  },
+  {
+    name: 'claude CLI args: ultracode is off by default and an explicit true adds the setting and Workflow; nothing else changes',
+    run() {
+      // allowBuiltInWebTools is the measurement script's built-in-arm opt-in.
+      const fixed = { model: 'opus', effort: 'high', sessionId: '11111111-1111-4111-8111-111111111111', tools: 'WebSearch,WebFetch', allowBuiltInWebTools: true };
+      const head = ['-p', '--session-id', fixed.sessionId, '--model', 'opus', '--effort', 'high',
+        '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config'];
+      const tail = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+      assert.deepEqual(claudeCliArgs(fixed), [
+        ...head, '--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch', ...tail,
+      ]);
+      assert.deepEqual(claudeCliArgs({ ...fixed, ultracode: true }), [
+        ...head, '--settings', '{"ultracode":true}',
+        '--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow', ...tail,
+      ]);
+      // An explicit false is the same as the default.
+      assert.deepEqual(claudeCliArgs({ ...fixed, ultracode: false }), [
+        ...head, '--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch', ...tail,
+      ]);
+      // An empty list is how the CLI gets "no tools" while ultracode is off.
+      assert.deepEqual(claudeCliArgs({ ...fixed, ultracode: false, tools: '' }), [
+        ...head, '--tools', '', '--allowedTools', '', ...tail,
+      ]);
+      assert.deepEqual(claudeCliArgs({ ...fixed, tools: '' }), [
+        ...head, '--tools', '', '--allowedTools', '', ...tail,
+      ]);
+      // Workflow is never offered unless ultracode is on, even if a caller asks for it.
+      const none = claudeCliArgs({ ...fixed, ultracode: false, tools: 'Workflow' });
+      assert.equal(none[none.indexOf('--tools') + 1], '');
+      assert.equal(none[none.indexOf('--allowedTools') + 1], '');
+      assert.equal(none.includes('--settings'), false);
+    },
+  },
+  {
+    name: 'claude task profiles: current profiles record no ultracode and profile() records only an explicit opt-in',
+    run() {
+      for (const [id, value] of Object.entries(CLAUDE_TASK_PROFILES)) {
+        assert.deepEqual(Object.keys(value), ['model', 'effort', 'tools'], `${id} gained a field`);
+        assert.equal('ultracode' in value, false, `${id} must not opt in to ultracode`);
+      }
+      assert.deepEqual(profile('haiku', 'low'), { model: 'haiku', effort: 'low', tools: '' });
+      assert.deepEqual(profile('opus', 'xhigh', 'WebSearch,WebFetch', {}), { model: 'opus', effort: 'xhigh', tools: 'WebSearch,WebFetch' });
+      const optedIn = profile('opus', 'xhigh', 'WebSearch', { ultracode: true });
+      assert.deepEqual(optedIn, { model: 'opus', effort: 'xhigh', tools: 'WebSearch', ultracode: true });
+      assert.equal(Object.isFrozen(optedIn), true);
+      // Ultracode is off unless a profile opts in, so an explicit false records nothing.
+      assert.deepEqual(profile('opus', 'xhigh', 'WebSearch', { ultracode: false }), { model: 'opus', effort: 'xhigh', tools: 'WebSearch' });
+      assert.equal('ultracode' in CLAUDE_TASK_PROFILES['job-scoring'], false);
+    },
+  },
+  {
+    name: 'claude SDK: an explicit MCP server adds only its named tools by default, an explicit opt-in adds Workflow, and nothing else loosens',
+    async run() {
+      const fake = fakeQuery();
+      const parallel = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      await stage(fake.queryImpl, {
+        tools: ['WebFetch', 'mcp__parallel__web_search', 'mcp__parallel__web_fetch'],
+        mcpServers: { parallel },
+        // The built-in arm of a measurement script opts in explicitly.
+        allowBuiltInWebTools: true,
+      });
+      const { options } = fake.calls[0];
+      assert.deepEqual(options.mcpServers, { parallel });
+      assert.equal(options.tools.includes('mcp__parallel__web_search'), false, 'MCP tools are not built-in tools');
+      assert.deepEqual([...options.tools].sort(), ['WebFetch']);
+      assert.deepEqual([...options.allowedTools].sort(), ['WebFetch', 'mcp__parallel__web_fetch', 'mcp__parallel__web_search']);
+      assert.deepEqual(options.settings, {});
+      assert.equal(options.strictMcpConfig, true);
+      assert.deepEqual(options.settingSources, []);
+      const on = fakeQuery();
+      await stage(on.queryImpl, {
+        ultracode: true,
+        tools: ['WebFetch', 'mcp__parallel__web_search', 'mcp__parallel__web_fetch'],
+        mcpServers: { parallel },
+        allowBuiltInWebTools: true,
+      });
+      const onOptions = on.calls[0].options;
+      assert.deepEqual([...onOptions.tools].sort(), ['WebFetch', 'Workflow']);
+      assert.deepEqual([...onOptions.allowedTools].sort(), ['WebFetch', 'Workflow', 'mcp__parallel__web_fetch', 'mcp__parallel__web_search']);
+      assert.deepEqual(onOptions.settings, { ultracode: true });
+      assert.deepEqual(onOptions.mcpServers, { parallel });
+      assert.equal(onOptions.strictMcpConfig, true);
+      const bad = fakeQuery();
+      await stage(bad.queryImpl, { mcpServers: ['not', 'a', 'map'] });
+      assert.deepEqual(bad.calls[0].options.mcpServers, {});
+    },
+  },
+  {
+    name: 'claude SDK: sends images as one SDK user message and starts the specified persistent session',
+    async run() {
+      const fake = fakeQuery();
+      const sessionId = '22222222-2222-4222-8222-222222222222';
+      const pageImages = [{ candidateId: 'A', document: 'resume', mimeType: 'image/jpeg', data: 'ZmFrZQ==' }];
+      await stage(fake.queryImpl, { pageImages, sessionId });
+      const sent = [];
+      for await (const message of fake.calls[0].prompt) sent.push(message);
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].type, 'user');
+      assert.equal(sent[0].message.role, 'user');
+      assert.equal(sent[0].parent_tool_use_id, null);
+      assert.equal(sent[0].session_id, sessionId);
+      assert.equal(sent[0].client_composed, true);
+      assert.deepEqual(sent[0].message.content, [
+        { type: 'text', text: 'private prompt' },
+        { type: 'text', text: 'Page image 1: candidate A, resume' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'ZmFrZQ==' } },
+      ]);
+      assert.equal(fake.calls[0].options.sessionId, sessionId);
+      assert.equal('resume' in fake.calls[0].options, false);
+    },
+  },
+  {
+    name: 'claude SDK: corrections resume the same session without sending mutually exclusive sessionId',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, OPUS), result({ modelUsage: { [OPUS]: {} } })]);
+      await stage(fake.queryImpl, { sessionId: 'resume-session', resume: true, model: 'opus', effort: 'xhigh' });
+      assert.equal(fake.calls[0].options.resume, 'resume-session');
+      assert.equal('sessionId' in fake.calls[0].options, false);
+      assert.equal(fake.calls[0].options.model, 'opus');
+      assert.equal(fake.calls[0].options.effort, 'xhigh');
+    },
+  },
+  {
+    name: 'claude SDK: awaits each readable summary before consuming the next message or completing',
+    async run() {
+      const entered = deferred();
+      const release = deferred();
+      const summaries = [];
+      let consumedAfterSummary = false;
+      let finished = false;
+      const fake = fakeQuery(async function* produce() {
+        yield assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]);
+        consumedAfterSummary = true;
+        yield assistant([{ type: 'thinking', thinking: 'Second summary.' }]);
+        yield assistant();
+        yield result();
+      });
+      const pending = stage(fake.queryImpl, { onThinkingSummary: async row => {
+        summaries.push(row);
+        if (summaries.length === 1) { entered.resolve(); await release.promise; }
+      } }).then(value => { finished = true; return value; });
+      await entered.promise;
+      assert.equal(finished, false);
+      assert.equal(consumedAfterSummary, false);
+      release.resolve();
+      const value = await pending;
+      assert.deepEqual(summaries, [
+        { text: SAFE_SUMMARY, model: SONNET, index: 1, thinkingDisplay: 'summarized' },
+        { text: 'Second summary.', model: SONNET, index: 2, thinkingDisplay: 'summarized' },
+      ]);
+      assert.equal(value.summaryCount, 2);
+      assert.equal(value.summaryChars, SAFE_SUMMARY.length + 'Second summary.'.length);
+      assert.equal(value.text, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: never reads signatures, redacted data, raw stream events or unrelated agent summaries',
+    async run() {
+      const summaryBlock = { type: 'thinking', thinking: SAFE_SUMMARY };
+      Object.defineProperty(summaryBlock, 'signature', { get() { throw new Error('signature was read'); }, enumerable: true });
+      const redacted = { type: 'redacted_thinking' };
+      Object.defineProperty(redacted, 'data', { get() { throw new Error('redacted data was read'); }, enumerable: true });
+      const raw = { type: 'stream_event' };
+      Object.defineProperty(raw, 'event', { get() { throw new Error('raw event was read'); }, enumerable: true });
+      const fake = fakeQuery([
+        raw,
+        assistant([redacted, summaryBlock]),
+        assistant([{ type: 'thinking', thinking: 'PRIVATE SUBAGENT DATA' }], OPUS, { parent_tool_use_id: 'subagent' }),
+        assistant([{ type: 'thinking', thinking: 'PRIVATE AGENT DATA' }], OPUS, { agent_id: 'agent' }),
+        assistant(), result(),
+      ]);
+      const rows = [];
+      const value = await stage(fake.queryImpl, { onThinkingSummary: async row => { rows.push(row); } });
+      assert.equal(rows.length, 1);
+      assert.equal(value.summaryCount, 1);
+      assert.equal(JSON.stringify({ rows, value }).includes('PRIVATE'), false);
+    },
+  },
+  {
+    name: 'claude SDK: empty and unverified-model summaries are not logged',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'thinking', thinking: '   ' }]),
+        assistant([{ type: 'thinking', thinking: 'unverified summary' }], undefined, { message: { content: [{ type: 'thinking', thinking: 'unverified summary' }] } }),
+        assistant(), result(),
+      ]);
+      const rows = [];
+      const value = await stage(fake.queryImpl, { onThinkingSummary: async row => { rows.push(row); } });
+      assert.equal(rows.length, 0);
+      assert.equal(value.summaryCount, 0);
+    },
+  },
+  {
+    name: 'claude SDK: summary log failures terminate the query without returning a partial answer',
+    async run() {
+      let continued = false;
+      const fake = fakeQuery(async function* produce() {
+        yield assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]);
+        continued = true;
+        yield assistant(); yield result();
+      });
+      const error = await rejected(stage(fake.queryImpl, { onThinkingSummary: async () => { throw new Error('disk full'); } }), 'CLAUDE_LOG_ERROR');
+      assert.equal(continued, false);
+      assert.equal(fake.calls[0].closed, true);
+      assert.equal(error.detail.cause, 'disk full');
+      assert.equal('result' in error, false);
+    },
+  },
+  {
+    name: 'claude SDK: provider error result retains only plain result and structured metadata',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]),
+        result({ is_error: true, result: 'API Error: overloaded', api_error_status: 503, errors: ['Try again later'] }),
+      ]);
+      const rows = [];
+      const error = await rejected(stage(fake.queryImpl, { onThinkingSummary: async row => { rows.push(row); } }), 'CLAUDE_ERROR');
+      assert.equal(rows.length, 1);
+      assert.equal(error.result, 'API Error: overloaded');
+      assert.equal(error.detail.apiErrorStatus, 503);
+      assert.deepEqual(error.detail.errors, ['Try again later']);
+      assert.equal(error.detail.summaryCount, 1);
+      assert.equal(JSON.stringify(error).includes(SAFE_SUMMARY), false);
+    },
+  },
+  {
+    name: 'claude SDK: successful CLI subtype cannot turn a safeguard provider error into an answer',
+    async run() {
+      const providerMessage = "Opus 5.5's safeguards flagged this message. Details: `[reasoning_extraction]`";
+      const fake = fakeQuery([assistant([{ type: 'text', text: providerMessage }]), result({ result: providerMessage })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.result, providerMessage);
+      assert.equal(error.detail.refusalCategory, 'reasoning_extraction');
+    },
+  },
+  {
+    name: 'claude SDK: thrown plain safeguard messages retain diagnostic IDs beyond a short display excerpt',
+    async run() {
+      const providerMessage = [
+        "Sonnet 5.5's safeguards flagged this message.",
+        'This is a synthetic provider explanation for a diagnostic retention test. '.repeat(8).trim(),
+        'Details: `[reasoning_extraction]`',
+        'Request ID: req_longProvider12345678',
+        'Message ID: msg_longProvider87654321',
+      ].join('\n');
+      assert.ok(providerMessage.indexOf('Details:') > 300);
+      const fake = fakeQuery(async function* produce() {
+        yield assistant();
+        throw new Error(providerMessage);
+      });
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.result, providerMessage);
+      assert.equal(error.detail.refusalCategory, 'reasoning_extraction');
+      assert.equal(error.detail.requestId, 'req_longProvider12345678');
+      assert.equal(error.detail.messageId, 'msg_longProvider87654321');
+      assert.equal(fake.calls[0].closed, true);
+    },
+  },
+  {
+    name: 'claude SDK: thrown safeguard diagnostics exclude appended raw signature and redacted stream records',
+    async run() {
+      const providerMessage = [
+        "API Error: Sonnet 5.5's safeguards flagged this message.",
+        'This is a synthetic plain explanation that must remain available in the private audit. '.repeat(6).trim(),
+        'Details: `[reasoning_extraction]`',
+        'Request ID: req_safePrefix12345678',
+        'Message ID: msg_safePrefix87654321',
+      ].join('\n');
+      const rawRecord = JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'thinking', thinking: 'DO_NOT_COPY_RAW_THINKING', signature: 'DO_NOT_COPY_SIGNATURE' },
+        { type: 'redacted_thinking', data: 'DO_NOT_COPY_REDACTED_DATA' },
+      ] } });
+      const fake = fakeQuery(async function* produce() {
+        yield assistant();
+        const failure = new Error(`${providerMessage}\n${rawRecord}\nDO_NOT_COPY_RAW_TRAILER`);
+        Object.defineProperty(failure, 'rawStream', { get() { throw new Error('raw transport field was read'); }, enumerable: true });
+        throw failure;
+      });
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.result, providerMessage);
+      assert.equal(error.detail.refusalCategory, 'reasoning_extraction');
+      assert.equal(error.detail.requestId, 'req_safePrefix12345678');
+      assert.equal(error.detail.messageId, 'msg_safePrefix87654321');
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_COPY|rawStream/u);
+      assert.equal(fake.calls[0].closed, true);
+    },
+  },
+  {
+    name: 'claude SDK: stop_reason refusal rejects otherwise successful answer',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, SONNET, { message: { model: SONNET, stop_reason: 'refusal', content: [{ type: 'text', text: 'declined' }] } }), result({ result: 'declined' })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.result, 'declined');
+      assert.deepEqual(error.detail.assistantStopReasons, ['refusal']);
+    },
+  },
+  {
+    name: 'claude SDK: structured no-fallback refusal preserves category without raw provider event',
+    async run() {
+      const fake = fakeQuery([
+        { type: 'system', subtype: 'model_refusal_no_fallback', request_id: 'req_123456789', api_refusal_category: 'reasoning_extraction', content: 'RAW EVENT SHOULD NOT BE LOGGED' },
+        result({ is_error: true, result: 'Request declined.' }),
+      ]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(error.detail.refusalCategory, 'reasoning_extraction');
+      assert.equal(error.detail.requestId, 'req_123456789');
+      assert.equal(error.result, 'Request declined.');
+      assert.equal(JSON.stringify(error).includes('RAW EVENT'), false);
+    },
+  },
+  {
+    name: 'claude SDK: a main model fallback event stops the run before its answer is accepted',
+    async run() {
+      let continued = false;
+      const fake = fakeQuery(async function* produce() {
+        yield { type: 'system', subtype: 'model_refusal_fallback', scope: 'session', api_refusal_category: 'reasoning_extraction' };
+        continued = true;
+        yield assistant(); yield result();
+      });
+      await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+      assert.equal(continued, false);
+      assert.equal(fake.calls[0].closed, true);
+    },
+  },
+  {
+    name: 'claude SDK: an assistant max_tokens stop raises CLAUDE_OUTPUT_TRUNCATED and returns no answer',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, SONNET, { message: { model: SONNET, stop_reason: 'max_tokens', content: [{ type: 'text', text: 'partial' }] } }), result({ result: 'partial' })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_OUTPUT_TRUNCATED');
+      assert.deepEqual(error.detail.assistantStopReasons, ['max_tokens']);
+      assert.match(error.message, /output limit/);
+    },
+  },
+  {
+    name: 'claude SDK: a terminal max_tokens stop_reason raises CLAUDE_OUTPUT_TRUNCATED',
+    async run() {
+      const fake = fakeQuery([assistant(), result({ stop_reason: 'max_tokens', result: 'partial' })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_OUTPUT_TRUNCATED');
+      assert.equal(error.detail.stopReason, 'max_tokens');
+    },
+  },
+  {
+    name: 'claude SDK: terminal refusal stop_reason is fatal',
+    async run() {
+      const fake = fakeQuery([assistant(), result({ stop_reason: 'refusal' })]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_SAFEGUARD_BLOCKED');
+    },
+  },
+  {
+    name: 'claude SDK: modelUsage cannot verify a different main answering model',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, OPUS), result({ modelUsage: { [SONNET]: {}, [OPUS]: {} } })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_WRONG_MODEL');
+      assert.deepEqual(error.detail.models, [OPUS]);
+      assert.deepEqual(error.detail.usageModels, [SONNET, OPUS]);
+      assert.equal(error.result, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: requested-family thinking without a verified main text answer cannot prove the answering model',
+    async run() {
+      const fake = fakeQuery([assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]), result()]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WRONG_MODEL');
+    },
+  },
+  {
+    name: 'claude SDK: correct subagent modelUsage cannot verify missing main assistant frames',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, SONNET, { parent_tool_use_id: 'agent-tool' }), result()]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WRONG_MODEL');
+    },
+  },
+  {
+    name: 'claude SDK: a missing model on main text fails even if earlier thinking has a matching model',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]),
+        { type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text: 'answer' }] } }, result(),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WRONG_MODEL');
+    },
+  },
+  {
+    name: 'claude SDK: errors on assistant frames reject successful terminal results',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, '<synthetic>', { error: 'authentication_failed' }), result()]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_NOT_SIGNED_IN');
+      assert.deepEqual(error.detail.assistantErrors, ['authentication_failed']);
+    },
+  },
+  {
+    name: 'claude SDK: structured terminal errors fail even when subtype says success',
+    async run() {
+      const fake = fakeQuery([assistant(), result({ errors: ['rate_limit'] })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_USAGE_LIMIT');
+      assert.deepEqual(error.detail.errors, ['rate_limit']);
+    },
+  },
+  {
+    name: 'claude SDK: a rejected rate limit names its window and the account that ran the stage',
+    async run() {
+      const fake = fakeQuery([
+        { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Date.now() + 60_000, rateLimitType: 'five_hour' } },
+        assistant(),
+        result({ subtype: 'error_during_execution', is_error: true, result: 'Claude usage limit reached', api_error_status: 429 }),
+      ]);
+      const accountEnv = env => ({ env: { ...env, CLAUDE_CONFIG_DIR: '/accounts/acct-1' }, accountId: 'acct-1' });
+      const error = await rejected(stage(fake.queryImpl, { accountEnv }), 'CLAUDE_USAGE_LIMIT');
+      assert.equal(error.detail.limitType, 'five_hour');
+      assert.equal(error.detail.accountId, 'acct-1');
+      assert.equal(fake.calls[0].options.env.CLAUDE_CONFIG_DIR, '/accounts/acct-1', 'the call runs under the active account');
+      assert.equal(fake.calls[0].options.env.PATH, '/bin', 'the rest of the env is untouched');
+    },
+  },
+  {
+    name: 'claude SDK: a thrown startup failure is classified and query resources close',
+    async run() {
+      const fake = fakeQuery(async function* produce() { yield await Promise.reject(new Error('not logged in')); });
+      await rejected(stage(fake.queryImpl), 'CLAUDE_NOT_SIGNED_IN');
+      assert.equal(fake.calls[0].closed, true);
+      const missing = () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
+      await rejected(stage(missing), 'CLAUDE_CLI_MISSING');
+    },
+  },
+  {
+    name: 'claude SDK: absent terminal result and empty successful answers fail without using partial text',
+    async run() {
+      for (const messages of [[assistant()], [assistant(), result({ result: '  ' })]]) {
+        const error = await rejected(stage(fakeQuery(messages).queryImpl), 'CLAUDE_ERROR');
+        assert.notEqual(error.result, 'answer');
+      }
+    },
+  },
+  {
+    name: 'claude SDK: cancellation before launch never calls the SDK',
+    async run() {
+      const controller = new AbortController();
+      controller.abort();
+      const fake = fakeQuery();
+      await rejected(stage(fake.queryImpl, { signal: controller.signal }), 'CLAUDE_CANCELLED');
+      assert.equal(fake.calls.length, 0);
+    },
+  },
+  {
+    name: 'claude SDK: cancellation settles and closes a query whose next() never resolves',
+    async run() {
+      const controller = new AbortController();
+      const entered = deferred();
+      const fake = fakeQuery(async function* produce() { entered.resolve(); yield await new Promise(() => {}); });
+      const pending = stage(fake.queryImpl, { signal: controller.signal });
+      const observed = rejected(pending, 'CLAUDE_CANCELLED');
+      await entered.promise;
+      controller.abort();
+      await observed;
+      assert.equal(fake.calls[0].closed, true);
+      assert.equal(fake.calls[0].options.abortController.signal.aborted, true);
+    },
+  },
+  {
+    name: 'claude SDK: timeout settles hanging queries and clears its timer',
+    async run() {
+      const entered = deferred();
+      const fake = fakeQuery(async function* produce() { entered.resolve(); yield await new Promise(() => {}); });
+      const timers = [];
+      const cleared = [];
+      const pending = stage(fake.queryImpl, {
+        setTimeoutImpl: (callback, ms) => { const timer = { callback, ms, unref() {} }; timers.push(timer); return timer; },
+        clearTimeoutImpl: timer => { cleared.push(timer); },
+      });
+      const observed = rejected(pending, 'CLAUDE_TIMEOUT');
+      await entered.promise;
+      assert.equal(timers[0].ms, CLAUDE_STAGE_TIMEOUT_MS);
+      timers[0].callback();
+      await observed;
+      assert.deepEqual(cleared, [timers[0]]);
+      assert.equal(fake.calls[0].closed, true);
+      assert.equal(fake.calls[0].options.abortController.signal.aborted, true);
+    },
+  },
+  {
+    name: 'claude SDK: cancellation during a summary write prevents later answer consumption',
+    async run() {
+      const controller = new AbortController();
+      const entered = deferred();
+      const release = deferred();
+      let continued = false;
+      const fake = fakeQuery(async function* produce() {
+        yield assistant([{ type: 'thinking', thinking: SAFE_SUMMARY }]);
+        continued = true;
+        yield assistant(); yield result();
+      });
+      const pending = stage(fake.queryImpl, { signal: controller.signal, onThinkingSummary: async () => { entered.resolve(); await release.promise; } });
+      const observed = rejected(pending, 'CLAUDE_CANCELLED');
+      await entered.promise;
+      controller.abort();
+      await observed;
+      release.resolve();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(continued, false);
+      assert.equal(fake.calls[0].closed, true);
+    },
+  },
+  {
+    name: 'claude SDK: the output cap measures UTF-8 bytes before any oversized summary is logged',
+    async run() {
+      let logged = false;
+      const fake = fakeQuery([assistant([{ type: 'thinking', thinking: 'é'.repeat(8 * 1024 * 1024 + 1) }])]);
+      const error = await rejected(stage(fake.queryImpl, { onThinkingSummary: async () => { logged = true; } }), 'CLAUDE_ERROR');
+      assert.match(error.message, /16 MB/u);
+      assert.equal(logged, false);
+      assert.equal(fake.calls[0].closed, true);
+      assert.equal('result' in error, false);
+    },
+  },
+  {
+    name: 'claude SDK: accumulated assistant plus terminal output cannot exceed the cap',
+    async run() {
+      const large = 'x'.repeat(9 * 1024 * 1024);
+      const fake = fakeQuery([assistant([{ type: 'text', text: large }]), result({ result: large })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_ERROR');
+      assert.match(error.message, /16 MB/u);
+      assert.equal('result' in error, false);
+    },
+  },
+  {
+    name: 'claude SDK: requests partial messages and reports activity once per yielded message',
+    async run() {
+      const streamEvent = { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'IGNORED' } } };
+      const fake = fakeQuery([streamEvent, streamEvent, assistant(), streamEvent, result()]);
+      let activity = 0;
+      const value = await stage(fake.queryImpl, { onActivity: () => { activity += 1; } });
+      assert.equal(fake.calls[0].options.includePartialMessages, true);
+      assert.equal(activity, 5);
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+    },
+  },
+  {
+    name: 'claude SDK: a throwing onActivity does not change the stage result',
+    async run() {
+      const streamEvent = { type: 'stream_event', event: { type: 'message_start' } };
+      const fake = fakeQuery([streamEvent, assistant(), result()]);
+      let calls = 0;
+      const value = await stage(fake.queryImpl, { onActivity: () => { calls += 1; throw new Error('ui gone'); } });
+      assert.equal(calls, 3);
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+    },
+  },
+  {
+    name: 'claude SDK: large stream_event text neither changes the answer nor counts toward the cap',
+    async run() {
+      const big = 'y'.repeat(9 * 1024 * 1024);
+      const streamEvent = { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: big } } };
+      const fake = fakeQuery([streamEvent, streamEvent, assistant(), result()]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: research tools are offered and allowed without Workflow by default and with it only on an explicit opt-in',
+    async run() {
+      const fake = fakeQuery();
+      // allowBuiltInWebTools is the measurement script's built-in-arm opt-in.
+      await stage(fake.queryImpl, { tools: ['WebSearch', 'WebFetch'], maxTurns: 16, allowBuiltInWebTools: true });
+      const { options } = fake.calls[0];
+      assert.deepEqual(options.tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(options.allowedTools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(options.settings, {});
+      assert.equal(options.maxTurns, 16);
+      const on = fakeQuery();
+      await stage(on.queryImpl, { ultracode: true, tools: ['WebSearch', 'WebFetch'], maxTurns: 16, allowBuiltInWebTools: true });
+      const onOptions = on.calls[0].options;
+      assert.deepEqual(onOptions.tools, ['WebSearch', 'WebFetch', 'Workflow']);
+      assert.deepEqual(onOptions.allowedTools, ['WebSearch', 'WebFetch', 'Workflow']);
+      assert.deepEqual(onOptions.settings, { ultracode: true });
+      assert.equal(onOptions.maxTurns, 16);
+    },
+  },
+  {
+    name: 'claude SDK: WebSearch and WebFetch are refused before the query starts, as a string or an array, unless allowBuiltInWebTools is true',
+    async run() {
+      for (const tools of ['WebSearch', 'WebFetch', 'mcp__parallel__web_search,WebFetch', ['WebFetch', 'mcp__parallel__web_fetch'], [' websearch ']]) {
+        const fake = fakeQuery();
+        const error = await rejected(stage(fake.queryImpl, { tools }), 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+        assert.equal(error.message, "Claude's built-in web search is disabled in this app; web research uses Parallel Search.");
+        assert.equal(fake.calls.length, 0, 'refused before the SDK query starts');
+      }
+      // Parallel Search tool names and an empty list are unaffected.
+      const parallel = fakeQuery();
+      await stage(parallel.queryImpl, { tools: ['mcp__parallel__web_search', 'mcp__parallel__web_fetch'] });
+      assert.deepEqual(parallel.calls[0].options.tools, [], 'MCP tools are not built-in tools');
+      assert.deepEqual(parallel.calls[0].options.allowedTools, ['mcp__parallel__web_search', 'mcp__parallel__web_fetch']);
+      const empty = fakeQuery();
+      await stage(empty.queryImpl, { tools: [] });
+      assert.deepEqual(empty.calls[0].options.tools, []);
+      // The measurement scripts' built-in arm opts in explicitly.
+      const allowed = fakeQuery();
+      const value = await stage(allowed.queryImpl, { tools: ['WebSearch', 'WebFetch'], allowBuiltInWebTools: true });
+      assert.equal(value.text, 'answer');
+      assert.deepEqual(allowed.calls[0].options.tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(allowed.calls[0].options.allowedTools, ['WebSearch', 'WebFetch']);
+      // An explicit false is still refused, before the query.
+      const refused = fakeQuery();
+      await rejected(stage(refused.queryImpl, { tools: ['WebFetch'], allowBuiltInWebTools: false }), 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+      assert.equal(refused.calls.length, 0);
+    },
+  },
+  {
+    name: 'claude SDK: the stub result after a workflow launch is skipped and the final answer is used',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'w1', task_type: 'local_workflow', description: 'd' }] },
+        { type: 'system', subtype: 'task_started', task_id: 'w1', tool_use_id: 'toolu_1', task_type: 'local_workflow' },
+        assistant([{ type: 'text', text: 'The workflow is running in the background.' }]),
+        result({ result: 'The workflow is running in the background.' }),
+        { type: 'system', subtype: 'task_progress', task_id: 'w1' },
+        { type: 'system', subtype: 'task_updated', task_id: 'w1', patch: { status: 'completed' } },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer', duration_ms: 99 }),
+      ]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'final answer');
+      assert.equal(value.durationMs, 99);
+      assert.equal(value.model, SONNET);
+    },
+  },
+  {
+    name: 'claude SDK: a stub that arrives after the workflow already finished is still not the answer',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'stub' }]),
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'stub' }),
+        result({ result: 'final answer' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'final answer');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on the stub with a task still running is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        assistant([{ type: 'text', text: 'The workflow is running in the background.' }]),
+        result({ result: 'The workflow is running in the background.' }),
+      ]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+      assert.equal(error.message, 'Claude\'s workflow did not finish, so its answer was not used.');
+      assert.equal(error.result, undefined, 'the stub is never handed back as an answer');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on the stub after the task finished is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'stub' }]),
+        result({ result: 'stub' }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude SDK: a timeout while a workflow runs is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const entered = deferred();
+      const fake = fakeQuery(async function* produce() {
+        yield assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]);
+        yield { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' };
+        yield result({ result: 'stub' });
+        entered.resolve();
+        yield await new Promise(() => {});
+      });
+      const timers = [];
+      const pending = stage(fake.queryImpl, {
+        setTimeoutImpl: callback => { const timer = { callback, unref() {} }; timers.push(timer); return timer; },
+        clearTimeoutImpl: () => {},
+      });
+      const observed = rejected(pending, 'CLAUDE_WORKFLOW_UNFINISHED');
+      await entered.promise;
+      timers[0].callback();
+      const error = await observed;
+      assert.match(error.message, /workflow did not finish within 45 minutes/u);
+    },
+  },
+  {
+    name: 'claude SDK: ambient background tasks and runs without tasks keep the single-result behaviour',
+    async run() {
+      const fake = fakeQuery([
+        { type: 'system', subtype: 'task_started', task_id: 'a1', ambient: true },
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a1', ambient: true, task_type: 'x', description: 'd' }] },
+        assistant(),
+        result(),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: a Workflow call that fails starts nothing, so the answer after it is used',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: '<tool_use_error>Invalid workflow script</tool_use_error>' }] } },
+        assistant([{ type: 'text', text: 'ANSWER' }]),
+        result({ result: 'ANSWER' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl, { maxTurns: 16 })).text, 'ANSWER');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on an interim error_max_turns with a task pending is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ subtype: 'error_max_turns', is_error: true, result: '' }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude SDK: error_max_turns while the workflow runs, then the final result, uses the final result',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ subtype: 'error_max_turns', is_error: true, result: '' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'final answer');
+    },
+  },
+  {
+    name: 'claude SDK: an error result after a workflow stub keeps its own classification',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ result: 'stub' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        result({ subtype: 'error_during_execution', is_error: true, result: 'Claude usage limit reached', api_error_status: 429 }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_USAGE_LIMIT');
+    },
+  },
+  {
+    name: 'claude SDK: workflow agent frames do not count toward the answering-model check',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ result: 'stub' }),
+        assistant([{ type: 'text', text: 'agent work' }], 'claude-haiku-4-5', { parent_tool_use_id: 'toolu_1' }),
+        assistant([{ type: 'text', text: 'agent work' }], 'claude-haiku-4-5', { agent_id: 'a-1' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer', modelUsage: { [SONNET]: {}, 'claude-haiku-4-5': {} } }),
+      ]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'final answer');
+      assert.equal(value.model, SONNET);
+    },
+  },
+  {
+    name: 'claude SDK: onToolResult is told each tool result by tool name, error flag and clipped text',
+    async run() {
+      const seen = [];
+      const long = 'x'.repeat(3000);
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__parallel__web_search', input: { search_queries: ['q'] } }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', is_error: false, content: [{ type: 'text', text: 'two results' }, { type: 'text', text: long }] },
+        ] } },
+        assistant([{ type: 'tool_use', id: 'toolu_2', name: 'mcp__parallel__web_fetch', input: { urls: ['https://x.test/1'] } }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_2', is_error: true, content: 'Rate limit exceeded' },
+        ] } },
+        assistant([{ type: 'text', text: 'answer' }]),
+        result(),
+      ]);
+      const value = await stage(fake.queryImpl, { onToolResult: ({ toolName, isError, text }) => { seen.push({ toolName, isError, text }); } });
+      assert.equal(value.text, 'answer');
+      assert.deepEqual(seen.map(item => [item.toolName, item.isError]), [['mcp__parallel__web_search', false], ['mcp__parallel__web_fetch', true]]);
+      assert(seen[0].text.startsWith('two results'), 'the text parts are joined');
+      assert.equal(seen[0].text.length, 2000, 'the text is clipped');
+      assert.equal(seen[1].text, 'Rate limit exceeded');
+    },
+  },
+  {
+    name: 'claude SDK: a throwing onToolResult interrupts the stage with exactly that error',
+    async run() {
+      const limit = Object.assign(new Error('Parallel Search is out of usage. Research is paused.'), { code: 'PARALLEL_SEARCH_EXHAUSTED' });
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__parallel__web_search', input: {} }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: [{ type: 'text', text: 'quota used up' }] },
+        ] } },
+        result(),
+      ]);
+      try {
+        await stage(fake.queryImpl, { onToolResult: () => { throw limit; } });
+        assert.fail('the stage must reject');
+      } catch (error) {
+        assert.equal(error, limit, 'the exact error a web task turns into a pause');
+      }
+      assert.equal(fake.calls[0].closed, true, 'the interrupted stage is closed');
+    },
+  },
+];
