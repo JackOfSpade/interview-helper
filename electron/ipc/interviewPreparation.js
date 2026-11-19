@@ -784,9 +784,18 @@ async function defaultTypedReadPage(typed) {
   });
 }
 const MAX_TYPED_JOB_CHARS = 2000;
+// runId is optional: the window names each run so its live activity and its
+// Cancel reach that run alone, never a later one for the same session.
+const TYPED_JOB_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const typedJobRunIdValid = value => typeof value === 'string' && TYPED_JOB_RUN_ID.test(value);
 export function validateTypedJobArgs(args) {
-  strictKeys(args, ['nodeId', 'text'], 'Interview preparation requires a valid request.');
-  if (!isInterviewHelperNodeId(args.nodeId) || typeof args.text !== 'string' || !args.text.trim() || args.text.length > MAX_TYPED_JOB_CHARS) throw new TypeError('Interview preparation requires a valid request.');
+  strictKeys(args, plainObject(args) && Object.hasOwn(args, 'runId') ? ['nodeId', 'text', 'runId'] : ['nodeId', 'text'], 'Interview preparation requires a valid request.');
+  if (!isInterviewHelperNodeId(args.nodeId) || typeof args.text !== 'string' || !args.text.trim() || args.text.length > MAX_TYPED_JOB_CHARS
+    || (Object.hasOwn(args, 'runId') && !typedJobRunIdValid(args.runId))) throw new TypeError('Interview preparation requires a valid request.');
+}
+export function validateTypedJobCancelArgs(args) {
+  strictKeys(args, ['nodeId', 'runId'], 'Interview preparation requires a valid request.');
+  if (!isInterviewHelperNodeId(args.nodeId) || !typedJobRunIdValid(args.runId)) throw new TypeError('Interview preparation requires a valid request.');
 }
 const QA_SCOPES = ['foundation', 'company'];
 const QA_CARD_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/u;
@@ -1484,35 +1493,59 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       return { bundle, jobUrl };
     } catch (error) { if (signal?.aborted) throw error; throw new Error('The selected application could not be read safely.'); }
   }, { validateArgs: validateFolderSelectArgs });
+  const typedJobRuns = new Map();
   // A typed job (a link, or a company and role): resolved by AI in this process
   // with the Interview Helper's Claude transport, then stored as a private
   // artifact of the same shape as a captured bundle.
-  registerHandler('resolve-interview-typed-job', async (_event, args, signal) => {
-    validateTypedJobArgs(args); throwIfAborted(signal);
-    const userDataPath = appInstance.getPath('userData');
-    const typed = typedJob || await import('./interviewTypedJob.js');
-    const typedActivityKey = `interview-typed:${args.nodeId}`;
-    const raw = aiTransport.withActivity?.(typedActivityKey, args.nodeId) || aiTransport;
-    // The resolver passes one object; the transport takes (prompt, options).
-    // Stages that return JSON go through callText, research returns prose.
-    const callText = ({ prompt, claudeStage, task, schema, signal: callSignal } = {}) => {
-      const options = { signal: callSignal || signal, task: task || claudeStage, claudeStage, ...(schema ? { responseSchema: schema } : {}) };
-      return claudeStage === 'typed-job-research' || (claudeStage === 'typed-job-listing' && !schema) ? raw.callRaw(prompt, options) : raw.callText(prompt, options);
-    };
-    const readPage = readTypedPage || await defaultTypedReadPage(typed);
+  registerHandler('resolve-interview-typed-job', async (_event, args, outer) => {
+    validateTypedJobArgs(args); throwIfAborted(outer);
+    const typedRunKey = `${args.nodeId}:${args.runId || ''}`;
+    const typedActivityKey = `interview-typed:${args.runId || args.nodeId}`;
+    // The person's own Cancel. It is separate from the handler's signal, which
+    // ends every task of this session (a preparation included).
+    const cancel = new AbortController();
+    typedJobRuns.get(typedRunKey)?.abort();
+    typedJobRuns.set(typedRunKey, cancel);
+    const signal = outer ? AbortSignal.any([outer, cancel.signal]) : cancel.signal;
+    const onStatus = message => standaloneClaudeActivity.stage(typedActivityKey, message, { nodeId: args.nodeId });
     try {
-      const result = await typed.resolveTypedJob({ text: args.text, callText, readPage, signal, onStatus: () => {}, logger: { warn: logWarning } });
+      const userDataPath = appInstance.getPath('userData');
+      const typed = typedJob || await import('./interviewTypedJob.js');
+      const raw = aiTransport.withActivity?.(typedActivityKey, args.nodeId, { stepNotes: false }) || aiTransport;
+      // The resolver passes one object; the transport takes (prompt, options).
+      // Stages that return JSON go through callText, research returns prose.
+      const callText = ({ prompt, claudeStage, task, schema, signal: callSignal } = {}) => {
+        const options = { signal: callSignal || signal, task: task || claudeStage, claudeStage, ...(schema ? { responseSchema: schema } : {}) };
+        return claudeStage === 'typed-job-research' || (claudeStage === 'typed-job-listing' && !schema) ? raw.callRaw(prompt, options) : raw.callText(prompt, options);
+      };
+      const readPage = readTypedPage || await defaultTypedReadPage(typed);
+      const result = await typed.resolveTypedJob({ text: args.text, callText, readPage, signal, onStatus, logger: { warn: logWarning } });
       throwIfAborted(signal);
+      onStatus('Saving the job');
       const { bundle, jobUrl } = await publishTypedBundle({ result, userDataPath, signal });
+      // Cancelled as the last step finished: the job was not asked for any more.
+      if (cancel.signal.aborted && !outer?.aborted) return { cancelled: true };
       return { bundle, jobUrl, kind: result.kind, notes: Array.isArray(result.notes) ? result.notes.filter(note => typeof note === 'string').slice(0, 8) : [] };
     } catch (error) {
-      if (signal?.aborted) throw error;
+      if (outer?.aborted) throw error;
+      // Cancel is an answer, not a failure: nothing is stored and nothing is reported.
+      if (cancel.signal.aborted) return { cancelled: true };
       // The resolver's own failures carry a message for the person; anything
       // else is reported generically and never echoes internals.
       if (typeof error?.code === 'string' && error.code.startsWith('typed-job-') && typeof error.userMessage === 'string' && error.userMessage) throw new Error(error.userMessage);
       throw new Error('That job could not be set up. Check the link, or the company and role, and try again.');
-    } finally { standaloneClaudeActivity.remove(typedActivityKey); }
+    } finally {
+      if (typedJobRuns.get(typedRunKey) === cancel) typedJobRuns.delete(typedRunKey);
+      standaloneClaudeActivity.remove(typedActivityKey);
+    }
   }, { validateArgs: validateTypedJobArgs });
+  // Cancel one typed-job run. A run that already ended is simply not there.
+  registerHandler('cancel-interview-typed-job', async (_event, args) => {
+    validateTypedJobCancelArgs(args);
+    const run = typedJobRuns.get(`${args.nodeId}:${args.runId}`);
+    run?.abort();
+    return { cancelled: Boolean(run) };
+  }, { validateArgs: validateTypedJobCancelArgs });
   registerHandler('load-interview-preparation-bundle', async (_event, args) => {
     validateInterviewPreparationLoadArgs(args); const bundle = await loadBundle({ artifactId: args.artifactId, userDataPath: appInstance.getPath('userData') });
     return { bundle };

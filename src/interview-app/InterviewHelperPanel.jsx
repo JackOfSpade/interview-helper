@@ -1,6 +1,7 @@
 import { claudeInterviewPauseKey } from '../utils/claudePauseFlow';
 import { usePublishJobRunStatus } from '../hooks/usePublishJobRunStatus';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
 import { BriefcaseBusiness, Rocket } from 'lucide-react';
 
 import { InterviewApplicationPicker } from '../components/InterviewApplicationPicker';
@@ -133,6 +134,9 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
   const [launchError, setLaunchError] = useState(null);
   const [typedText, setTypedText] = useState(() => (typeof data.interviewHelperTypedJob === 'string' ? data.interviewHelperTypedJob.slice(0, TYPED_JOB_MAX) : ''));
   const [typedBusy, setTypedBusy] = useState(false);
+  // The run in flight: names its live activity and is what Cancel ends.
+  const [typedRunId, setTypedRunId] = useState(null);
+  const typedRunRef = useRef(null);
   const [typedError, setTypedError] = useState(null);
   const [verifiedPreparation, setVerifiedPreparation] = useState({ key: null, status: 'idle', brief: null, recordId: null });
   const [manualAiBusy, setManualAiBusy] = useState(false);
@@ -398,10 +402,14 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     const text = typedText.trim();
     if (data.locked || typedBusy || !text || text.length > TYPED_JOB_MAX || typeof window.interviewAppAPI?.resolveInterviewTypedJob !== 'function') return false;
     const token = ++bundleOperationRef.current;
+    const runId = `typed-${generateId()}`.replace(/[^A-Za-z0-9_-]/gu, '-').slice(0, 64);
+    typedRunRef.current = runId; setTypedRunId(runId);
     setTypedBusy(true); setTypedError(null); setBundlePickerError(null);
     try {
-      const reply = await window.interviewAppAPI.resolveInterviewTypedJob({ nodeId: id, text });
+      const reply = await window.interviewAppAPI.resolveInterviewTypedJob({ nodeId: id, text, runId });
       if (token !== bundleOperationRef.current) return false;
+      // Cancelled by the person: back to the box as it was, with no error.
+      if (reply?.cancelled && reply?.success !== false) return false;
       if (reply?.success === false || reply?.cancelled) throw new Error(reply?.error || reply?.userMessage || 'The job could not be found. Try again.');
       const kind = typedJobKind(reply?.kind);
       if (!kind) throw new Error('The job could not be verified. Try again.');
@@ -410,9 +418,19 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
       if (token === bundleOperationRef.current) setTypedError(boundedText(failure?.userMessage, 500) || boundedText(failure?.message, 500) || 'The job could not be found. Try again.');
       return false;
     } finally {
+      if (typedRunRef.current === runId) { typedRunRef.current = null; setTypedRunId(null); }
       if (token === bundleOperationRef.current) setTypedBusy(false);
     }
   }, [adoptBundleReply, data.locked, id, typedBusy, typedText]);
+  // End the run in flight. The box unlocks at once; a reply that still arrives is stale and ignored.
+  const cancelTypedJob = useCallback(() => {
+    const runId = typedRunRef.current;
+    if (!runId) return;
+    typedRunRef.current = null; setTypedRunId(null);
+    bundleOperationRef.current += 1;
+    setTypedBusy(false); setTypedError(null);
+    try { Promise.resolve(window.interviewAppAPI?.cancelInterviewTypedJob?.({ nodeId: id, runId })).catch(() => {}); } catch { /* the reply is ignored either way */ }
+  }, [id]);
   // Reached through the dropdown's "None" option; nothing on disk is touched.
   const clearBundle = useCallback(async () => {
     if (data.locked || !data.interviewHelperApplicationBundle) return false;
@@ -586,7 +604,11 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
   // shows that it is preparing. No save step: Resume follows the hold.
   usePublishJobRunStatus(id, locallyPreparing ? { label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: claudeInterviewPauseKey(data.interviewHelperPreparationRunId), pauseKeys: [claudeInterviewPauseKey(data.interviewHelperPreparationRunId)], pauseWithoutSave: true } : null);
   usePublishJobRunStatus(`${id}:convert`, careerConverting ? { label: 'Interview Helper', headline: 'Converting career files', lines: ['Converting each file to text.'] } : null);
-  usePublishJobRunStatus(`${id}:typed`, typedBusy ? { label: 'Interview Helper', headline: 'Finding the job', lines: ['Reading the link, or researching the company and role.'] } : null);
+  // The side panel draws this run's live stages from the activity feed; the box shows the current one.
+  const typedActivityKey = typedRunId ? `interview-typed:${typedRunId}` : null;
+  const claudeActivity = useSyncExternalStore(subscribeClaudeTaskActivity, getClaudeTaskActivity, getClaudeTaskActivity);
+  const typedStage = (typedActivityKey && claudeActivity.tasks?.[typedActivityKey]?.stage) || 'Starting';
+  usePublishJobRunStatus(`${id}:typed`, typedBusy ? { label: 'Interview Helper · Finding the job', headline: 'Finding the job', claudeRequestId: typedActivityKey, onCancel: typedActivityKey ? cancelTypedJob : null } : null);
   const typedKind = persistedBundle ? typedJobKind(data.interviewHelperTypedJobKind) : null;
   const shownTypedNotes = typedKind ? typedJobNotes(data.interviewHelperTypedJobNotes) : [];
   return <div className="relative text-white lg:flex lg:h-full lg:min-h-0" data-testid="interview-helper-panel">
@@ -604,7 +626,8 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
           <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30 disabled:opacity-50" rows={3} maxLength={TYPED_JOB_MAX} value={typedText} disabled={data.locked || typedBusy} placeholder="https://… or: Product Manager at Acme, Toronto" aria-label="Job link, or company and role"
             onChange={event => { const next = event.target.value.slice(0, TYPED_JOB_MAX); setTypedText(next); setTypedError(null); persist({ interviewHelperTypedJob: next }); }} /></label>
         <button type="button" className="rounded-md bg-violet-500/20 px-2 py-1 text-xs text-violet-100 disabled:opacity-50" onClick={useTypedJob} disabled={data.locked || typedBusy || !typedText.trim() || !window.interviewAppAPI?.resolveInterviewTypedJob}>{typedBusy ? 'Finding the job…' : 'Use this job'}</button>
-        {typedBusy && <p role="status" className="text-[11px] text-white/60">Reading the link, or researching the company and role. This can take a minute.</p>}
+        {typedBusy && typedRunId && <button type="button" className="ml-2 rounded-md border border-white/15 px-2 py-1 text-xs text-white/70 hover:bg-white/10" onClick={cancelTypedJob}>Cancel</button>}
+        {typedBusy && <p role="status" className="text-[11px] text-white/60">{typedStage}… This can take a minute.</p>}
         {typedError && <p role="alert" className="text-[11px] text-amber-100">{typedError}</p>}
         {typedKind === 'generated' && <p role="status" data-testid="typed-job-generated" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">Generated listing: no open posting was found, so this job description was written by AI as a realistic stand-in. It is not the employer's text.</p>}
         {typedKind === 'found' && <p role="status" className="text-[11px] text-emerald-200">Found a live posting for this role.</p>}

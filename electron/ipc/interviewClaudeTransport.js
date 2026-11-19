@@ -94,6 +94,13 @@ function rejectionPrompt(error) {
   return `YOUR PREVIOUS REPLY WAS REJECTED BY THE APP. The app's checks returned the text below verbatim. Reply again with the complete corrected answer in the same format as before; change only what the text names.\n${message}`;
 }
 
+// A caller that names its own stages (scope.stepNotes false) already said what
+// this call is for, so only a repeated attempt is worth a step of its own.
+function noteStep(scope, task, attempt) {
+  if (scope.stepNotes === false) { if (attempt > 0) standaloneClaudeActivity.note(scope.key, 'Asking again for a corrected reply'); return; }
+  standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+}
+
 function stepLabel(task) {
   const words = String(task || 'Claude call').replace(/^interview-/u, '').replace(/-/gu, ' ');
   return `${words[0].toUpperCase()}${words.slice(1)}`;
@@ -175,7 +182,7 @@ export function createInterviewClaudeTransport({
       if (mode === 'offload') {
         if (scope) {
           standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: route.route, effort: route.reasoning, countRound: false });
-          standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+          noteStep(scope, task, attempt);
         }
         // No Claude fallback: a DeepSeek failure ends this call with its own code.
         try {
@@ -195,7 +202,7 @@ export function createInterviewClaudeTransport({
           await waitForClaudeUsage(signal);
           await waitForClaudeRelease(scope.key, signal);
           standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: profile.model, effort: profile.effort, countRound: false });
-          standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+          noteStep(scope, task, attempt);
         }
         const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
         let usedBuiltIn = false;
@@ -321,9 +328,10 @@ export function createInterviewClaudeTransport({
     callText: (prompt, opts) => call(prompt, opts, { json: true }),
     callRaw: (prompt, opts) => call(prompt, opts, { json: !!opts?.responseSchema }),
     // The same calls, reporting their live steps under one panel's key.
-    withActivity: (key, nodeId = null) => ({
-      callText: (prompt, opts) => call(prompt, opts, { json: true, scope: { key, nodeId } }),
-      callRaw: (prompt, opts) => call(prompt, opts, { json: !!opts?.responseSchema, scope: { key, nodeId } }),
+    // stepNotes false: the caller reports its own stages (standaloneClaudeActivity.stage).
+    withActivity: (key, nodeId = null, { stepNotes = true } = {}) => ({
+      callText: (prompt, opts) => call(prompt, opts, { json: true, scope: { key, nodeId, stepNotes } }),
+      callRaw: (prompt, opts) => call(prompt, opts, { json: !!opts?.responseSchema, scope: { key, nodeId, stepNotes } }),
     }),
   });
 }

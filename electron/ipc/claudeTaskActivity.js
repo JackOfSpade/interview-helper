@@ -123,7 +123,7 @@ export function createClaudeTaskActivity({ now = () => Date.now(), onChange = ()
     const task = {
       state: 'queued', phase: 'starting', task: null, model: null, effort: null,
       firstStartedAt: at, phaseStartedAt: at, lastActivityAt: null, round: 0, rejections: 0,
-      toolTurns: 0, maxTurns: null, target: null, tool: null,
+      toolTurns: 0, maxTurns: null, target: null, tool: null, stage: null,
       apiRetry: null, failure: null, steps: [], stepSeq: 0, nodeId: null, turnIds: new Set(), ...fields,
     };
     tasks.set(requestId, task);
@@ -245,6 +245,19 @@ export function createClaudeTaskActivity({ now = () => Date.now(), onChange = ()
       const task = tasks.get(requestId);
       if (!task) return;
       addStep(task, label);
+      onChange();
+    },
+    // The stage of a multi-call job, named by its caller. It heads the card
+    // while the calls and host work under it report as usual, and it may arrive
+    // before the first call begins.
+    stage(requestId, label, { nodeId = null } = {}) {
+      const text = clipText(label, LABEL_LIMIT);
+      if (!text) return;
+      const task = tasks.get(requestId) || create(requestId, { nodeId });
+      if (task.stage === text) return;
+      task.stage = text;
+      task.phaseStartedAt = now();
+      addStep(task, text);
       onChange();
     },
     remove(requestId) {

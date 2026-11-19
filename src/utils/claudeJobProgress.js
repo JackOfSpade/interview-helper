@@ -151,7 +151,11 @@ function deriveTaskInner({ activity, requestId }) {
   if (held && (task.state === 'queued' || task.state === 'retrying')) {
     return { ...shared, kind: 'claude-queued', tone: 'attention', headline: CLAUDE_PAUSED_HEADLINE, detail: CLAUDE_PAUSED_DETAIL, retryAt: null };
   }
+  // A job that names its own stages is headed by the stage; what Claude is
+  // doing inside it is the detail. Pauses and retries keep their own headline.
+  const stage = typeof task.stage === 'string' && task.stage ? task.stage : '';
   if (task.state === 'queued') {
+    if (stage && !blocked) return { ...shared, kind: 'claude-checking', headline: stage };
     return { ...shared, kind: 'claude-queued', tone: blocked ? 'attention' : 'working',
       headline: blocked ? pausedHeadline : 'Waiting for an available Claude slot' };
   }
@@ -161,9 +165,12 @@ function deriveTaskInner({ activity, requestId }) {
       detail: failure.label ? `${failure.label}.` : '', retryAt: time(failure.retryAt) };
   }
   if (task.state === 'checking') {
+    // Between two calls of a staged job the app is doing that stage's own work.
+    if (stage) return { ...shared, kind: 'claude-checking', headline: stage };
     return { ...shared, kind: 'claude-checking', headline: "Checking Claude's answer", detail: 'The app is validating this response before continuing.' };
   }
-  const [headline, detail] = taskRunningCopy(task);
+  const [liveHeadline, liveDetail] = taskRunningCopy(task);
+  const [headline, detail] = stage ? [stage, liveDetail ? `${liveHeadline}: ${liveDetail}` : liveHeadline] : [liveHeadline, liveDetail];
   return { ...shared, kind: 'claude-writing', tone: task.phase === 'api-retry' ? 'attention' : 'working', headline, detail, lastHeard: time(task.lastActivityAt),
     summary: [held ? CLAUDE_PAUSING_NOTE : '', summary].filter(Boolean).join(' · ') };
 }

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import strict from 'node:assert/strict';
 import { assert } from './testHelpers.js';
 import {
   INTERVIEW_EXACT_COPY_SUFFIX,
@@ -17,10 +18,12 @@ import {
   publishInterviewPreparedBrief,
   publishTypedJobBundle,
   validateTypedJobArgs,
+  validateTypedJobCancelArgs,
   validateInterviewBriefAssessment,
   validateInterviewBriefRequestArgs,
   validateInterviewPreparationLoadArgs,
 } from '../../electron/ipc/interviewPreparation.js';
+import { standaloneClaudeActivity } from '../../electron/ipc/claudeTaskActivity.js';
 import { formatOriginalJobListingMarkdown } from '../../electron/ipc/applicationBundle.js';
 
 // No model is reachable from this suite: later pipeline steps degrade to their warnings.
@@ -142,6 +145,44 @@ export default [
         const controller = new AbortController(); const reason = new Error('cancelled by user');
         const aborted = await run(async () => { controller.abort(reason); throw reason; }, controller.signal);
         assert(aborted.error === reason, 'an abort is rethrown untouched');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview preparation: Cancel ends one typed job run, reports it as cancelled and leaves its live stages behind',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-typed-cancel-'));
+      try {
+        const handlers = new Map(); const scopes = []; const seen = [];
+        let entered; const inside = new Promise(resolve => { entered = resolve; });
+        const resolveTypedJob = async ({ signal, onStatus }) => {
+          onStatus('Researching Acme');
+          seen.push(standaloneClaudeActivity.view('interview-typed:run-1')?.stage);
+          entered();
+          await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })), { once: true }));
+        };
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler),
+          aiTransport: { ...syntheticAiTransport, withActivity: (...args) => { scopes.push(args); return syntheticAiTransport; } },
+          typedJob: { resolveTypedJob }, readTypedPage: async () => ({ ok: false }), logWarning: () => {} });
+        const cancel = args => handlers.get('cancel-interview-typed-job')({}, args);
+        const outer = new AbortController();
+        const running = handlers.get('resolve-interview-typed-job')({}, { nodeId: 'node-1', text: 'Engineer at Acme', runId: 'run-1' }, outer.signal);
+        await inside;
+        strict.deepEqual(seen, ['Researching Acme'], 'the resolver stage is on the live activity under the run id');
+        strict.deepEqual(scopes[0], ['interview-typed:run-1', 'node-1', { stepNotes: false }], 'the calls report under the same key without their own stage notes');
+        strict.deepEqual(await cancel({ nodeId: 'node-1', runId: 'other-run' }), { cancelled: false }, 'another run id ends nothing');
+        strict.deepEqual(await cancel({ nodeId: 'node-1', runId: 'run-1' }), { cancelled: true });
+        strict.deepEqual(await running, { cancelled: true }, 'a cancelled run is an answer, not an error');
+        assert(!outer.signal.aborted, 'Cancel does not end the other tasks of the session');
+        strict.equal(standaloneClaudeActivity.view('interview-typed:run-1'), null, 'the activity entry is removed');
+        strict.deepEqual(await cancel({ nodeId: 'node-1', runId: 'run-1' }), { cancelled: false }, 'a finished run is no longer there');
+        validateTypedJobArgs({ nodeId: 'node-1', text: 'a', runId: 'typed-0b1c-2d' });
+        for (const bad of [{ nodeId: 'node-1', text: 'a', runId: '' }, { nodeId: 'node-1', text: 'a', runId: '../x' }, { nodeId: 'node-1', text: 'a', runId: 'x'.repeat(65) }, { nodeId: 'node-1', text: 'a', runId: 5 }]) {
+          strict.throws(() => validateTypedJobArgs(bad), TypeError);
+        }
+        for (const bad of [null, { nodeId: 'node-1' }, { nodeId: 'node-1', runId: 'a b' }, { nodeId: '../x', runId: 'run-1' }, { nodeId: 'node-1', runId: 'run-1', extra: 1 }]) {
+          strict.throws(() => validateTypedJobCancelArgs(bad), TypeError);
+        }
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },

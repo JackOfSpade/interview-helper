@@ -275,12 +275,41 @@ const TYPED_JOB_TESTS = [
           await bundle.module.act(async () => { setTextarea(window, typedBox(window), 'Engineer at Acme'); await flush(); });
           await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
           assert(button(window, 'Finding the job…')?.disabled && typedBox(window).disabled, 'the button and box must be disabled while running');
-          assert(text(window).includes('researching the company and role'), 'a running line must show');
+          assert(text(window).includes('Starting… This can take a minute.'), 'a running line must show');
+          assert(button(window, 'Cancel'), 'a running job can be cancelled');
+          assert(/^typed-[A-Za-z0-9_-]{1,58}$/u.test(calls[0].runId), 'each run is named so its activity and Cancel are its own');
           await bundle.module.act(async () => { button(window, 'Finding the job…').click(); await flush(); });
           assert(calls.length === 1, 'a second click must not start another run');
           await bundle.module.act(async () => { gate.resolve(typedReply('link')); await flush(); });
           await settle(bundle, 6);
           assert(button(window, 'Use this job') && !button(window, 'Use this job').disabled, 'the box must unlock when done');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: Cancel ends the typed job run, unlocks the box at once and ignores a reply that still arrives',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const gate = deferred(); const calls = []; const cancels = []; const updates = [];
+        const root = await mountTyped(bundle, window, args => { calls.push(args); return gate.promise; }, { updates });
+        window.interviewAppAPI.cancelInterviewTypedJob = async args => { cancels.push(args); return { success: true, cancelled: true }; };
+        try {
+          await settle(bundle);
+          await bundle.module.act(async () => { setTextarea(window, typedBox(window), 'Engineer at Acme'); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Cancel').click(); await flush(); });
+          assert(cancels.length === 1 && cancels[0].nodeId === 'interview-helper' && cancels[0].runId === calls[0].runId, 'Cancel must name the run in flight');
+          assert(button(window, 'Use this job') && !button(window, 'Use this job').disabled && !typedBox(window).disabled && !button(window, 'Cancel'), 'the box must unlock at once');
+          assert(typedBox(window).value === 'Engineer at Acme' && !window.document.querySelector('[role="alert"]'), 'the typed text stays and no error shows');
+          await bundle.module.act(async () => { gate.resolve(typedReply('link')); await flush(); });
+          await settle(bundle, 6);
+          assert(!updates.some(item => item.interviewHelperApplicationBundle), 'a reply that arrives after Cancel must not be adopted');
+          // The main process answers a cancelled run with cancelled:true: also no error.
+          window.interviewAppAPI.resolveInterviewTypedJob = async () => ({ success: true, cancelled: true });
+          await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
+          await settle(bundle, 6);
+          assert(!window.document.querySelector('[role="alert"]') && !updates.some(item => item.interviewHelperApplicationBundle), 'a cancelled reply is quiet');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },

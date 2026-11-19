@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['cancelInterviewTypedJob', 'chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
@@ -88,6 +88,12 @@ const tests = [
       assert.deepEqual({ ...invocations.at(-2).args[0] }, { nodeId: 'interview-node', filePaths: ['/a/resume.pdf'] }, 'conversion forwards only nodeId and filePaths');
       assert.deepEqual({ ...invocations.at(-1).args[0] }, { token: 'tok' }, 'reveal forwards only an opaque token, never a path');
       assert.deepEqual({ ...invocations.at(-3).args[0] }, { nodeId: 'interview-node', text: 'Engineer at Acme' }, 'the typed job call forwards only its two reviewed fields');
+      await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', runId: 'run-1', extra: 'dropped' });
+      await appApi.cancelInterviewTypedJob({ nodeId: 'interview-node', runId: 'run-1', extra: 'dropped' });
+      assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, { ...args[0] }]), [
+        ['resolve-interview-typed-job', { nodeId: 'interview-node', text: 'Engineer at Acme', runId: 'run-1' }],
+        ['cancel-interview-typed-job', { nodeId: 'interview-node', runId: 'run-1' }],
+      ], 'a run id is forwarded when given, and Cancel names that run only');
       await appApi.copyBugReport({ description: 'It froze', renderer: { events: [] }, path: '/etc/passwd' });
       await appApi.saveBugReport({ description: 'It froze', renderer: { events: [] }, filePath: '/etc/passwd' });
       assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, { ...args[0] }]), [

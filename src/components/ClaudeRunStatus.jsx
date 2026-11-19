@@ -1,6 +1,6 @@
 import React, { useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronUp, ClipboardCopy, PauseCircle, PlayCircle } from 'lucide-react';
+import { ChevronDown, ChevronUp, ClipboardCopy, PauseCircle, PlayCircle, XCircle } from 'lucide-react';
 import { ClaudeProgressCard, ClaudeTaskProgress } from './ClaudeProgress';
 import { claudeNodePauseKey, getClaudePauseFlow, resumeClaude, startClaudePause, stopRunningClaude, subscribeClaudePauseFlows } from '../utils/claudePauseFlow';
 import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
@@ -122,12 +122,21 @@ function RunStatusCard({ entry, childEntries = [], showPause }) {
       />
     </div>
   ) : null;
-  if (childEntries.length > 0) return <RunStatusOwnerCard entry={entry} childEntries={childEntries} pauseFooter={pauseFooter} />;
+  // The newest handler is read at click time: a re-publish may have replaced it.
+  const cancelFooter = entry.onCancel ? (
+    <div className="mt-2 flex justify-end" onPointerDown={event => event.stopPropagation()}>
+      <button type="button" className={NEUTRAL} title="Stop this now. Nothing is saved." onClick={() => { (getJobRunStatus(entry.nodeId)?.onCancel || entry.onCancel)(); }}>
+        <XCircle size={12} aria-hidden="true" />Cancel
+      </button>
+    </div>
+  ) : null;
+  const footer = pauseFooter || cancelFooter ? <>{pauseFooter}{cancelFooter}</> : null;
+  if (childEntries.length > 0) return <RunStatusOwnerCard entry={entry} childEntries={childEntries} pauseFooter={footer} />;
   // A module with a live Claude request shows the worker's own activity, not a summary.
   if (entry.claudeRequestId) {
-    return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={pauseFooter} />;
+    return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={footer} />;
   }
-  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={pauseFooter} />;
+  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={footer} />;
 }
 
 /** Every running module's status. pauseOwnedBy names the handoff whose row holds that run's Pause. */

@@ -347,6 +347,36 @@ export default [
     },
   },
   {
+    name: 'claude task activity: a staged job is headed by its stage, with what Claude is doing as the detail',
+    run() {
+      let clock = 100;
+      const activity = createClaudeTaskActivity({ now: () => clock });
+      const view = (extra = {}) => deriveClaudeTaskProgress({ activity: normalizeClaudeTaskActivity({ ...activity.snapshot(), ...extra }), requestId: 'job' });
+      // A stage may arrive before any call has begun.
+      activity.stage('job', 'Reading what you typed', { nodeId: 'node-1' });
+      assert.equal(activity.view('job').nodeId, 'node-1');
+      assert.equal(view().headline, 'Reading what you typed');
+      assert.equal(view({ paused: true }).headline, 'Paused until Claude is available', 'a pause still says so');
+      activity.begin('job', { model: 'sonnet', effort: 'high', countRound: false });
+      assert.deepEqual([view().headline, view().detail], ['Reading what you typed', 'Starting Claude']);
+      clock = 200;
+      activity.stage('job', 'Researching Acme');
+      activity.stage('job', 'Researching Acme');
+      assert.equal(activity.view('job').phaseStartedAt, 200, 'a new stage restarts the action clock');
+      activity.event('job', { kind: 'tool', messageId: 'm', calls: [{ tool: 'WebSearch', target: 'Acme careers' }] });
+      assert.deepEqual([view().headline, view().detail], ['Researching Acme', 'Searching the web: Acme careers']);
+      assert.deepEqual(view().steps.map(step => step.label), ['Reading what you typed', 'Researching Acme', 'Searching the web: Acme careers'], 'a repeated stage adds no step');
+      // Between two calls the app does the stage's own work: no "checking Claude's answer".
+      activity.checking('job');
+      activity.stage('job', 'Reading the posting found for this role');
+      assert.deepEqual([view().headline, view().detail, view().lastHeard], ['Reading the posting found for this role', '', null]);
+      activity.stage('job', '   ');
+      assert.equal(activity.view('job').stage, 'Reading the posting found for this role', 'an empty stage is ignored');
+      assert.equal(normalizeClaudeTaskActivity({ tasks: { a: { state: 'running', stage: 'x'.repeat(500) } } }).tasks.a.stage.length, 160);
+      assert.equal(normalizeClaudeTaskActivity({ tasks: { a: { state: 'running', stage: 7 } } }).tasks.a.stage, null);
+    },
+  },
+  {
     name: 'claude task activity: silence is flagged from exactly the limit and never hides the clock',
     run() {
       const running = { kind: 'claude-writing', lastHeard: 1000, since: 1000, startedAt: 1000 };

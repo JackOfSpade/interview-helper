@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  TYPED_JOB_LISTING_MAX_CHARS, TYPED_JOB_PAGE_MAX_CHARS, TYPED_JOB_TEXT_MAX_CHARS, composeReadPage, parseTypedJobUrl, postingPrompt, resolveTypedJob,
+  TYPED_JOB_LISTING_MAX_CHARS, TYPED_JOB_PAGE_MAX_CHARS, TYPED_JOB_TEXT_MAX_CHARS, composeReadPage, listingPrompt, parseTypedJobUrl, postingPrompt, resolveTypedJob,
 } from '../../electron/ipc/interviewTypedJob.js';
 
 // Synthetic data only: example.test domains and "Acme".
@@ -91,7 +91,12 @@ export default [
         'typed-job-research': research({ openPostingUrl: open }),
         'typed-job-posting': posting(),
       });
-      const out = await resolveTypedJob({ text: 'Widget Engineer at Acme, Springfield', callText, readPage: pageReader({ [open]: okPage(open) }) });
+      const stages = [];
+      const out = await resolveTypedJob({ text: 'Widget Engineer at Acme, Springfield', callText, readPage: pageReader({ [open]: okPage(open) }), onStatus: stage => stages.push(stage) });
+      assert.equal(stages.length, 4, 'each step of the run names itself');
+      assert.equal(stages[0], 'Reading what you typed');
+      assert.match(stages[1], /^Researching .+ and looking for an open .+ posting$/);
+      assert.deepEqual(stages.slice(2), ['Reading the posting found for this role', 'Checking the posting is open and matches Acme Widgets Inc']);
       assert.equal(out.kind, 'found');
       assert.equal(out.jobUrl, open);
       assert.equal(out.organization, 'Acme Widgets Inc');
@@ -101,6 +106,41 @@ export default [
       // The posting judge is told which organisation and role it must match.
       assert.ok(calls[2].prompt.includes('Acme Widgets Inc'));
       assert.ok(calls[2].prompt.includes('Widget Engineer'));
+    },
+  },
+  {
+    name: 'typed job: a posting in another language matches and is stored as English, with a note saying so',
+    async run() {
+      const open = 'https://acme.example.test/careers/widget-engineer-kr';
+      const korean = `위젯 엔지니어 채용 ${'담당 업무와 자격 요건을 설명합니다. '.repeat(40)}`;
+      const { callText, calls } = fakeCall({
+        'typed-job-intake': intakeTarget(),
+        'typed-job-research': research({ openPostingUrl: open }),
+        'typed-job-posting': posting({ language: 'Korean' }),
+      });
+      const out = await resolveTypedJob({ text: 'Widget Engineer at Acme, Seoul', callText, readPage: pageReader({ [open]: okPage(open, korean) }) });
+      assert.equal(out.kind, 'found');
+      assert.equal(out.language, 'Korean');
+      assert.equal(out.listingText, LISTING.trim(), 'the stored listing is the English text the judge returned, not the page');
+      assert.ok(!/[\uAC00-\uD7AF]/u.test(out.listingText));
+      assert.equal(out.notes.length, 2);
+      assert.match(out.notes[1], /written in Korean.*English translation/);
+      // The prompts allow any language and ask for English out.
+      assert.match(calls[1].prompt, /may be written in any language/);
+      assert.match(calls[1].prompt, /Write the whole report in English/);
+      assert.match(calls[2].prompt, /The language of the page does not matter/);
+      assert.match(calls[2].prompt, /complete and faithful English translation/);
+      // A typed link behaves the same way, and English postings carry no note.
+      const link = fakeCall({ 'typed-job-intake': { kind: 'link', url: open, company: '', role: '', location: '', ask: '' }, 'typed-job-posting': posting({ language: 'Korean (한국어) <b>' }) });
+      const linked = await resolveTypedJob({ text: open, callText: link.callText, readPage: pageReader({ [open]: okPage(open, korean) }) });
+      assert.equal(linked.language, 'Korean 한국어 b', 'the language name is reduced to letters');
+      assert.equal(linked.notes.length, 1);
+      for (const language of ['English', 'english (US)', '', undefined]) {
+        const plain = fakeCall({ 'typed-job-intake': { kind: 'link', url: open, company: '', role: '', location: '', ask: '' }, 'typed-job-posting': posting({ language }) });
+        const result = await resolveTypedJob({ text: open, callText: plain.callText, readPage: pageReader({ [open]: okPage(open) }) });
+        assert.deepEqual([result.language, result.notes], ['', []]);
+      }
+      assert.match(listingPrompt({ company: 'Acme', role: 'Widget Engineer', location: 'Seoul', research: 'x' }), /Write the listing in English/);
     },
   },
   {

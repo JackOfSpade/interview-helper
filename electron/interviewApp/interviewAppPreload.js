@@ -119,8 +119,12 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
   chooseCareerFiles: () => ipcRenderer.invoke('interview-app:choose-career-files'),
   chooseAppliedJobsFolder: () => ipcRenderer.invoke('interview-app:choose-applied-jobs-folder'),
   resolveInterviewTypedJob: (args) => {
-    const { nodeId, text } = args || {};
-    return ipcRenderer.invoke('resolve-interview-typed-job', { nodeId, text });
+    const { nodeId, text, runId } = args || {};
+    return ipcRenderer.invoke('resolve-interview-typed-job', { nodeId, text, ...(typeof runId === 'string' ? { runId } : {}) });
+  },
+  cancelInterviewTypedJob: (args) => {
+    const { nodeId, runId } = args || {};
+    return ipcRenderer.invoke('cancel-interview-typed-job', { nodeId, runId });
   },
   // Career files of any type are converted to text before the text-only compile reads them.
   convertCareerFiles: (args) => {

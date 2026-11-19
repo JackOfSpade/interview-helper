@@ -37,6 +37,7 @@ export function normalizeClaudeActivityEntry(raw) {
     maxTurns: optionalCount(raw.maxTurns),
     tool: text(raw.tool, 60),
     target: text(raw.target),
+    stage: text(raw.stage),
     apiRetry,
     failure,
     steps: (Array.isArray(raw.steps) ? raw.steps : []).slice(-STEP_LIMIT)

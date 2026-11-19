@@ -24,6 +24,8 @@ export function publishJobRunStatus(nodeId, entry, now = Date.now()) {
     nodeId, label: entry.label || 'Job Search', headline: entry.headline || 'Processing',
     lines: (entry.lines || []).filter(Boolean), pauseKeys: entry.pauseKeys || [], onPause: entry.onPause || null,
     pauseDisabledReason: entry.pauseDisabledReason || '',
+    // A run the person may end from its card: the button calls this.
+    onCancel: typeof entry.onCancel === 'function' ? entry.onCancel : null,
     // A live Claude request the panel draws with the full worker activity card.
     claudeRequestId: entry.claudeRequestId || null,
     // The run pauses in place with no save step, so the card still holds a button.
@@ -42,7 +44,7 @@ export function publishJobRunStatus(nodeId, entry, now = Date.now()) {
     : Number.isFinite(previous.changedAt) ? previous.changedAt : now;
   entries.set(nodeId, next);
   // A new handler alone changes nothing on screen, so it does not re-render.
-  if (!previous || statusKey(previous) !== statusKey(next) || Boolean(previous.onPause) !== Boolean(next.onPause)) publishSnapshot();
+  if (!previous || statusKey(previous) !== statusKey(next) || Boolean(previous.onPause) !== Boolean(next.onPause) || Boolean(previous.onCancel) !== Boolean(next.onCancel)) publishSnapshot();
   else snapshot = Object.freeze([...entries.values()]);
 }
 
