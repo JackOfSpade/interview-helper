@@ -54,7 +54,7 @@ export default [
     run() {
       assert.deepEqual(Object.keys(PRACTICE_AUDIO_MESSAGES).sort(), [...ERROR_CODES].sort());
       for (const code of ERROR_CODES) assert(PRACTICE_AUDIO_MESSAGES[code].length > 20 && PRACTICE_AUDIO_MESSAGES[code].length < 220, code);
-      assert.match(PRACTICE_AUDIO_MESSAGES['permission-denied'], /System Settings → Privacy & Security → Microphone/u);
+      assert.match(PRACTICE_AUDIO_MESSAGES['permission-denied'], /choose Allow when macOS asks, or open Microphone settings/u);
       assert.match(PRACTICE_AUDIO_MESSAGES['unsupported-platform'], /Apple Silicon and macOS 26 or later/u);
       assert.throws(() => { PRACTICE_AUDIO_MESSAGES['capture-failed'] = 'x'; }, TypeError);
     },

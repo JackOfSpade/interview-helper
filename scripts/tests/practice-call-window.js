@@ -188,6 +188,12 @@ test('the set-paused handler forwards to the service', async () => {
   assert.deepEqual(service.pauseCalls, [true, false]);
 });
 
+test('open microphone settings stays off unless the app passes it in', async () => {
+  const h = await harness({ phase: 'ringing' });
+  await h.invoke('practice-call:start', { nodeId: 'n1' });
+  assert.equal(await h.invoke('practice-call-window:open-microphone-settings'), false);
+});
+
 export default cases;
 
 // Seen in the built app: quitting during a call left only a half-written recording and no record.

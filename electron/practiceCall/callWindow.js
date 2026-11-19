@@ -10,7 +10,7 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'answer', 'hang-up', 'set-muted', 'send-chat',
-  'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'close',
+  'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
 ]);
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
@@ -161,6 +161,8 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'get-prepared-cards']() { return service.getPreparedCards(); },
     async [WINDOW_PREFIX + 'get-replay']() { return service.getReplay(current?.callId ?? service.getState().callId); },
     async [WINDOW_PREFIX + 'delete-recording']() { return service.deleteRecording(current?.callId ?? service.getState().callId); },
+    // Off unless the app passes it in: a unit suite must never open System Settings.
+    async [WINDOW_PREFIX + 'open-microphone-settings']() { return typeof deps.openMicrophoneSettings === 'function' ? Boolean(await deps.openMicrophoneSettings()) : false; },
     async [WINDOW_PREFIX + 'close']() { if (windowAlive()) win.close(); return null; },
   };
   if (registerIpc) {

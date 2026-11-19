@@ -41,6 +41,7 @@ const practiceCallAPI = Object.freeze({
   getReplay: () => invoke('get-replay'),
   onReplayUpdated: cb => subscribe(`${PREFIX}replay-updated`, cb),
   deleteRecording: () => invoke('delete-recording'),
+  openMicrophoneSettings: () => invoke('open-microphone-settings'),
   close: () => invoke('close'),
 });
 

@@ -15,6 +15,7 @@ import { createInterviewWindowController } from '../interviewWindow.js';
 import { createInterviewTalkingPoints } from '../interviewTalkingPoints.js';
 import { createPracticeCallController, createReplayHandler } from '../practiceCall/callWindow.js';
 import { createPracticeAudioHelper, practiceAudioHelperPath } from '../interviewPracticeAudio.js';
+import { createMicrophoneAccess } from '../practiceCall/microphoneAccess.js';
 import { getInterviewPracticeRegistry } from '../ipc/interviewPracticeRegistry.js';
 import { createInterviewClaudeTransport } from '../ipc/interviewClaudeTransport.js';
 import { claudeUsageLimit, recheckClaudeUsageAfterWake } from '../ipc/claudePause.js';
@@ -32,7 +33,7 @@ import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, lis
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
 
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell } = electronPkg;
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell, systemPreferences } = electronPkg;
 
 // The profile folder must be this app's own: two running Electron apps cannot
 // share one. Set before `ready`, and before anything reads the path.
@@ -289,8 +290,15 @@ if (!app.requestSingleInstanceLock()) {
         signal, task: 'practice-plan', claudeStage: 'practice-call-plan', responseSchema: schema,
       });
       const helperPath = practiceAudioHelperPath({ packaged: app.isPackaged, projectDir: app.getAppPath() || process.cwd() });
+      // An earlier "Don't Allow" is cleared only for the installed app and its helper; a
+      // development run belongs to Electron's own bundle and is left alone.
+      const microphoneAccess = createMicrophoneAccess({
+        systemPreferences, shell,
+        bundleIds: app.isPackaged ? ['com.antigravity.interviewhelper', 'com.antigravity.infinitecanvas.practice-audio'] : [],
+      });
       practiceCallController = createPracticeCallController({
         BrowserWindow, ipcMain, appInstance: dataApp,
+        openMicrophoneSettings: () => microphoneAccess.openSettings(),
         isAuthorizedOwner: sender => { const owner = ownerOf(sender); return !!owner && !owner.isDestroyed() && (isMainWindow(owner) || owner === practiceCallController?.getWindow()); },
         preloadPath: path.join(__dirname, 'practiceCallPreload.js'),
         devServerUrl: DEV_SERVER_URL ? new URL('interview.html', DEV_SERVER_URL).toString() : null,
@@ -302,7 +310,20 @@ if (!app.requestSingleInstanceLock()) {
           logger,
           inferenceWorkerPath: asarUnpacked(path.join(__dirname, 'inferenceWorkerThread.js')),
           // The packaged helper lives in Resources; the default only knows the project folder.
-          helperFactory: options => createPracticeAudioHelper({ ...options, helperPath }),
+          // The macOS microphone prompt is shown before the helper opens the microphone. A
+          // refusal does not stop the call: the helper then runs without capture, so the
+          // interviewer is heard, the candidate is not, and the chat still works.
+          helperFactory: options => {
+            const helper = createPracticeAudioHelper({ ...options, helperPath });
+            return Object.freeze({
+              ...helper,
+              start: async startOptions => {
+                const access = await microphoneAccess.ensure();
+                if (access !== 'granted') logger.warn(`[PracticeCall] microphone access is ${access}: the call runs without the candidate's voice`);
+                return helper.start(startOptions);
+              },
+            });
+          },
         },
       });
       protocol.handle('practice-call', createReplayHandler({ store: practiceCallController.store }));

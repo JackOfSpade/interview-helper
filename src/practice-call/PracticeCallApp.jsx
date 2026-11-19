@@ -111,7 +111,7 @@ export default function PracticeCallApp() {
     case 'ended':
     case 'analyzing': return <EndedScreen state={state} />;
     case 'replay': return <Replay replay={replay} api={{ deleteRecording: () => invoke('deleteRecording') }} />;
-    case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} />;
+    case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
     default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: `The call window received an unknown phase (${String(state.phase)}).` }} onClose={() => invoke('close')} />;
   }
   };

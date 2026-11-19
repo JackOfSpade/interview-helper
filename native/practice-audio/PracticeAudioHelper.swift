@@ -507,6 +507,60 @@ final class MicProcessor: @unchecked Sendable {
     }
 }
 
+/// Stands in for the microphone when access is denied: the call still runs and the candidate
+/// is simply not heard. The timeline, the level events and the recording length keep moving
+/// exactly as they would with a silent microphone, so nothing downstream needs to know.
+final class SilentMic: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "practice-audio.silent-mic", qos: .utility)
+    private let writer: ProtocolWriter
+    private let wav: WavWriter
+    private let clock: TimelineClock
+    private let fail: @Sendable (String) -> Void
+    private var timer: DispatchSourceTimer?
+    private var startedAt: TimeInterval = 0
+    private var stopped = false
+
+    init(writer: ProtocolWriter, wav: WavWriter, clock: TimelineClock, fail: @escaping @Sendable (String) -> Void) {
+        self.writer = writer; self.wav = wav; self.clock = clock; self.fail = fail
+    }
+
+    func start() {
+        queue.async {
+            guard !self.stopped, self.timer == nil else { return }
+            self.startedAt = ProcessInfo.processInfo.systemUptime
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+            // Retained until stop() cancels the timer.
+            timer.setEventHandler { self.tick() }
+            self.timer = timer
+            timer.resume()
+        }
+    }
+
+    private func tick() {
+        guard !stopped else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let seconds = max(0, now - startedAt)
+        clock.publish(endSec: seconds, arrival: now)
+        let target = Int64((seconds * Double(WavWriter.sampleRate)).rounded())
+        do { try wav.appendSilence(frames: Int(max(0, target - wav.frames))) }
+        catch { stopped = true; timer?.cancel(); timer = nil; fail("recording-failed"); return }
+        writer.send(["type": "level", "rms": 0, "atMs": Int((seconds * 1000).rounded())])
+    }
+
+    func stop() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                // The recording runs to the moment the call stopped, like a microphone's would.
+                if !self.stopped { self.tick() }
+                self.stopped = true
+                self.timer?.cancel(); self.timer = nil
+                continuation.resume()
+            }
+        }
+    }
+}
+
 /// Plays utterances on a player node attached to the SHARED engine's main
 /// mixer, so voice processing sees the playback as its echo reference.
 @MainActor final class PlaybackController {
@@ -731,6 +785,7 @@ final class MicProcessor: @unchecked Sendable {
     private let clock = TimelineClock()
     private var playback: PlaybackController?
     private var mic: MicProcessor?
+    private var silentMic: SilentMic?
     private var analyzer: SpeechAnalyzer?
     private var resultsTask: Task<Void, Never>?
     private var parentTimer: DispatchSourceTimer?
@@ -762,6 +817,15 @@ final class MicProcessor: @unchecked Sendable {
     func start() async {
         writer.send(["type": "status", "state": "preparing"])
         do {
+            // Microphone permission strictly before the engine starts. Without it the call
+            // runs unheard: no capture, no transcription, and none of their set-up.
+            let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+            }
+            try Task.checkCancellation()
+            guard !stopped else { return }
+            guard granted else { try startWithoutMicrophone(); return }
+
             guard SpeechTranscriber.isAvailable,
                   let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
                 throw HelperFailure.code("unsupported-locale")
@@ -786,14 +850,6 @@ final class MicProcessor: @unchecked Sendable {
             let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .whileInUse))
             self.analyzer = analyzer
             try await analyzer.prepareToAnalyze(in: format)
-            try Task.checkCancellation()
-            guard !stopped else { return }
-
-            // Microphone permission strictly before the engine starts.
-            let granted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
-            }
-            guard granted else { throw HelperFailure.code("permission-denied") }
             try Task.checkCancellation()
             guard !stopped else { return }
 
@@ -846,26 +902,51 @@ final class MicProcessor: @unchecked Sendable {
             installTap()
             engine.prepare()
             do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("capture-failed") }
-            configObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.engineConfigurationChanged() }
-            }
             micProcessor.startLevelTimer()
-            playbackController.startTimer()
-            let timer = DispatchSource.makeTimerSource(queue: .main)
-            timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
-            timer.setEventHandler { [weak self] in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if Darwin.kill(self.parentPID, 0) != 0 && errno != EPERM { self.finish.yield("parent-exited") }
-                }
-            }
-            parentTimer = timer; timer.resume()
-            writer.send(["type": "status", "state": "ready"])
+            engineStarted(playbackController)
         } catch is CancellationError {
             finish.yield("stopped")
         } catch let failure as HelperFailure { fail(failure.code) }
         catch { diagnose("start", error); fail("capture-failed") }
+    }
+
+    /// The engine is running: watch it and the parent, then report ready.
+    private func engineStarted(_ playbackController: PlaybackController) {
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.engineConfigurationChanged() }
+        }
+        playbackController.startTimer()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                if Darwin.kill(self.parentPID, 0) != 0 && errno != EPERM { self.finish.yield("parent-exited") }
+            }
+        }
+        parentTimer = timer; timer.resume()
+        writer.send(["type": "status", "state": "ready"])
+    }
+
+    /// Microphone access was refused. The interviewer is still played and the candidate can
+    /// type; the input node is never touched, so nothing here can ask for the microphone.
+    private func startWithoutMicrophone() throws {
+        FileHandle.standardError.write(Data("practice-audio-helper: no microphone access, running without capture\n".utf8))
+        let playbackController = PlaybackController(engine: engine, writer: writer, clock: clock) { [weak self] code in
+            self?.fail(code)
+        }
+        playback = playbackController
+        playbackController.attach()
+        connectMixerToOutput()
+        engine.prepare()
+        do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("playback-failed") }
+        let silent = SilentMic(writer: writer, wav: wav, clock: clock) { [weak self] code in
+            Task { @MainActor in self?.fail(code) }
+        }
+        silentMic = silent
+        silent.start()
+        engineStarted(playbackController)
     }
 
     /// Which step failed and the system's own error, on stderr. The protocol on stdout only
@@ -897,7 +978,7 @@ final class MicProcessor: @unchecked Sendable {
         lastRestartAt = now
         mic?.markInterruption()
         playback?.cancelActive() // The queued buffers do not survive a reconfiguration.
-        engine.inputNode.removeTap(onBus: 0)
+        if mic != nil { engine.inputNode.removeTap(onBus: 0) }
         playback?.reconnect()
         connectMixerToOutput()
         installTap()
@@ -918,9 +999,10 @@ final class MicProcessor: @unchecked Sendable {
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
         playback?.shutdown()
-        engine.inputNode.removeTap(onBus: 0)
+        if mic != nil { engine.inputNode.removeTap(onBus: 0) }
         engine.stop()
         await mic?.stop(); mic = nil
+        await silentMic?.stop(); silentMic = nil
         resultsTask?.cancel(); resultsTask = nil
         await analyzer?.cancelAndFinishNow(); analyzer = nil
         if let durationMs = wav.finalize() {

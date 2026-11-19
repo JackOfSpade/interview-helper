@@ -393,6 +393,11 @@ export default [
         for (const fragment of ['role="alert"', 'The microphone is not available.', 'mic-denied', 'Close window']) {
           assert(failed.includes(fragment), `error screen is missing ${fragment}`);
         }
+        assert(!failed.includes('Open Microphone settings'), 'only a microphone denial offers the settings button');
+        const denied = renderToStaticMarkup(React.createElement(ErrorScreen, { error: { code: 'permission-denied', message: 'The call needs your microphone.' }, onClose: () => {}, onOpenMicrophoneSettings: () => {} }));
+        for (const fragment of ['Open Microphone settings', 'Close window']) {
+          assert(denied.includes(fragment), `microphone denial screen is missing ${fragment}`);
+        }
       } finally { await bundle.dispose(); }
     },
   },
