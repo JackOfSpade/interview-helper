@@ -20,7 +20,7 @@ export function ClaudePauseControl({ pauseKeys, onSave = null, disabledReason = 
   const held = (activity.held || []).includes(key);
   const phase = flow.phase !== 'idle' ? flow.phase : held ? 'paused' : 'idle';
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2" onPointerDown={event => event.stopPropagation()}>
+    <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2" onPointerDown={event => event.stopPropagation()}>
       {flow.error && <p role="alert" className="min-w-0 flex-1 text-[11px] text-amber-100">{flow.error} Nothing new will start. Retry, or resume.</p>}
       {phase === 'idle' && (
         <button type="button" className={AMBER} disabled={Boolean(disabledReason)} title={disabledReason || 'Start no new Claude calls, let running ones finish and save, then stop.'} onClick={() => { void startClaudePause(pauseKeys, onSave); }}>
@@ -113,24 +113,25 @@ function RunStatusOwnerCard({ entry, childEntries, pauseFooter }) {
 }
 
 function RunStatusCard({ entry, childEntries = [], showPause }) {
-  const pauseFooter = showPause ? (
-    <div className="mt-2">
-      <ClaudePauseControl
-        pauseKeys={entry.pauseKeys.length ? entry.pauseKeys : [claudeNodePauseKey(entry.nodeId)]}
-        onSave={entry.pauseWithoutSave && !entry.onPause ? null : () => (getJobRunStatus(entry.nodeId)?.onPause || entry.onPause)()}
-        disabledReason={entry.pauseDisabledReason}
-      />
-    </div>
-  ) : null;
   // The newest handler is read at click time: a re-publish may have replaced it.
-  const cancelFooter = entry.onCancel ? (
-    <div className="mt-2 flex justify-end" onPointerDown={event => event.stopPropagation()}>
-      <button type="button" className={NEUTRAL} title="Stop this now. Nothing is saved." onClick={() => { (getJobRunStatus(entry.nodeId)?.onCancel || entry.onCancel)(); }}>
-        <XCircle size={12} aria-hidden="true" />Cancel
-      </button>
+  const cancelButton = entry.onCancel ? (
+    <button type="button" className={NEUTRAL} title="Stop this now. Nothing is saved." onClick={() => { (getJobRunStatus(entry.nodeId)?.onCancel || entry.onCancel)(); }}>
+      <XCircle size={12} aria-hidden="true" />Cancel
+    </button>
+  ) : null;
+  // One row: Pause & save (or what it turned into), then Cancel to its right.
+  const footer = showPause || cancelButton ? (
+    <div className="mt-2 flex flex-wrap items-center justify-end gap-2" onPointerDown={event => event.stopPropagation()}>
+      {showPause && (
+        <ClaudePauseControl
+          pauseKeys={entry.pauseKeys.length ? entry.pauseKeys : [claudeNodePauseKey(entry.nodeId)]}
+          onSave={entry.pauseWithoutSave && !entry.onPause ? null : () => (getJobRunStatus(entry.nodeId)?.onPause || entry.onPause)()}
+          disabledReason={entry.pauseDisabledReason}
+        />
+      )}
+      {cancelButton}
     </div>
   ) : null;
-  const footer = pauseFooter || cancelFooter ? <>{pauseFooter}{cancelFooter}</> : null;
   if (childEntries.length > 0) return <RunStatusOwnerCard entry={entry} childEntries={childEntries} pauseFooter={footer} />;
   // A module with a live Claude request shows the worker's own activity, not a summary.
   if (entry.claudeRequestId) {

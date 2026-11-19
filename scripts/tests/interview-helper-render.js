@@ -86,7 +86,8 @@ async function flush() {
 const PROBE_SOURCE = panelPath => `
   import React, { useCallback, useState } from 'react';
   import { InterviewHelperPanel } from ${JSON.stringify(panelPath)};
-  export function InterviewHelperProbe({ initialData, onPersist, nodeId = 'interview-helper' }) {
+  import { JobRunStatusSection } from ${JSON.stringify(path.resolve('src/components/ClaudeRunStatus.jsx'))};
+  export function InterviewHelperProbe({ initialData, onPersist, nodeId = 'interview-helper', showRunStatus = false }) {
     const [data, setData] = useState(initialData);
     const update = useCallback((patch) => {
       setData(previous => {
@@ -96,7 +97,8 @@ const PROBE_SOURCE = panelPath => `
       });
       return true;
     }, [onPersist]);
-    return <InterviewHelperPanel id={nodeId} data={data} onPatch={update} appliedJobsFolder="/Applied Jobs" />;
+    // showRunStatus draws the status cards the app shows beside the panel.
+    return <><InterviewHelperPanel id={nodeId} data={data} onPatch={update} appliedJobsFolder="/Applied Jobs" />{showRunStatus && <JobRunStatusSection />}</>;
   }
 `;
 
@@ -121,10 +123,10 @@ async function withDomBundledProbe(fn) {
   });
 }
 
-async function mount(bundle, window, { initialData = {}, nodes = [], nodeId = 'interview-helper', onPersist = () => undefined } = {}) {
+async function mount(bundle, window, { initialData = {}, nodes = [], nodeId = 'interview-helper', onPersist = () => undefined, showRunStatus = false } = {}) {
   const root = bundle.module.createRoot(window.document.getElementById('root'));
   await bundle.module.act(async () => {
-    root.render(bundle.module.React.createElement(bundle.module.InterviewHelperProbe, { initialData, nodes, nodeId, onPersist }));
+    root.render(bundle.module.React.createElement(bundle.module.InterviewHelperProbe, { initialData, nodes, nodeId, onPersist, showRunStatus }));
     await flush();
   });
   return root;
@@ -1003,25 +1005,30 @@ export default [
     name: 'interview helper render: Cancel ends the Prepare in flight and puts the node back as it was',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
-        const pending = deferred(); const updates = []; const cancels = []; let prepareArgs;
+        const pending = deferred(); const updates = []; const cancels = []; const released = []; let prepareArgs;
         window.electronAPI = {
+          releaseClaude: async key => { released.push(key); return { held: false }; },
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
           prepareInterviewBrief: async args => { prepareArgs = args; return pending.promise; },
           completeNonApiAiRun: async () => ({ absent: true }),
         };
         window.interviewAppAPI = { cancelInterviewBrief: async args => { cancels.push(args); return { success: true, cancelled: true }; } };
-        const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperJobUrl: JOB_URL }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
+        const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperJobUrl: JOB_URL }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }), showRunStatus: true });
         try {
           await bundle.module.act(async () => { await flush(); });
-          assert(!button(window, 'Cancel preparation'), 'there is nothing to cancel before Prepare starts');
+          assert(!button(window, 'Cancel'), 'there is nothing to cancel before Prepare starts');
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          assert(button(window, 'Cancel preparation'), 'a running Prepare offers Cancel');
-          await bundle.module.act(async () => { button(window, 'Cancel preparation').click(); await flush(); });
+          assert(!button(window, 'Cancel preparation'), 'the panel has no cancel button of its own');
+          const cancel = button(window, 'Cancel'); const pause = button(window, 'Pause & save');
+          assert(cancel && pause, 'the status card of a running Prepare offers Pause & save and Cancel');
+          assert(pause.parentElement.parentElement === cancel.parentElement && (pause.compareDocumentPosition(cancel) & window.Node.DOCUMENT_POSITION_FOLLOWING), 'Cancel sits in the same row, after Pause & save');
+          await bundle.module.act(async () => { cancel.click(); await flush(); });
+          assert(released.length === 1 && released[0] === `interview:${prepareArgs.manualAiRunId}`, 'a cancelled run leaves no hold behind');
           assert(cancels.length === 1 && cancels[0].nodeId === 'interview-helper' && cancels[0].runId === prepareArgs.manualAiRunId, 'Cancel names the run in flight');
           const last = updates.at(-1).next;
           assert(last.interviewHelperPreparation === null && last.interviewHelperPreparationRunId === null, 'the node is no longer preparing and holds no run to resume');
-          assert(!button(window, 'Cancel preparation') && text(window).includes('Preparation cancelled.'), 'the Cancel button goes and the panel says what happened');
+          assert(!button(window, 'Cancel') && text(window).includes('Preparation cancelled.'), 'the Cancel button goes and the panel says what happened');
           await bundle.module.act(async () => { pending.resolve({ success: true, cancelled: true }); await flush(); });
           assert(!updates.some(item => item.patch.interviewHelperPreparation?.status === 'failed'), 'a cancelled Prepare is not reported as a failure');
           const again = button(window, 'Prepare interview brief');

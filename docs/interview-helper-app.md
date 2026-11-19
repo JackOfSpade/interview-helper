@@ -209,13 +209,14 @@ calls no AI and the panel says nothing was generated; redoing the research needs
 an empty tab or changed inputs. With changed inputs and both tabs holding cards,
 the research and the sealed answers are prepared again and the tabs are kept.
 
-**Cancel preparation (2026-11-19).** While a Prepare runs, the panel shows
-"Cancel preparation" under the Prepare button. It calls `cancel-interview-brief`
-with the run id, which aborts the signal every Claude call of that Prepare
+**Cancel preparation (2026-11-19).** While a Prepare runs, its status card
+shows Cancel to the right of Pause & save (and of Resume once paused); the panel
+has no cancel button of its own. It calls `cancel-interview-brief` with the run
+id, which aborts the signal every Claude call of that Prepare
 holds, so the call in flight stops and no later step starts. The handler
 answers `{ cancelled: true }` instead of failing. The node goes back to what it
 held before (the earlier brief, or nothing) and the run is retired, so there is
-nothing to resume. Steps that had already finished keep what they saved: a
+nothing to resume. A hold from Pause & save on that run is released with it. Steps that had already finished keep what they saved: a
 sealed brief or answer set stays on disk, and Q&A cards already written stay in
 their tabs.
 
