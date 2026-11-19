@@ -1684,9 +1684,15 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         // turns unanswered technical questions into topics.
         await optionalStep('honest-gap answers', 'Answers for questions outside your experience could not be written this time; those cards stay empty.', async () => {
           const filled = await fillGaps({ userDataPath, nodeId: args.nodeId,
-            generate: units => generateInterviewGapAnswers({ units, evidence: checkedBank?.evidence, callText, signal, logWarning }) });
+            generate: async (units, { needRole, existing } = {}) => {
+              // Once per posting the same request also names the role's own experience questions the
+              // career text cannot answer; that needs the listing.
+              const bundle = needRole ? await loadPrivateInterviewPreparationBundle({ artifactId: args.bundleArtifactId, userDataPath }) : null;
+              return generateInterviewGapAnswers({ units, evidence: checkedBank?.evidence, callText, signal, logWarning,
+                role: needRole ? { themes: published.brief.roleThemes, listingText: bundle?.listingText || '', existing } : null });
+            } });
           // The new lines get their short live-card reminders in the same Prepare.
-          if (filled?.saved > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
+          if (filled?.saved > 0 || filled?.added > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
             generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
         });
         // Practice mode: an AI-planned interview order over every Foundation and

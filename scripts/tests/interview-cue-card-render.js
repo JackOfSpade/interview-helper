@@ -69,6 +69,16 @@ export default [
       assert(lines(window).join('|') === 'team guide|Old Health: built pipelines', 'a card without reminders is flat, and only the recent employer is left unsaid');
     });
   } },
+  { name: 'cue card: an honest-gap card leads with the admission and the closest experience, then reminders in the lines left', async run() {
+    const GAP = { ...CARD, id: 'gap', gap: true, question: 'Tell me about your on-call experience.', headline: 'I have not been on call.', headlineCue: 'Not been on call',
+      bullets: [{ text: 'The closest I have done is covering a school concert.', cue: 'Closest: concert cover' }], example: { text: '' },
+      approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] };
+    await mounted({ getBrief: async () => ({ ...DISPLAY, question: GAP.question, answerCard: GAP }) }, async ({ window, act, update }) => {
+      assert(lines(window).join('|') === 'Not been on call|Closest: concert cover|Explain how you would learn it', `the admission is never hidden behind reminders, and the card stays at three lines, got ${lines(window).join('|')}`);
+      await act(() => update({ ...DISPLAY, answerCard: { ...GAP, bullets: [] } }));
+      assert(lines(window).join('|') === 'Not been on call|Explain how you would learn it|Name what carries over', `reminders fill the lines left, got ${lines(window).join('|')}`);
+    });
+  } },
   { name: 'cue card: an unprepared question shows live talking points until a card is recognised', async run() {
     await mounted({}, async ({ window, act, update }) => {
       await act(() => update({ ...DISPLAY, question: 'Tell me about a conflict between coworkers.', answerCard: null, talkingPoints: [{ text: 'Listen actively', sub: ['Hear each person separately first'] }, 'Focus on shared goal', { text: 'Agree next steps', sub: [] }, 'A fourth point'] }));

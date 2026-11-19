@@ -539,31 +539,67 @@ export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate
 // ------------------------------------------------------- honest-gap answers --
 
 /**
- * Write an honest-gap answer on cards that still have no answer after the
- * answer writer ran: questions about something the career text does not show.
- * `generate(units)` receives `[{ id, question }]` and resolves to a Map of id
- * to `{ admission, closest, approach }` for the questions that are gaps
- * (electron/ipc/interviewAnswerGap.js); a question missing from the Map is left
- * empty. Only an empty generated card with no approach reminders is offered: a
- * card the person wrote is theirs, and a card with reminders is a "how do you
- * work" question, not one about past experience. A written gap answer is an
- * answer like any other, so it is never rewritten; an edit by the person makes
- * it an ordinary card.
+ * Write honest-gap answers: for cards that still have no answer after the
+ * answer writer ran (questions about something the career text does not show),
+ * and, once per posting, for the role's own experience questions that the
+ * career text cannot answer, which are added as cards of the posting.
+ *
+ * `generate(units, { needRole, existing })` receives `[{ id, question }]` and
+ * resolves to `{ gaps, added, asked }` (electron/ipc/interviewAnswerGap.js):
+ * `gaps` is a Map of id to `{ admission, closest, approach }` for the units
+ * that are gaps, and `added` is `[{ question, admission, closest, approach }]`,
+ * wanted only when `needRole` is true. `existing` is every question and topic
+ * already kept, so an added question never repeats one. A bare Map is read as
+ * `gaps` alone.
+ *
+ * Only an empty generated card with no approach reminders is offered: a card
+ * the person wrote is theirs, and a card with reminders is a "how do you work"
+ * question, not one about past experience. A written gap answer is an answer
+ * like any other, so it is never rewritten; an edit by the person makes it an
+ * ordinary card. The role's questions are written once per posting, like the
+ * topic list: a deleted one does not come back.
  */
 export async function fillInterviewQaGaps({ userDataPath, nodeId, generate }) {
   const scopes = ['foundation', 'company'];
   const open = card => !isAnsweredCard(card) && card.author !== 'user' && !approachOf(card).length;
+  const statement = value => ({ text: value, evidenceIds: [], quotes: [] });
+  /** The stored fields of one gap answer, or null when it cannot be stored. */
+  const gapFields = (gap) => {
+    const admission = typeof gap?.admission === 'string' ? gap.admission.trim() : '';
+    if (!admission || !text(admission, MAX_LINE)) return null;
+    const closest = gap.closest && typeof gap.closest.text === 'string' && gap.closest.text.trim() && text(gap.closest.text, MAX_LINE)
+      && typeof gap.closest.evidenceId === 'string' && typeof gap.closest.quote === 'string' ? gap.closest : null;
+    return {
+      headline: statement(admission),
+      bullets: closest ? [{ stage: 'point', text: closest.text.trim(), evidenceIds: [closest.evidenceId], quotes: [{ evidenceId: closest.evidenceId, quote: closest.quote }] }] : [],
+      example: statement(''), extensions: [], approach: approachOf({ approach: gap.approach }),
+      consistency: { consistentWithResume: false, resumeQuote: '' }, thinEvidence: false, gap: true,
+      author: 'generated', updatedAt: new Date().toISOString(),
+    };
+  };
   const units = [];
+  const existing = [];
+  let needRole = false;
   for (const scope of scopes) {
     const store = await readStore(userDataPath, scope, nodeId);
-    for (const card of store.cards) if (open(card)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question });
+    for (const card of store.cards) {
+      existing.push(card.question);
+      if (open(card)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question });
+    }
+    if (scope === 'company') { needRole = !store.gapQuestionsGeneratedAt; existing.push(...topicsOf(store).map(topic => topic.text)); }
   }
-  if (!units.length) return { requested: 0, saved: 0 };
-  const gaps = await generate(units.map(({ id, question }) => ({ id, question })));
+  if (!units.length && !needRole) return { requested: 0, saved: 0, added: 0 };
+  const reply = await generate(units.map(({ id, question }) => ({ id, question })), { needRole, existing });
+  const gaps = reply instanceof Map ? reply : reply?.gaps;
+  const proposed = !(reply instanceof Map) && Array.isArray(reply?.added) ? reply.added : [];
+  // Nothing was asked (no career text to judge against): the role's questions are still owed.
+  const roleAnswered = needRole && !(reply instanceof Map) && reply?.asked !== false;
   let saved = 0;
+  let added = 0;
   for (const scope of scopes) {
     const mine = units.filter(unit => unit.scope === scope && gaps?.get?.(unit.id));
-    if (!mine.length) continue;
+    const addHere = scope === 'company' && roleAnswered;
+    if (!mine.length && !addHere) continue;
     await locked(userDataPath, scope, nodeId, async () => {
       const store = await readStore(userDataPath, scope, nodeId);
       let changed = 0;
@@ -571,28 +607,32 @@ export async function fillInterviewQaGaps({ userDataPath, nodeId, generate }) {
         const card = store.cards.find(item => item.id === unit.cardId);
         // Checked again inside the lock: an answer written meanwhile is kept.
         if (!card || !open(card) || card.question !== unit.question) continue;
-        const gap = gaps.get(unit.id);
-        const admission = typeof gap.admission === 'string' ? gap.admission.trim() : '';
-        if (!admission || !text(admission, MAX_LINE)) continue;
-        const closest = gap.closest && typeof gap.closest.text === 'string' && gap.closest.text.trim() && text(gap.closest.text, MAX_LINE)
-          && typeof gap.closest.evidenceId === 'string' && typeof gap.closest.quote === 'string' ? gap.closest : null;
-        card.headline = { text: admission, evidenceIds: [], quotes: [] };
-        card.bullets = closest ? [{ stage: 'point', text: closest.text.trim(), evidenceIds: [closest.evidenceId], quotes: [{ evidenceId: closest.evidenceId, quote: closest.quote }] }] : [];
-        card.example = { text: '', evidenceIds: [], quotes: [] };
-        card.extensions = [];
-        card.approach = approachOf({ approach: gap.approach });
-        card.consistency = { consistentWithResume: false, resumeQuote: '' };
-        card.thinEvidence = false;
-        card.gap = true;
-        card.author = 'generated';
-        card.updatedAt = new Date().toISOString();
+        const fields = gapFields(gaps.get(unit.id));
+        if (!fields) continue;
+        Object.assign(card, fields);
+        changed += 1;
+      }
+      saved += changed;
+      if (addHere && !store.gapQuestionsGeneratedAt) {
+        const tombstoned = new Set(store.tombstones);
+        const taken = new Set([...store.cards.map(card => normalizeQuestion(card.question)), ...topicsOf(store).map(topic => normalizeQuestion(topic.text))]);
+        for (const item of proposed) {
+          const question = typeof item?.question === 'string' ? item.question.trim() : '';
+          const key = normalizeQuestion(question);
+          const fields = gapFields(item);
+          if (!key || !text(question, MAX_QUESTION) || tombstoned.has(key) || taken.has(key) || !fields || store.cards.length >= MAX_CARDS) continue;
+          taken.add(key);
+          store.cards.push({ id: uniqueCardId(store, `gap-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 12)}`, key), question, variants: [], ...fields, origin: 'posting', source: null });
+          added += 1;
+        }
+        // Written once per posting, like the topic list, even when the role holds no gap.
+        store.gapQuestionsGeneratedAt = new Date().toISOString();
         changed += 1;
       }
       if (changed) await writeStore(userDataPath, scope, nodeId, store);
-      saved += changed;
     });
   }
-  return { requested: units.length, saved };
+  return { requested: units.length, saved, added };
 }
 
 /** Live-window cards: Foundation then Company, each tagged with its scope. */

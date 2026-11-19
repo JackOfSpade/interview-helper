@@ -67,6 +67,13 @@ let practiceCallController = null;
 let quitting = false;
 let sessionStore = null;
 
+/** A File menu command for the main window, which owns the list and shows the result. */
+function sendFileCommand(command) {
+  const win = createMainWindow();
+  const send = () => { try { win.webContents.send('interview-app:file-command', command); } catch { /* the window is going away */ } };
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
+}
+
 /** The window's newest state, then every queued write, on disk. Never rejects: closing must go on. */
 const saveEverythingNow = win => saveWindowStateNow({ win, ipcMain }).catch(() => false).then(() => sessionStore?.flush()).catch(() => {});
 
@@ -160,7 +167,14 @@ if (!app.requestSingleInstanceLock()) {
     app.on('browser-window-created', (_event, win) => textSize.adopt(win));
     registerTextSizeHandlers({ ipcMain, guarded, controller: textSize });
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      { role: 'appMenu' }, { role: 'fileMenu' }, { role: 'editMenu' },
+      { role: 'appMenu' },
+      // Save and Load act on the main window, whichever window is in front.
+      { label: 'File', submenu: [
+        { label: 'Save Interviews…', accelerator: 'CommandOrControl+S', click: () => sendFileCommand('save') },
+        { label: 'Load Interviews…', accelerator: 'CommandOrControl+O', click: () => sendFileCommand('load') },
+        { type: 'separator' }, { role: 'close' },
+      ] },
+      { role: 'editMenu' },
       { label: 'View', submenu: [...textSizeMenuItems(textSize), { type: 'separator' }, { role: 'togglefullscreen' }, { type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }] },
       { role: 'windowMenu' },
     ]));

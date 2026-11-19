@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bug, Download, Plus, Trash2, Upload } from 'lucide-react';
+import { Bug, Plus, Trash2 } from 'lucide-react';
 import './interviewApp.css';
 import { InterviewHelperPanel } from './InterviewHelperPanel';
 import { BugReportDialog } from './BugReportDialog';
@@ -99,6 +99,12 @@ export default function InterviewHelperApp() {
     } catch (error) { setNotice(error?.message || 'That file could not be loaded.'); }
   };
 
+  // Save and Load live in the File menu. The newest handlers are reached through a ref, so the
+  // menu listener is attached once.
+  const fileCommands = useRef({});
+  useEffect(() => { fileCommands.current = { save: saveToFile, load: loadFromFile }; });
+  useEffect(() => window.interviewAppAPI?.onFileCommand?.((command) => { if (status === 'ready') void fileCommands.current[command]?.(); }), [status]);
+
   // A step that Claude could not finish on its own would wait here for a
   // pasted answer; this app has no paste box, so end it and let Retry restart it.
   useEffect(() => {
@@ -153,10 +159,6 @@ export default function InterviewHelperApp() {
       </ul>
       <div className="space-y-1 border-t border-white/10 p-2">
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 hover:bg-violet-500/30" onClick={newInterview}><Plus size={13} />New interview</button>
-        <div className="flex gap-1">
-          <button type="button" className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" title="Save the interview list to a file. Changes are also saved automatically." onClick={saveToFile}><Download size={13} />Save…</button>
-          <button type="button" className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" title="Replace the interview list with one saved to a file" onClick={loadFromFile}><Upload size={13} />Load…</button>
-        </div>
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={() => setReportingBug(true)}><Bug size={13} />Report a bug…</button>
         <TextSizeControl onError={setNotice} />
       </div>

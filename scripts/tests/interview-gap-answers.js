@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
-import { gapAdmissionFailure, gapCareerPieces, gapClosestFailure, generateInterviewGapAnswers, interviewGapPrompt } from '../../electron/ipc/interviewAnswerGap.js';
+import { gapAdmissionFailure, gapCareerPieces, gapClosestFailure, gapRoleQuestionFailure, generateInterviewGapAnswers, interviewGapPrompt } from '../../electron/ipc/interviewAnswerGap.js';
 import { addInterviewQaCard, fillInterviewQaFromPreparation, fillInterviewQaGaps, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard } from '../../electron/ipc/interviewQaStore.js';
 
 const PIECE = 'Engineer, Acme School, 2021 to 2024\nRan 3 Docker services on one virtual machine.';
@@ -43,7 +43,7 @@ export default [
       { id: 'c', question: 'Have you managed people?' }, { id: 'd', question: 'Describe your on-call experience.' }];
     const calls = [];
     const warnings = [];
-    const kept = await generateInterviewGapAnswers({ units, evidence, logWarning: message => warnings.push(message), callText: async (prompt, options) => {
+    const { gaps: kept, added: none } = await generateInterviewGapAnswers({ units, evidence, logWarning: message => warnings.push(message), callText: async (prompt, options) => {
       calls.push({ prompt, options });
       return { cards: [
         { id: 'a', gap: true, admission: 'I have not run Kubernetes in production.', closest: { text: 'The closest I have done is running 3 Docker services on one machine.', piece: 'p1' },
@@ -68,11 +68,14 @@ export default [
     assert(/When you are unsure, it is not a gap/u.test(calls[0].prompt) && !calls[0].prompt.includes('evidence-long-hash') && !calls[0].prompt.includes('Acme sells schools software'),
       'the request carries career pieces under short ids and no research');
     assert.equal(warnings.length, 1);
+    assert.deepEqual(none, [], 'no role questions are taken when none were asked for');
+    assert(calls[0].prompt.includes('Return an empty "roleQuestions" list.'));
   } },
   { name: 'interview gap: no request is made without questions or without career text', async run() {
     const callText = async () => { throw new Error('must not be called'); };
-    assert.equal((await generateInterviewGapAnswers({ units: [], evidence, callText })).size, 0);
-    assert.equal((await generateInterviewGapAnswers({ units: [{ id: 'a', question: 'Have you managed people?' }], evidence: [evidence[1]], callText })).size, 0);
+    assert.deepEqual(await generateInterviewGapAnswers({ units: [], evidence, callText }), { gaps: new Map(), added: [], asked: false });
+    const withoutCareer = await generateInterviewGapAnswers({ units: [{ id: 'a', question: 'Have you managed people?' }], evidence: [evidence[1]], role: { themes: [], listingText: 'x', existing: [] }, callText });
+    assert(withoutCareer.gaps.size === 0 && withoutCareer.asked === false, 'with no career text nothing is judged, and the role questions stay owed');
   } },
   { name: 'interview gap: a gap answer fills only an empty generated card, shows as an honest gap, and an edit makes it an ordinary card', async run() {
     await userData(async dir => {
@@ -84,11 +87,11 @@ export default [
       const asked = [];
       const first = await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async units => {
         asked.push(...units);
-        return new Map([[`company:${kubernetes.id}`, { admission: 'I have not run Kubernetes in production.',
+        return { asked: true, added: [], gaps: new Map([[`company:${kubernetes.id}`, { admission: 'I have not run Kubernetes in production.',
           closest: { text: 'The closest I have done is running 3 Docker services on one machine.', evidenceId: 'evidence-long-hash-1', quote: PIECE },
-          approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] }]]);
+          approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] }]]) };
       } });
-      assert.deepEqual(first, { requested: 2, saved: 1 });
+      assert.deepEqual(first, { requested: 2, saved: 1, added: 0 });
       assert.deepEqual(asked.map(unit => unit.question).sort(), ['Have you managed people?', 'Tell me about your Kubernetes experience.'], 'a card the person wrote is never offered');
       const cards = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).company.cards;
       const gap = cards.find(card => card.id === kubernetes.id);
@@ -105,6 +108,55 @@ export default [
       await saveInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { ...gap, headline: 'I ran Kubernetes on a side project.' } });
       const edited = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).company.cards.find(card => card.id === kubernetes.id);
       assert(edited.gap === false && edited.author === 'user', 'the person\'s own answer is no longer an honest-gap card');
+    });
+  } },
+  { name: 'interview gap: the role\'s own experience questions are asked for once, checked, and never repeat a kept question', async run() {
+    assert.equal(gapRoleQuestionFailure('Tell me about a time you led an incident response.'), null);
+    for (const refused of ['Too short?', 'Tell me about on-call. Then explain paging.', 'x'.repeat(201), 'Line one\nline two is here', null]) assert.notEqual(gapRoleQuestionFailure(refused), null);
+    const calls = [];
+    const role = { themes: ['Incident response'], listingText: 'You will carry the pager.', existing: ['Why are you interested in this role?', 'Incident response and on-call'] };
+    const { gaps, added, asked } = await generateInterviewGapAnswers({ units: [], evidence, role, callText: async (prompt, options) => {
+      calls.push({ prompt, options });
+      return { cards: [], roleQuestions: [
+        { question: 'Tell me about a time you led an incident response.', admission: 'I have not led an incident response.', closest: { text: 'The closest I have done is running 3 Docker services on one machine.', piece: 'p1' }, reminders: ['Explain how you would learn it', 'Name what carries over'] },
+        { question: 'Why are you interested in this role?', admission: 'I have not thought about this role.', closest: { text: '', piece: '' }, reminders: [] },
+        { question: 'What is your experience carrying a pager?', admission: 'I carried a pager for years.', closest: { text: '', piece: '' }, reminders: [] },
+        { question: 'tell me about a time you led an incident response', admission: 'I have not led an incident response.', closest: { text: '', piece: '' }, reminders: [] },
+      ] };
+    } });
+    assert(asked && gaps.size === 0 && calls.length === 1, 'the role questions are asked for even when no card is open');
+    assert.deepEqual(added, [{ question: 'Tell me about a time you led an incident response.', admission: 'I have not led an incident response.',
+      closest: { text: 'The closest I have done is running 3 Docker services on one machine.', evidenceId: 'evidence-long-hash-1', quote: PIECE },
+      approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] }],
+    'a kept question, an admission that claims experience and a repeat are all left out');
+    assert.equal(calls[0].prompt, interviewGapPrompt([], [{ id: 'p1', text: PIECE }, { id: 'p2', text: 'Engineer · Old Health: Wrote the billing export.' }], role));
+    assert(calls[0].prompt.includes('You will carry the pager.') && calls[0].prompt.includes('never invent a gap') && calls[0].prompt.includes('Incident response and on-call'));
+  } },
+  { name: 'interview gap: role questions become cards of the posting once, and a deleted one does not come back', async run() {
+    await userData(async dir => {
+      const answer = { admission: 'I have not led an incident response.', closest: null, approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] };
+      const seen = [];
+      const first = await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async (units, options) => {
+        seen.push({ units, options });
+        return { asked: true, gaps: new Map(), added: [{ question: 'Tell me about a time you led an incident response.', ...answer }, { question: 'Tell me about a time you led an incident response.', ...answer },
+          { question: 'What is your on-call experience?', admission: '', closest: null, approach: [] }] };
+      } });
+      assert.deepEqual(first, { requested: 0, saved: 0, added: 1 });
+      assert.deepEqual(seen[0], { units: [], options: { needRole: true, existing: [] } });
+      const cards = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).company.cards;
+      assert(cards.length === 1 && cards[0].gap === true && cards[0].origin === 'posting' && cards[0].status === 'ready' && cards[0].headline === 'I have not led an incident response.');
+
+      let asked = 0;
+      assert.deepEqual(await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async () => { asked += 1; return { asked: true, gaps: new Map(), added: [] }; } }), { requested: 0, saved: 0, added: 0 });
+      assert.equal(asked, 0, 'with no open card and the role questions already written, nothing is asked');
+
+      // Nothing was judged (no career text): the role questions are still owed to the next Prepare.
+      await userData(async other => {
+        await fillInterviewQaGaps({ userDataPath: other, nodeId: 'h', generate: async () => ({ asked: false, gaps: new Map(), added: [] }) });
+        let again = null;
+        await fillInterviewQaGaps({ userDataPath: other, nodeId: 'h', generate: async (_units, options) => { again = options; return { asked: true, gaps: new Map(), added: [] }; } });
+        assert.equal(again?.needRole, true);
+      });
     });
   } },
 ];

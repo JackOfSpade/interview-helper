@@ -64,8 +64,9 @@ optional description and two actions, modelled on Infinite Canvas.
   `electron/interviewApp/sessionStore.js`). A window that does not answer in
   two seconds is closed anyway. Checked from source on 2026-11-19 by quitting a
   trial copy with a quit Apple event; closing by the red button was not checked.
-- **Save… and Load…** in the interview list write the list to a file the
-  person chooses and read one back. The file holds the interview list only:
+- **File > Save Interviews… (⌘S) and Load Interviews… (⌘O)** write the list to
+  a file the person chooses and read one back. They act on the main window,
+  whichever window is in front. The file holds the interview list only:
   career text, Q&A, briefs and recordings stay in the data folder and are found
   again by interview id, so a file loaded on another machine brings the list
   without them. Load replaces the list after a confirmation, keeps the Applied
@@ -119,7 +120,7 @@ verified facts).
   ordinary answer; the review judges against the role and counts an honest gap
   as a gap, not as a bad answer.
 - **Honest-gap answers** (`electron/ipc/interviewAnswerGap.js`, stage
-  `qa-gap-answers`, built 2026-11-19, not yet run against a real job). After
+  `qa-gap-answers`, built 2026-11-19). After
   the answer writer and the topics step, Prepare offers every card that is
   still empty to one more call, with the career text. A question the career
   text does not answer at all gets a gap card: an admission ("I have not
@@ -130,6 +131,18 @@ verified facts).
   career text can answer is not a gap and stays empty for the answer writer.
   The card is stored with `gap: true`, shows "Honest gap" in the Q&A panel and
   leads with the admission on the cue card; an edit makes it an ordinary card.
+  The answer writer keeps only questions it can answer, so a job far from the
+  career often leaves no empty card. So once per posting
+  (`gapQuestionsGeneratedAt` in the posting's Q&A file) the same call also
+  names up to five experience questions the role's interviewers would ask that
+  the career text cannot answer, from the role themes and the listing; they are
+  added as posting cards with their gap answers, and a deleted one does not
+  come back. Live check from source, 2026-11-19: a music teacher's career
+  against a found Shopify Site Reliability Engineer posting. The first Prepare
+  (before role questions existed) wrote no gap card; the second added two
+  ("debugged a problem in a production software system", "contributing to open
+  source projects"), each with a correct admission. One live run only: how
+  often a real experience is wrongly called a gap is not measured.
 - A snapshot compiled before the split is still readable from
   `career-snapshot-store/career-snapshots`, so an interview prepared then keeps
   working. Nothing writes that folder.

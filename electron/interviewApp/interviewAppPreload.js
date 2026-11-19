@@ -112,6 +112,8 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
   onSaveStateNow: createListener('interview-app:save-state-now'),
   stateSavedNow: () => ipcRenderer.send('interview-app:state-saved-now'),
   // The interview list as a file the person keeps, and back from one.
+  // File > Save Interviews… and Load Interviews…: 'save' or 'load'.
+  onFileCommand: createListener('interview-app:file-command'),
   saveStateToFile: () => ipcRenderer.invoke('interview-app:save-state-to-file'),
   loadStateFromFile: () => ipcRenderer.invoke('interview-app:load-state-from-file'),
   chooseCareerFiles: () => ipcRenderer.invoke('interview-app:choose-career-files'),

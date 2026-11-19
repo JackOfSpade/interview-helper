@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });

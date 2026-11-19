@@ -62,9 +62,11 @@ function QaCard({ card, scope, company, links, mutate, busy, readOnly }) {
     try { await mutate('delete', scope, card); setConfirmDelete(false); }
     catch (failure) { setError(failure?.message || 'Could not delete this card. Try again.'); }
   };
+  // An honest-gap card leads with what to say; its reminders come after. Any other card shows reminders first.
+  const approach = card.approach?.length > 0 && <div className="text-xs"><p className="font-medium">{card.gap ? 'How to carry the rest of the answer' : 'Approach reminders (shown on the cue card)'}</p><ul className="list-disc pl-4">{card.approach.map((item, index) => <li key={index}>{item.text}{item.example && <ul className="list-[circle] pl-4 text-white/60"><li>{item.example}</li></ul>}</li>)}</ul></div>;
   return <article className="rounded-lg border border-white/15" aria-label={card.question}>
     <button type="button" className="flex w-full items-start gap-2 p-2 text-left hover:bg-white/5" aria-expanded={open || editing} onClick={() => setOpen(value => !value)}>
-      <span className="min-w-0 flex-1 text-xs font-medium">{card.question}{(card.status === 'needs-prep' || card.status === 'empty') && <span className="ml-1 text-amber-500">· no answer yet</span>}</span>
+      <span className="min-w-0 flex-1 text-xs font-medium">{card.question}{(card.status === 'needs-prep' || card.status === 'empty') && <span className="ml-1 text-amber-500">· no answer yet</span>}{card.gap && <span className="ml-1 text-sky-200">· honest gap</span>}</span>
       <PractisedCount count={card.practiced} />
     </button>
     {(open || editing) && <div className="space-y-2 border-t border-white/10 p-3">
@@ -73,9 +75,10 @@ function QaCard({ card, scope, company, links, mutate, busy, readOnly }) {
       {card.variants?.length > 0 && <details className="text-xs text-white/60"><summary className="cursor-pointer">Question variants ({card.variants.length})</summary><ul className="list-disc pl-4">{card.variants.map((variant, index) => <li key={index}>{variant}</li>)}</ul></details>}
       {(card.status === 'needs-prep' || card.status === 'empty') && <p className="text-xs text-amber-500">No prepared answer yet. Write your own answer, or Prepare to fill empty answers.</p>}
       {card.gap && <p className="text-xs text-sky-200">Your career data does not show this, so this answer says so plainly, then gives the closest thing you have done and how to carry on. If you have done it, edit the card with your real answer.</p>}
-      {card.approach?.length > 0 && <div className="text-xs"><p className="font-medium">{card.gap ? 'How to carry the rest of the answer' : 'Approach reminders (shown on the cue card)'}</p><ul className="list-disc pl-4">{card.approach.map((item, index) => <li key={index}>{item.text}{item.example && <ul className="list-[circle] pl-4 text-white/60"><li>{item.example}</li></ul>}</li>)}</ul></div>}
+      {!card.gap && approach}
       {card.headline && <p className="whitespace-pre-wrap text-sm font-medium">{card.headline}</p>}
-      {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{bullet.stage && <span className="text-white/60">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
+      {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{card.gap ? <span className="text-white/60">closest: </span> : bullet.stage && <span className="text-white/60">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
+      {card.gap && approach}
       {card.example && <div className="text-xs"><p className="font-medium">Example</p><p className="whitespace-pre-wrap">{card.example}</p></div>}
       {card.extensions?.length > 0 && <details className="text-xs"><summary className="cursor-pointer">Extension points (optional)</summary><ul className="list-disc pl-4">{card.extensions.map((item, index) => <li key={item.id || index}>{item.text}</li>)}</ul></details>}
       {card.thinEvidence && <p className="text-xs text-amber-500">Thin evidence — use only details you can support.</p>}
