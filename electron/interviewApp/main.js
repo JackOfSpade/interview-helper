@@ -29,6 +29,7 @@ import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
 import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
 import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
+import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
 
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell } = electronPkg;
@@ -182,19 +183,29 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('interview-app:save-state', guarded(state => sessions.save(state)));
     // The interview list as a file the person keeps. It holds the list only: career text, Q&A,
     // briefs and recordings stay in this app's data folder and are found again by interview id.
+    // Both dialogs open on the file last saved or loaded. Remembering it is a convenience:
+    // a failed write of the location never fails the save or load itself.
+    const saveLocation = createSaveLocationStore({ filePath: path.join(roots.profile, 'save-location.json') });
+    const rememberSaveLocation = async (filePath) => {
+      try { await saveLocation.write(filePath); } catch (error) { logger.warn?.(`[InterviewApp] save location not remembered: ${error?.message || error}`); }
+    };
     ipcMain.handle('interview-app:save-state-to-file', guarded(async () => {
       const result = await dialog.showSaveDialog(mainWindow, {
-        title: 'Save interviews to a file', defaultPath: `Interview Helper ${new Date().toISOString().slice(0, 10)}.json`,
+        title: 'Save interviews to a file',
+        defaultPath: saveDialogStartPath(saveLocation.read(), `Interview Helper ${new Date().toISOString().slice(0, 10)}.json`),
         filters: [{ name: 'Interview Helper state', extensions: ['json'] }],
       });
       if (result.canceled || !result.filePath) return { cancelled: true };
       await sessions.flush();
       await atomicWriteFile(result.filePath, encodeInterviewStateFile(await sessions.load()));
+      await rememberSaveLocation(result.filePath);
       return { saved: true, fileName: path.basename(result.filePath) };
     }));
     ipcMain.handle('interview-app:load-state-from-file', guarded(async () => {
+      const start = saveDialogStartPath(saveLocation.read());
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Load interviews from a file', properties: ['openFile'],
+        ...(start ? { defaultPath: start } : {}),
         filters: [{ name: 'Interview Helper state', extensions: ['json'] }],
       });
       if (result.canceled || !result.filePaths[0]) return { cancelled: true };
@@ -212,6 +223,8 @@ if (!app.requestSingleInstanceLock()) {
       if (answer.response !== 0) return { cancelled: true };
       // The replaced list is never lost: it is written beside the live one first.
       await atomicWriteFile(path.join(roots.data, `interview-helper-sessions.before-load-${Date.now()}.json`), encodeInterviewStateFile(current));
+      // The loaded file is now the current save: the next Save or Load starts there.
+      await rememberSaveLocation(result.filePaths[0]);
       // The folder is this machine's setting; a file from elsewhere must not point it at a missing path.
       return { state: await sessions.save({ ...loaded, appliedJobsFolder: current.appliedJobsFolder || loaded.appliedJobsFolder }) };
     }));
