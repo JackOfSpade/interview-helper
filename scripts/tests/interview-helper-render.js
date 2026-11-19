@@ -726,7 +726,7 @@ export default [
         };
         const root = await mount(bundle, window, { onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const event = new window.Event('drop', { bubbles: true });
           Object.defineProperty(event, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
           let bubbledToCanvas = false;
@@ -766,7 +766,7 @@ export default [
           nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
         });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
@@ -798,7 +798,7 @@ export default [
         };
         const root = await mount(bundle, window);
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           for (const name of ['bad\u0001.md', 'bad\u007f.md', 'bad\u0085.md', 'bad\u202e.md']) {
             const drop = new window.Event('drop', { bubbles: true });
             Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name }] } });
@@ -834,7 +834,7 @@ export default [
           try {
             const drop = new window.Event('drop', { bubbles: true });
             Object.defineProperty(drop, 'dataTransfer', { value: { files: scenario.names.map(name => ({ name })) } });
-            await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+            await bundle.module.act(async () => { window.document.querySelector('[data-career-drop]').dispatchEvent(drop); await flush(); await flush(); });
             assert(convertArgs?.nodeId && convertArgs.filePaths.length === scenario.names.length && convertArgs.filePaths[0] === `/orig/${scenario.names[0]}`, `${scenario.label}: conversion must get the dropped paths in order`);
             assert(text(window).includes(scenario.note), `${scenario.label}: the panel must list each file's outcome`);
             if (scenario.paths) {
@@ -864,7 +864,7 @@ export default [
           const dropFiles = async names => {
             const drop = new window.Event('drop', { bubbles: true });
             Object.defineProperty(drop, 'dataTransfer', { value: { files: names.map(name => ({ name })) } });
-            await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+            await bundle.module.act(async () => { window.document.querySelector('[data-career-drop]').dispatchEvent(drop); await flush(); await flush(); });
           };
           await dropFiles(['cv.pdf']);
           assert(convertCalls === 1 && updates.some(item => item.patch.interviewHelperCareerFilenames?.[0] === 'cv.pdf.txt'), 'a PDF drop must convert once and save the converted name');
@@ -879,7 +879,7 @@ export default [
         try {
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
-          await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[data-career-drop]').dispatchEvent(drop); await flush(); await flush(); });
           assert(convertCalls === 0 && parseArgs?.filePaths?.[0] === '/orig/career.md', 'a text-only drop must reach compile unchanged without conversion');
         } finally { await bundle.module.act(async () => textRoot.unmount()); }
       });
@@ -897,7 +897,7 @@ export default [
         };
         const careerRoot = await mount(bundle, window, { nodeId, onPersist: (patch, next) => careerUpdates.push({ patch, next }) });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
@@ -1404,7 +1404,7 @@ export default [
         const alternateSource = { ...sourceNodes(SNAPSHOT_B)[0], id: 'job-source-2' };
         const careerRoot = await mount(bundle, window, { nodes: [...sourceNodes(), alternateSource] });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
@@ -1497,7 +1497,7 @@ export default [
           onPersist: (patch, next) => discardUpdates.push({ patch, next }),
         });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'different-career.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
@@ -1559,7 +1559,7 @@ export default [
         await runAbandonmentCase({
           suffix: 'career',
           action: async () => {
-            const target = window.document.querySelector('.border-dashed');
+            const target = window.document.querySelector('[data-career-drop]');
             const drop = new window.Event('drop', { bubbles: true });
             Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
             await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
@@ -1803,7 +1803,7 @@ export default [
           },
         });
         try {
-          const target = window.document.querySelector('.border-dashed');
+          const target = window.document.querySelector('[data-career-drop]');
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'linkedin.md' }, { name: 'resume.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); await flush(); });
