@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics,
+  addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics,
   interviewQaPostingKey, interviewQaStoreKey, interviewQaTopicId, loadInterviewQa, loadInterviewQaTopics,
 } from '../../electron/ipc/interviewQaStore.js';
 
@@ -78,6 +78,30 @@ export default [
       await assert.rejects(addInterviewQaTopic({ userDataPath: dir, nodeId: 'n', text: 'One too many' }), /at most 40/u);
       assert.equal((await loadInterviewQaTopics({ userDataPath: dir, nodeId: 'n' })).length, 40);
       assert.equal((await loadInterviewQa({ userDataPath: dir, nodeId: 'n' })).company.topics.length, 40, 'the company section carries the topics');
+    });
+  } },
+  { name: 'interview Q&A: clear all empties one tab or the topics in one write and leaves the rest', async run() {
+    await userData(async dir => {
+      const own = question => ({ question, variants: [], headline: 'A headline.', bullets: [], example: '', extensions: [] });
+      await addInterviewQaCard({ userDataPath: dir, nodeId: 'n', scope: 'foundation', card: own('Tell me about yourself.') });
+      await addInterviewQaCard({ userDataPath: dir, nodeId: 'n', scope: 'company', card: own('Why Acme?') });
+      await addInterviewQaCard({ userDataPath: dir, nodeId: 'n', scope: 'company', card: own('What would you change?') });
+      await addInterviewQaTopic({ userDataPath: dir, nodeId: 'n', text: 'My own topic' });
+      await fillInterviewQaTopics({ userDataPath: dir, nodeId: 'n', generate: async () => ({ topics: ['Caching'], technical: [] }) });
+      const cleared = await clearInterviewQaCards({ userDataPath: dir, nodeId: 'n', scope: 'company' });
+      assert.deepEqual(cleared.cards, [], 'the posting tab is empty');
+      assert.equal(cleared.topics.length, 2, 'clearing cards keeps the topics');
+      let qa = await loadInterviewQa({ userDataPath: dir, nodeId: 'n' });
+      assert.deepEqual([qa.foundation.cards.length, qa.company.cards.length], [1, 0], 'General is untouched');
+      assert.deepEqual((await clearInterviewQaCards({ userDataPath: dir, nodeId: 'n', scope: 'company' })).cards, [], 'clearing an empty tab is not an error');
+      await addInterviewQaCard({ userDataPath: dir, nodeId: 'n', scope: 'company', card: own('Why Acme?') });
+      await assert.rejects(clearInterviewQaCards({ userDataPath: dir, nodeId: 'n', scope: 'other' }));
+      assert.deepEqual((await clearInterviewQaTopics({ userDataPath: dir, nodeId: 'n' })).topics, []);
+      await fillInterviewQaTopics({ userDataPath: dir, nodeId: 'n', generate: async () => ({ topics: ['Caching'], technical: [] }) });
+      qa = await loadInterviewQa({ userDataPath: dir, nodeId: 'n' });
+      assert.deepEqual([qa.company.topics.length, qa.company.cards.length, qa.foundation.cards.length], [0, 1, 1], 'cleared topics are not generated again and the cards stay');
+      await addInterviewQaTopic({ userDataPath: dir, nodeId: 'n', text: 'Caching' });
+      assert.equal((await loadInterviewQaTopics({ userDataPath: dir, nodeId: 'n' })).length, 1, 'a cleared topic can be added back by hand');
     });
   } },
   { name: 'interview Q&A topics: generation runs once, a deleted generated topic stays deleted and user topics survive', async run() {

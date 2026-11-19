@@ -177,6 +177,10 @@ The Q&A is always on screen in the side panel, in three tabs.
   question from the posting or from reported past interviews that the AI marks
   technical becomes a topic and its empty card is removed.
 
+Each tab has a Clear all button that deletes everything in it after a
+confirmation popup. It counts as deleting each item: an emptied General or
+posting tab is written again by the next Prepare, and cleared topics stay gone.
+
 General Q&A is one file (`interview-helper-qa/foundation.json`), not part of
 any interview: deleting an interview never touches it. When a Prepare writes
 Q&A the main process sends `interview-app:qa-changed`, and the Q&A panel on

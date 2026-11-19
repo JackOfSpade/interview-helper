@@ -172,6 +172,10 @@ const tests = [
       assert.deepEqual([added.channel, { ...added.args[0] }], ['add-interview-qa-topic', { nodeId: 'n', text: 'Kubernetes' }]);
       const deleted = await api.deleteInterviewQaTopic({ nodeId: 'n', topicId: 't1', extra: 1 });
       assert.deepEqual([deleted.channel, { ...deleted.args[0] }], ['delete-interview-qa-topic', { nodeId: 'n', topicId: 't1' }]);
+      const clearedCards = await api.clearInterviewQaCards({ nodeId: 'n', scope: 'company', extra: 1 });
+      assert.deepEqual([clearedCards.channel, { ...clearedCards.args[0] }], ['clear-interview-qa-cards', { nodeId: 'n', scope: 'company' }]);
+      const clearedTopics = await api.clearInterviewQaTopics({ nodeId: 'n', scope: 'company' });
+      assert.deepEqual([clearedTopics.channel, { ...clearedTopics.args[0] }], ['clear-interview-qa-topics', { nodeId: 'n' }]);
     },
   },
   {

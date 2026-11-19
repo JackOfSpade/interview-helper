@@ -40,7 +40,7 @@ import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from
 import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
 import { generateInterviewGapAnswers } from './interviewAnswerGap.js';
-import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { generateInterviewTopics } from './interviewQaTopics.js';
 import { createQuestionHistory } from '../practiceCall/questionHistory.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
@@ -828,6 +828,14 @@ function validateQaCardArgs(args, requireId) {
 function validateQaDeleteArgs(args) {
   strictKeys(args, ['nodeId', 'scope', 'cardId'], 'Interview Q&A requires a valid request.');
   if (!isInterviewHelperNodeId(args.nodeId) || !QA_SCOPES.includes(args.scope) || typeof args.cardId !== 'string' || !QA_CARD_ID.test(args.cardId)) throw new TypeError('Interview Q&A requires a valid request.');
+}
+function validateQaClearCardsArgs(args) {
+  strictKeys(args, ['nodeId', 'scope'], 'Interview Q&A requires a valid request.');
+  if (!isInterviewHelperNodeId(args.nodeId) || !QA_SCOPES.includes(args.scope)) throw new TypeError('Interview Q&A requires a valid request.');
+}
+function validateQaClearTopicsArgs(args) {
+  strictKeys(args, ['nodeId'], 'Interview Q&A requires a valid request.');
+  if (!isInterviewHelperNodeId(args.nodeId)) throw new TypeError('Interview Q&A requires a valid request.');
 }
 async function defaultPreparePractice({ userDataPath, nodeId, questions, company, callText, signal }) {
   const ordered = await planInterviewPracticeOrder({ questions, company, callText, signal });
@@ -1626,6 +1634,14 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     validateQaDeleteArgs(args);
     return deleteInterviewQaCard({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, scope: args.scope, cardId: args.cardId });
   }, { validateArgs: validateQaDeleteArgs });
+  registerHandler('clear-interview-qa-cards', async (_event, args) => {
+    validateQaClearCardsArgs(args);
+    return clearInterviewQaCards({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, scope: args.scope });
+  }, { validateArgs: validateQaClearCardsArgs });
+  registerHandler('clear-interview-qa-topics', async (_event, args) => {
+    validateQaClearTopicsArgs(args);
+    return topicsReply(args.nodeId, await clearInterviewQaTopics({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId }));
+  }, { validateArgs: validateQaClearTopicsArgs });
   // The finished preparation of each set of inputs (career data, posting, application), so a
   // second interview for the same posting reuses it instead of paying for it again.
   const PREPARED_INDEX_DIR = 'interview-helper-prepared-index';

@@ -335,6 +335,19 @@ export async function deleteInterviewQaCard({ userDataPath, nodeId, scope, cardI
   });
 }
 
+/** Deletes every card of one tab in a single write. Each question is remembered as deleted, as if removed one by one. */
+export async function clearInterviewQaCards({ userDataPath, nodeId, scope }) {
+  assertScope(scope);
+  return locked(userDataPath, scope, nodeId, async () => {
+    const store = await readStore(userDataPath, scope, nodeId);
+    const removed = store.cards.map(card => normalizeQuestion(card.question));
+    store.cards = [];
+    store.tombstones = [...store.tombstones.filter(item => !removed.includes(item)), ...new Set(removed)].slice(-MAX_TOMBSTONES);
+    await writeStore(userDataPath, scope, nodeId, store);
+    return section(store, scope);
+  });
+}
+
 // ------------------------------------------------------- empty tabs only --
 
 function generatedCard(card, { origin = 'catalog', source = null } = {}) {
@@ -734,6 +747,18 @@ export async function deleteInterviewQaTopic({ userDataPath, nodeId, topicId }) 
     if (!topics.some(item => item.id === topicId)) throw new Error('That topic is no longer listed.');
     store.topics = topics.filter(item => item.id !== topicId);
     store.topicTombstones = [...new Set([...topicTombstonesOf(store), topicId])].slice(-MAX_TOMBSTONES);
+    await writeStore(userDataPath, 'company', nodeId, store);
+    return section(store, 'company');
+  });
+}
+
+/** Deletes every topic of the posting in a single write. Like a single deletion, none of them is generated again. */
+export async function clearInterviewQaTopics({ userDataPath, nodeId }) {
+  return locked(userDataPath, 'company', nodeId, async () => {
+    const store = await readStore(userDataPath, 'company', nodeId);
+    const removed = topicsOf(store).map(item => item.id);
+    store.topics = [];
+    store.topicTombstones = [...new Set([...topicTombstonesOf(store), ...removed])].slice(-MAX_TOMBSTONES);
     await writeStore(userDataPath, 'company', nodeId, store);
     return section(store, 'company');
   });

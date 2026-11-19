@@ -11,6 +11,34 @@ function PractisedCount({ count }) {
 }
 const sameQuestion = (left, right) => String(left || '').trim().toLocaleLowerCase() === String(right || '').trim().toLocaleLowerCase();
 
+/** A Clear all button and the popup that asks before it empties a tab. `onClear` rejects with the reason when it fails. */
+function ClearAll({ label, count, consequence, onClear, disabled }) {
+  const [asking, setAsking] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState('');
+  const close = () => { if (!working) { setAsking(false); setError(''); } };
+  const confirm = async () => {
+    setWorking(true); setError('');
+    try { await onClear(); setAsking(false); }
+    catch (failure) { setError(failure?.message || 'Could not clear this tab. Try again.'); }
+    finally { setWorking(false); }
+  };
+  return <>
+    <button type="button" className={buttonClass} disabled={disabled || !count} onClick={() => setAsking(true)}>Clear all</button>
+    {asking && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onMouseDown={event => { if (event.target === event.currentTarget) close(); }} onKeyDown={event => { if (event.key === 'Escape') close(); }}>
+      <div role="alertdialog" aria-modal="true" aria-label={`Clear all ${label}`} className="w-full max-w-sm space-y-3 rounded-lg border border-white/15 bg-[#1b1924] p-4 text-xs shadow-2xl">
+        <p className="text-sm font-semibold">Clear all {label}?</p>
+        <p className="text-white/70">This deletes {count === 1 ? 'the 1 item' : `all ${count} items`} in this tab and cannot be undone. {consequence}</p>
+        {error && <p role="alert" className="text-amber-500">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <button type="button" autoFocus className={buttonClass} disabled={working} onClick={close}>Cancel</button>
+          <button type="button" className="rounded-md border border-red-400/40 bg-red-500/25 px-2 py-1 text-xs text-red-50 hover:bg-red-500/35 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-red-300" disabled={working} onClick={() => { void confirm(); }}>{working ? 'Clearing…' : 'Clear all'}</button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
 function CardForm({ card, scope, onSave, onCancel, busy }) {
   const [draft, setDraft] = useState(() => ({ ...card, variants: [...(card.variants || [])], bullets: (card.bullets || []).map(item => ({ ...item })), extensions: (card.extensions || []).map(item => ({ ...item })), approach: (card.approach || []).map(item => ({ ...item })) }));
   const [error, setError] = useState('');
@@ -98,7 +126,8 @@ function QaSection({ scope, section, company, foundationLinks, mutate, busy, rea
   const [adding, setAdding] = useState(false);
   const title = scope === 'foundation' ? 'General Q&A · shared across all interviews' : `${company || 'This job'} Q&A · this company and posting`;
   return <section className="space-y-2" aria-label={title}>
-    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold">{title}</h3><button type="button" className={buttonClass} disabled={busy || readOnly || adding} onClick={() => setAdding(true)}>Add card</button></div>
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold">{title}</h3><div className="flex gap-2"><ClearAll label={scope === 'foundation' ? 'General Q&A' : `${company || 'this job'} Q&A`} count={section.cards.length} disabled={busy || readOnly} onClear={() => mutate('clear', scope)}
+      consequence={`${scope === 'foundation' ? 'General Q&A is shared, so the cards go from every interview. ' : 'Another interview for the same posting loses them too. '}The next Prepare writes this tab again.`} /><button type="button" className={buttonClass} disabled={busy || readOnly || adding} onClick={() => setAdding(true)}>Add card</button></div></div>
     {scope === 'foundation' && <p className="text-[11px] text-white/60">Editing this shared set applies to every interview.</p>}
     {scope === 'company' && <p className="text-[11px] text-white/60">Another interview for the same company and posting shows this same set.</p>}
     {!section.cards.length && <p className="text-xs text-white/60">No cards yet. Add your own question or Prepare to get started.</p>}
@@ -118,7 +147,8 @@ function TopicsSection({ topics, company, mutateTopic, busy, readOnly }) {
     catch (failure) { setError(failure?.message || 'Could not change the topics. Try again.'); }
   };
   return <section className="space-y-2" aria-label="Technical topics">
-    <h3 className="text-xs font-semibold">Technical topics · {company || 'this job'}</h3>
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-xs font-semibold">Technical topics · {company || 'this job'}</h3><ClearAll label="technical topics" count={topics.length} disabled={busy || readOnly} onClear={() => mutateTopic('clear')}
+      consequence="Prepare does not list topics again for this posting, so you would add new ones by hand." /></div>
     <p className="text-[11px] text-white/60">Topics only, with no prepared answers: the right answer depends on how the question is asked. A practice interviewer makes up its own question on a topic each call.</p>
     {!topics.length && <p className="text-xs text-white/60">No topics yet. Prepare lists them from the job posting, or add your own.</p>}
     <ul className="space-y-1">{topics.map(topic => <li key={topic.id} className="flex items-center gap-2 rounded-lg border border-white/15 p-2 text-xs">
@@ -177,11 +207,12 @@ export function InterviewQaPanel({ nodeId, snapshotId, jobUrl = null, bundleArti
     try { await run(); } finally { mutating.current = false; setBusy(false); }
   };
   const mutate = (operation, scope, card) => guarded(async () => {
-    const method = { save: 'saveInterviewQaCard', add: 'addInterviewQaCard', delete: 'deleteInterviewQaCard' }[operation];
+    const method = { save: 'saveInterviewQaCard', add: 'addInterviewQaCard', delete: 'deleteInterviewQaCard', clear: 'clearInterviewQaCards' }[operation];
     if (!window.electronAPI?.[method]) throw new Error('Q&A editing is unavailable in this app version.');
-    const reply = await window.electronAPI[method](operation === 'delete' ? { nodeId, scope, cardId: card.id } : { nodeId, scope, card });
-    if (reply?.success === false) throw new Error(`${reply.error || 'Q&A update failed.'} Your text has been kept.`);
-    if (!Array.isArray(reply?.cards)) throw new Error('Q&A update response was invalid. Your text has been kept.');
+    const reply = await window.electronAPI[method](operation === 'clear' ? { nodeId, scope } : operation === 'delete' ? { nodeId, scope, cardId: card.id } : { nodeId, scope, card });
+    const kept = operation === 'save' || operation === 'add' ? ' Your text has been kept.' : '';
+    if (reply?.success === false) throw new Error(`${reply.error || 'Q&A update failed.'}${kept}`);
+    if (!Array.isArray(reply?.cards)) throw new Error(`Q&A update response was invalid.${kept}`);
     // An edit reply carries no counts: keep the ones already shown.
     setQa(previous => {
       const counts = new Map(previous[scope].cards.map(item => [item.id, item.practiced]));
@@ -192,9 +223,9 @@ export function InterviewQaPanel({ nodeId, snapshotId, jobUrl = null, bundleArti
     window.dispatchEvent(new window.CustomEvent('interview-qa-changed', { detail: { nodeId, scope } }));
   });
   const mutateTopic = (operation, value) => guarded(async () => {
-    const method = operation === 'add' ? 'addInterviewQaTopic' : 'deleteInterviewQaTopic';
+    const method = { add: 'addInterviewQaTopic', delete: 'deleteInterviewQaTopic', clear: 'clearInterviewQaTopics' }[operation];
     if (!window.electronAPI?.[method]) throw new Error('Topic editing is unavailable in this app version.');
-    const reply = await window.electronAPI[method](operation === 'add' ? { nodeId, text: value } : { nodeId, topicId: value });
+    const reply = await window.electronAPI[method](operation === 'clear' ? { nodeId } : operation === 'add' ? { nodeId, text: value } : { nodeId, topicId: value });
     if (reply?.success === false) throw new Error(reply.error || 'The topics could not be changed.');
     if (!Array.isArray(reply?.topics)) throw new Error('The topics could not be changed.');
     setQa(previous => ({ ...previous, company: { ...previous.company, topics: reply.topics } }));

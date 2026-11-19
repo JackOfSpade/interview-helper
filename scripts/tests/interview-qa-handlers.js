@@ -106,6 +106,21 @@ export default [
       await assert.rejects(call('delete-interview-qa-topic', { nodeId: 'node-1', topicId: added.topics[0].id }), /no longer listed/u);
     });
   } },
+  { name: 'interview Q&A handlers: clear all validates strictly and empties the cards of one scope or the topics', async run() {
+    await withHandlers(async ({ root, call, validators }) => {
+      validators.get('clear-interview-qa-cards')({ nodeId: 'node-1', scope: 'foundation' });
+      validators.get('clear-interview-qa-topics')({ nodeId: 'node-1' });
+      for (const bad of [{ nodeId: 'node-1' }, { nodeId: 'node-1', scope: 'topics' }, { nodeId: 'bad id!', scope: 'company' }, { nodeId: 'node-1', scope: 'company', extra: 1 }]) assert.throws(() => validators.get('clear-interview-qa-cards')(bad), TypeError, JSON.stringify(bad));
+      for (const bad of [{}, { nodeId: 'bad id!' }, { nodeId: 'node-1', scope: 'company' }]) assert.throws(() => validators.get('clear-interview-qa-topics')(bad), TypeError, JSON.stringify(bad));
+      await addInterviewQaCard({ userDataPath: root, nodeId: 'node-1', scope: 'company', card: card('Why Acme?') });
+      await addInterviewQaCard({ userDataPath: root, nodeId: 'node-1', scope: 'foundation', card: card('Tell me about yourself.') });
+      await call('add-interview-qa-topic', { nodeId: 'node-1', text: 'Terraform' });
+      assert.deepEqual((await call('clear-interview-qa-cards', { nodeId: 'node-1', scope: 'foundation' })).cards, []);
+      assert.deepEqual((await call('clear-interview-qa-topics', { nodeId: 'node-1' })).topics, []);
+      const after = await call('load-interview-qa', qaArgs());
+      assert.deepEqual([after.foundation.cards.length, after.company.cards.length, after.company.topics.length], [0, 1, 0]);
+    });
+  } },
   { name: 'interview Q&A handlers: a broken counts file reads as never practised', async run() {
     const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-qa-handlers-broken-')));
     try {

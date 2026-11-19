@@ -620,6 +620,54 @@ const QA_SETUP_TESTS = [
     },
   },
   {
+    name: 'interview helper render: Clear all asks in a popup before it empties a tab, and each tab has its own',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const clears = []; let failNext = true;
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewQa: async () => qaFixture(),
+          clearInterviewQaCards: async args => { clears.push(['cards', args]); if (failNext) { failNext = false; return { success: false, error: 'Disk full.' }; } return { status: 'missing', cards: [] }; },
+          clearInterviewQaTopics: async args => { clears.push(['topics', args]); return { topics: [] }; },
+        };
+        const root = await mount(bundle, window, { nodes: sourceNodes() });
+        try {
+          await settle(bundle);
+          const panel = window.document.querySelector('[data-testid="interview-qa-panel"]');
+          const popup = () => window.document.querySelector('[role="alertdialog"]');
+          const tabEls = () => [...window.document.querySelectorAll('[role="tab"]')];
+          await bundle.module.act(async () => { within(panel, 'Clear all').click(); await flush(); });
+          assert(clears.length === 0 && popup()?.getAttribute('aria-label') === 'Clear all General Q&A', 'Clear all opens a popup and deletes nothing yet');
+          assert(popup().textContent.includes('all 2 items') && popup().textContent.includes('every interview'), `the popup says what is lost, got ${popup().textContent}`);
+          await bundle.module.act(async () => { within(popup(), 'Cancel').click(); await flush(); });
+          assert(!popup() && clears.length === 0 && article(window, 'Tell me about yourself.'), 'Cancel closes the popup and keeps the cards');
+          await bundle.module.act(async () => { within(panel, 'Clear all').click(); await flush(); });
+          await bundle.module.act(async () => { within(popup(), 'Clear all').click(); await flush(); });
+          await settle(bundle);
+          assert(clears.length === 1 && popup()?.querySelector('[role="alert"]')?.textContent === 'Disk full.' && article(window, 'Tell me about yourself.'), 'a failed clear stays open with the reason and keeps the cards');
+          await bundle.module.act(async () => { within(popup(), 'Clear all').click(); await flush(); });
+          await settle(bundle);
+          assert(JSON.stringify(clears[1]) === JSON.stringify(['cards', { nodeId: 'interview-helper', scope: 'foundation' }]), 'clear call 1 carries only its reviewed fields');
+          assert(!popup() && !window.document.querySelector('article') && tabs(window).join('|') === 'General 0|Discord 2|Technical topics 2', `only General is emptied, got ${tabs(window).join('|')}`);
+          assert(within(panel, 'Clear all').disabled, 'Clear all is off for an empty tab');
+          await bundle.module.act(async () => { tabEls()[1].click(); await flush(); });
+          await bundle.module.act(async () => { within(panel, 'Clear all').click(); await flush(); });
+          assert(popup().getAttribute('aria-label') === 'Clear all Discord Q&A', 'the posting tab names its own set');
+          await bundle.module.act(async () => { within(popup(), 'Clear all').click(); await flush(); });
+          await settle(bundle);
+          assert(JSON.stringify(clears[2]) === JSON.stringify(['cards', { nodeId: 'interview-helper', scope: 'company' }]), 'clear call 2 carries only its reviewed fields');
+          assert(tabs(window).join('|') === 'General 0|Discord 0|Technical topics 2', 'clearing the posting cards keeps its topics');
+          await bundle.module.act(async () => { tabEls()[2].click(); await flush(); });
+          await bundle.module.act(async () => { within(panel, 'Clear all').click(); await flush(); });
+          assert(popup().getAttribute('aria-label') === 'Clear all technical topics' && popup().textContent.includes('by hand'), 'the topics popup says they are not listed again');
+          await bundle.module.act(async () => { within(popup(), 'Clear all').click(); await flush(); });
+          await settle(bundle);
+          assert(JSON.stringify(clears[3]) === JSON.stringify(['topics', { nodeId: 'interview-helper' }]), 'clear call 3 carries only its reviewed fields');
+          assert(!popup() && tabs(window)[2] === 'Technical topics 0', 'the topics are gone');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
     name: 'interview helper render: Q&A loads with the job URL and bundle artifact id once an application is chosen',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {

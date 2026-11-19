@@ -69,6 +69,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const { nodeId, scope, cardId } = args || {};
     return ipcRenderer.invoke('delete-interview-qa-card', { nodeId, scope, cardId });
   },
+  clearInterviewQaCards: (args) => {
+    const { nodeId, scope } = args || {};
+    return ipcRenderer.invoke('clear-interview-qa-cards', { nodeId, scope });
+  },
+  clearInterviewQaTopics: (args) => {
+    const { nodeId } = args || {};
+    return ipcRenderer.invoke('clear-interview-qa-topics', { nodeId });
+  },
 
   // Interview view and practice call
   launchInterviewWindow: args => ipcRenderer.invoke('interview-window:launch', args),
