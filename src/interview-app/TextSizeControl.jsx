@@ -22,11 +22,13 @@ export function TextSizeControl({ onError }) {
     try { setSize(await window.interviewAppAPI.setTextSize({ percent })); }
     catch (error) { onError?.(error?.message || 'The text size could not be changed.'); }
   };
-  const button = 'rounded-md border border-white/15 px-2 py-1 leading-none text-white/80 hover:bg-white/5 disabled:opacity-35';
+  const button = 'min-w-7 rounded-md border border-white/15 px-2 py-1 text-sm leading-none text-white/80 hover:bg-white/5 disabled:opacity-35';
+  // The percentage is only a readout. It was once a button back to the default, which read as a
+  // way to pick that size and undid the choice. The default is still on the View menu.
   return <div role="group" aria-label="Text size" className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 text-xs text-white/60">
     <span className="mr-auto">Text size</span>
-    <button type="button" className={`${button} text-[10px]`} aria-label="Smaller text" title="Smaller text (⌘−)" disabled={!size.canShrink} onClick={() => change(size.steps[index - 1])}>A</button>
-    <button type="button" className="min-w-10 rounded-md px-1 py-1 text-center tabular-nums text-white/80 hover:bg-white/5 disabled:hover:bg-transparent" aria-label={`Text size ${size.percent}%. Back to ${size.default}%`} title={`Back to ${size.default}% (⌘0)`} disabled={size.percent === size.default} onClick={() => change(size.default)}>{size.percent}%</button>
-    <button type="button" className={`${button} text-sm`} aria-label="Bigger text" title="Bigger text (⌘+)" disabled={!size.canGrow} onClick={() => change(size.steps[index + 1])}>A</button>
+    <button type="button" className={button} aria-label="Smaller text" title="Smaller text (⌘−)" disabled={!size.canShrink} onClick={() => change(size.steps[index - 1])}>−</button>
+    <span className="min-w-10 px-1 py-1 text-center tabular-nums text-white/80" aria-live="polite">{size.percent}%</span>
+    <button type="button" className={button} aria-label="Bigger text" title="Bigger text (⌘+)" disabled={!size.canGrow} onClick={() => change(size.steps[index + 1])}>+</button>
   </div>;
 }

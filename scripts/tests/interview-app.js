@@ -5,13 +5,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { interviewAppDataRoots } from '../../electron/interviewApp/dataRoots.js';
-import { createInterviewSessionStore, interviewSessionData, normalizeInterviewSessionsState, readInterviewHelperNodesFromCanvas } from '../../electron/interviewApp/sessionStore.js';
-import { formatPooledWorkspace, poolWorkspaceContent } from '../../electron/ipc/workspaceContentPool.js';
+import { STATE_SAVED_NOW_CHANNEL, STATE_SAVE_NOW_CHANNEL, createInterviewSessionStore, decodeInterviewStateFile, encodeInterviewStateFile, normalizeInterviewSessionsState, saveWindowStateNow } from '../../electron/interviewApp/sessionStore.js';
 import { chosenAppliedJobsRoot, createApplicationFolderRegistry, listApplicationFolders } from '../../electron/ipc/interviewApplicationFolders.js';
 import {
   CAREER_CONVERSIONS_DIR, createCareerFileConversionService, createCareerFileReader, registerCareerConversionHandlers, validateConvertArgs,
 } from '../../electron/interviewApp/careerFileConversion.js';
-import { addInterview, emptyInterviewData, importCanvasInterviews, interviewRunIds, interviewTitle, patchInterview, removeInterview } from '../../src/interview-app/sessions.js';
+import { addInterview, emptyInterviewData, interviewRunIds, interviewTitle, patchInterview, removeInterview } from '../../src/interview-app/sessions.js';
 import { BUILD_TARGETS, buildTargetFromArgv, packagingLockPath, selectBuildTarget, signBundledHelpers } from '../build-macos.mjs';
 
 const repoFile = relative => new URL(`../../${relative}`, import.meta.url);
@@ -72,6 +71,61 @@ const tests = [
     },
   },
   {
+    name: 'interview app: a state file round-trips the interview list and anything else is refused',
+    run() {
+      const state = normalizeInterviewSessionsState({ sessions: [{ id: 'node-1', title: 'Final round', createdAt: 5, data: { interviewHelperJobUrl: 'https://jobs.example.test/1', locked: true } }], selectedId: 'node-1', appliedJobsFolder: '/Users/x/Applied Jobs' });
+      const text = encodeInterviewStateFile(state, Date.UTC(2026, 10, 19));
+      assert.equal(JSON.parse(text).kind, 'interview-helper-state');
+      assert.equal(JSON.parse(text).savedAt, '2026-11-19T00:00:00.000Z');
+      assert.deepEqual(decodeInterviewStateFile(text), state);
+      assert.deepEqual(decodeInterviewStateFile(text).sessions[0].data, { interviewHelperJobUrl: 'https://jobs.example.test/1' }, 'only Interview Helper fields are kept');
+      for (const refused of ['not json', '{}', JSON.stringify({ sessions: [] }), JSON.stringify({ kind: 'interview-helper-state', version: 1, state: { sessions: 'no' } }), null]) {
+        assert.throws(() => decodeInterviewStateFile(refused), /not a saved Interview Helper state|too large/u);
+      }
+      assert.throws(() => decodeInterviewStateFile(JSON.stringify({ kind: 'interview-helper-state', version: 2, state: { sessions: [] } })), /newer version/u);
+    },
+  },
+  {
+    name: 'interview app: closing waits for the window to send its newest state, and never hangs on a window that cannot answer',
+    async run() {
+      const listeners = new Set();
+      const ipcMain = { on: (channel, fn) => { assert.equal(channel, STATE_SAVED_NOW_CHANNEL); listeners.add(fn); }, removeListener: (_channel, fn) => listeners.delete(fn) };
+      const sent = [];
+      const contents = { isDestroyed: () => false, isLoading: () => false, send: channel => sent.push(channel) };
+      const win = { isDestroyed: () => false, webContents: contents };
+      const waiting = saveWindowStateNow({ win, ipcMain, timeoutMs: 5000 });
+      assert.deepEqual(sent, [STATE_SAVE_NOW_CHANNEL]);
+      for (const fn of listeners) fn({ sender: { other: true } });
+      assert.equal(listeners.size, 1, 'an answer from another window is not this window\'s answer');
+      for (const fn of listeners) fn({ sender: contents });
+      assert.equal(await waiting, true);
+      assert.equal(listeners.size, 0, 'the listener is removed once answered');
+
+      assert.equal(await saveWindowStateNow({ win, ipcMain, timeoutMs: 10 }), false, 'a window that never answers is given up on');
+      assert.equal(listeners.size, 0);
+      assert.equal(await saveWindowStateNow({ win: null, ipcMain }), false);
+      assert.equal(await saveWindowStateNow({ win: { isDestroyed: () => true }, ipcMain }), false);
+      assert.equal(await saveWindowStateNow({ win: { isDestroyed: () => false, webContents: { ...contents, isLoading: () => true } }, ipcMain }), false, 'a page that has not loaded has nothing newer to send');
+      assert.equal(await saveWindowStateNow({ win: { isDestroyed: () => false, webContents: { ...contents, send: () => { throw new Error('gone'); } } }, ipcMain }), false);
+    },
+  },
+  {
+    name: 'interview app: flush resolves only after every save asked for so far is on disk',
+    async run() {
+      await withTempDir(async (directory) => {
+        const filePath = path.join(directory, 'sessions.json');
+        const store = createInterviewSessionStore({ filePath });
+        void store.save({ sessions: [{ id: 'node-1', data: {} }] });
+        void store.save({ sessions: [{ id: 'node-1', data: {} }, { id: 'node-2', data: {} }] });
+        await store.flush();
+        assert.deepEqual(JSON.parse(await fs.promises.readFile(filePath, 'utf8')).sessions.map(item => item.id), ['node-1', 'node-2']);
+        const failing = createInterviewSessionStore({ filePath: path.join(directory, 'missing', '\u0000bad', 'sessions.json') });
+        failing.save({ sessions: [] }).catch(() => {});
+        await failing.flush();
+      });
+    },
+  },
+  {
     name: 'interview app: a damaged saved-interviews file is reported and never overwritten',
     async run() {
       await withTempDir(async (directory) => {
@@ -85,48 +139,12 @@ const tests = [
     },
   },
   {
-    name: 'interview app: canvas import reads pooled and nested Interview Helper nodes without writing the canvas',
-    async run() {
-      await withTempDir(async (directory) => {
-        const node = (id, extra = {}) => ({ id, type: 'interviewhelper', position: { x: 0, y: 0 }, data: { interviewHelperCareerSnapshotId: SNAPSHOT, interviewHelperJobUrl: 'https://jobs.example.test/1', locked: true, ...extra } });
-        const workspace = { schemaVersion: 11, edges: [], drawings: [], nodes: [
-          // Repeated long content is what makes a real canvas save in the pooled format.
-          { id: 'note', type: 'text', data: { text: 'repeated '.repeat(400) } },
-          { id: 'note-2', type: 'text', data: { text: 'repeated '.repeat(400) } },
-          node('top-level'),
-          { id: 'group', type: 'group', data: { canvasData: { nodes: [node('nested', { practiceSteering: 'recruiter screen' })] } } },
-        ] };
-        const pooledPath = path.join(directory, 'pooled.json');
-        const plainPath = path.join(directory, 'plain.json');
-        const pooled = poolWorkspaceContent(structuredClone(workspace));
-        assert(pooled, 'the fixture must exercise the pooled canvas format');
-        await fs.promises.writeFile(pooledPath, formatPooledWorkspace(pooled));
-        await fs.promises.writeFile(plainPath, JSON.stringify(workspace));
-        const before = await fs.promises.readFile(pooledPath);
-        for (const canvasPath of [pooledPath, plainPath]) {
-          const { interviews } = await readInterviewHelperNodesFromCanvas(canvasPath);
-          assert.deepEqual(interviews.map(item => item.id), ['top-level', 'nested']);
-          assert.deepEqual(interviews[0].data, { interviewHelperCareerSnapshotId: SNAPSHOT, interviewHelperJobUrl: 'https://jobs.example.test/1' });
-          assert.equal(interviews[1].data.practiceSteering, 'recruiter screen');
-        }
-        assert(before.equals(await fs.promises.readFile(pooledPath)), 'the canvas file must be byte-identical after an import');
-        await fs.promises.writeFile(path.join(directory, 'junk.json'), 'not a canvas');
-        await assert.rejects(readInterviewHelperNodesFromCanvas(path.join(directory, 'junk.json')), /not a readable Infinite Canvas file/u);
-        assert.deepEqual(interviewSessionData(null), {});
-      });
-    },
-  },
-  {
-    name: 'interview app: an imported interview keeps its canvas node id and never overwrites one already here',
+    name: 'interview app: an interview keeps the id it was added with, takes fresh defaults, and is titled, patched and removed by id',
     run() {
       let state = { version: 1, sessions: [], selectedId: null, appliedJobsFolder: null };
       state = addInterview(state, { id: 'here', now: 1, data: { interviewHelperJobUrl: 'https://kept.example.test/' } });
-      const result = importCanvasInterviews(state, [
-        { id: 'here', data: { interviewHelperJobUrl: 'https://stale-canvas.example.test/' } },
-        { id: 'node-5e19', data: { interviewHelperCareerSnapshotId: SNAPSHOT, interviewHelperApplicationBundle: { label: 'Reddit · Software Engineer' } } },
-      ], 2);
-      assert.deepEqual([result.added, result.skipped], [1, 1]);
-      assert.equal(result.state.sessions[0].data.interviewHelperJobUrl, 'https://kept.example.test/', 'the copy already in the app is the newer one');
+      const result = { state: addInterview(state, { id: 'node-5e19', now: 2, data: { interviewHelperCareerSnapshotId: SNAPSHOT, interviewHelperApplicationBundle: { label: 'Reddit · Software Engineer' } } }) };
+      assert.equal(result.state.sessions[0].data.interviewHelperJobUrl, 'https://kept.example.test/');
       const imported = result.state.sessions[1];
       // Q&A and practice history are stored per id, so the id must carry over unchanged.
       assert.equal(imported.id, 'node-5e19');

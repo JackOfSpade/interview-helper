@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bug, CircleHelp, FolderInput, Plus, Trash2 } from 'lucide-react';
+import { Bug, Download, Plus, Trash2, Upload } from 'lucide-react';
 import './interviewApp.css';
 import { InterviewHelperPanel } from './InterviewHelperPanel';
 import { BugReportDialog } from './BugReportDialog';
@@ -8,7 +8,7 @@ import { installEventCapture, logEvent } from '../utils/eventLog';
 import { ClaudePauseNotice } from '../components/ClaudePauseNotice';
 import { JobRunStatusSection } from '../components/ClaudeRunStatus';
 import { generateId } from '../utils/idGenerator';
-import { addInterview, importCanvasInterviews, interviewRunIds, interviewTitle, patchInterview, removeInterview, renameInterview } from './sessions';
+import { addInterview, interviewRunIds, interviewTitle, patchInterview, removeInterview, renameInterview } from './sessions';
 
 const EMPTY_STATE = Object.freeze({ version: 1, sessions: [], selectedId: null, appliedJobsFolder: null });
 // Every interview stays mounted (hidden when not selected) so one that is still
@@ -62,6 +62,43 @@ export default function InterviewHelperApp() {
     });
   }, []);
 
+  // Closing the window or quitting the app: the main process asks for the newest state and waits.
+  // A field that saves when it loses focus is given the chance first, and the write skips the queue,
+  // which may still be waiting on an earlier one.
+  useEffect(() => {
+    const api = window.interviewAppAPI;
+    if (typeof api?.onSaveStateNow !== 'function') return undefined;
+    return api.onSaveStateNow(async () => {
+      try {
+        window.document.activeElement?.blur?.();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await api.saveState(stateRef.current);
+      } catch { /* the main process still writes what it already has */ }
+      finally { api.stateSavedNow?.(); }
+    });
+  }, []);
+
+  // The interview list as a file the person keeps, and back from one.
+  const saveToFile = async () => {
+    setNotice(null);
+    try {
+      await writeQueue.current;
+      const result = await window.interviewAppAPI.saveStateToFile();
+      if (result?.saved) setNotice(`Saved your interviews to "${result.fileName}". Q&A, career data and recordings stay in the app.`);
+    } catch (error) { setNotice(error?.message || 'Your interviews could not be saved to that file.'); }
+  };
+  const loadFromFile = async () => {
+    setNotice(null);
+    try {
+      await writeQueue.current;
+      const result = await window.interviewAppAPI.loadStateFromFile();
+      if (!result?.state) return;
+      stateRef.current = { ...EMPTY_STATE, ...result.state };
+      setState(stateRef.current);
+      setNotice(`Loaded ${result.state.sessions.length} interview${result.state.sessions.length === 1 ? '' : 's'} from the file. The list from before is kept as a backup in the app's data folder.`);
+    } catch (error) { setNotice(error?.message || 'That file could not be loaded.'); }
+  };
+
   // A step that Claude could not finish on its own would wait here for a
   // pasted answer; this app has no paste box, so end it and let Retry restart it.
   useEffect(() => {
@@ -86,19 +123,6 @@ export default function InterviewHelperApp() {
       if (folder) commit(current => ({ ...current, appliedJobsFolder: folder }));
     } catch (error) { setNotice(error?.message || 'The Applied Jobs folder could not be chosen.'); }
   }, [commit]);
-  const importFromCanvas = async () => {
-    setNotice(null);
-    try {
-      const result = await window.interviewAppAPI.readCanvasInterviews();
-      if (!result || result.cancelled) return;
-      const { state: next, added, skipped } = importCanvasInterviews(stateRef.current, result.interviews);
-      // Applications are written next to the canvas, so that folder is the likely one.
-      const folder = next.appliedJobsFolder || (result.canvasFolder ? `${result.canvasFolder}/Applied Jobs` : null);
-      commit(() => ({ ...next, appliedJobsFolder: folder }));
-      setNotice(!result.interviews?.length ? 'That canvas has no Interview Helper to import.'
-        : `Imported ${added} interview${added === 1 ? '' : 's'}${skipped ? `; ${skipped} already here` : ''}.`);
-    } catch (error) { setNotice(error?.message || 'That canvas file could not be read.'); }
-  };
   const deleteInterview = async (session) => {
     if (deleting) return;
     if (!window.confirm(`Delete "${interviewTitle(session)}" from this list? Its saved Q&A and practice recordings stay on disk.`)) return;
@@ -119,7 +143,7 @@ export default function InterviewHelperApp() {
 
   return <div className="flex h-full bg-[#111018] text-white">
     <aside className="flex w-60 shrink-0 flex-col border-r border-white/10 bg-[#16141c]" aria-label="Interviews">
-      <div className="flex items-center gap-2 border-b border-white/10 px-3 py-3"><CircleHelp size={17} className="text-violet-300" /><h1 className="text-sm font-semibold">Interview Helper</h1></div>
+      {/* The window's title bar already names the app, so the heading is for screen readers only. */}<h1 className="sr-only">Interview Helper</h1>
       <ul className="min-h-0 flex-1 overflow-y-auto p-2" role="listbox" aria-label="Interviews">
         {state.sessions.map(session => <li key={session.id} role="option" aria-selected={session.id === selectedId} className={`group flex items-center gap-1 rounded-md px-2 py-1.5 text-xs ${session.id === selectedId ? 'bg-violet-500/20 text-white' : 'text-white/70 hover:bg-white/5'}`}>
           <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => commit(current => ({ ...current, selectedId: session.id }))}>{interviewTitle(session)}</button>
@@ -129,7 +153,10 @@ export default function InterviewHelperApp() {
       </ul>
       <div className="space-y-1 border-t border-white/10 p-2">
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 hover:bg-violet-500/30" onClick={newInterview}><Plus size={13} />New interview</button>
-        <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={importFromCanvas}><FolderInput size={13} />Import from canvas file…</button>
+        <div className="flex gap-1">
+          <button type="button" className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" title="Save the interview list to a file. Changes are also saved automatically." onClick={saveToFile}><Download size={13} />Save…</button>
+          <button type="button" className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" title="Replace the interview list with one saved to a file" onClick={loadFromFile}><Upload size={13} />Load…</button>
+        </div>
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={() => setReportingBug(true)}><Bug size={13} />Report a bug…</button>
         <TextSizeControl onError={setNotice} />
       </div>

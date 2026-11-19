@@ -333,7 +333,7 @@ export function attachInterviewLiveCards(bank, storeCards) {
     const approach = Object.freeze((Array.isArray(stored.approach) ? stored.approach : []).filter(item => typeof item?.text === 'string' && item.text.trim())
       .slice(0, 6).map(item => Object.freeze({ text: item.text.trim().slice(0, 200), example: typeof item.example === 'string' ? item.example : '' })));
     const recentEmployer = typeof stored.recentEmployer === 'string' ? stored.recentEmployer.slice(0, 200) : '';
-    CARD_META.set(card, Object.freeze({ ...meta, approach, recentEmployer, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
+    CARD_META.set(card, Object.freeze({ ...meta, approach, recentEmployer, gap: stored.gap === true && answered, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
     return card;
   });
   LIVE_CARDS.set(bank, Object.freeze(live));
@@ -378,7 +378,7 @@ function projectLiveCard(card, bank) {
   const projected = withCues(OVERLAY_CARDS.has(card) ? projectOverlayCard(card, bank) : projectAnswerCard(card, bank), CARD_CUES.get(card));
   const meta = CARD_META.get(card);
   return meta ? Object.freeze({ ...projected, scope: meta.scope, origin: meta.origin, source: meta.source, author: meta.author, status: meta.status,
-    ...(meta.approach?.length ? { approach: meta.approach } : {}), ...(meta.recentEmployer ? { recentEmployer: meta.recentEmployer } : {}) }) : projected;
+    ...(meta.approach?.length ? { approach: meta.approach } : {}), ...(meta.gap ? { gap: true } : {}), ...(meta.recentEmployer ? { recentEmployer: meta.recentEmployer } : {}) }) : projected;
 }
 
 function cardSharesExactStory(plan, card, bank) {

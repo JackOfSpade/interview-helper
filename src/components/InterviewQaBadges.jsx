@@ -9,6 +9,7 @@ export function InterviewQaBadges({ card, details = false }) {
     {card.author === 'user' && <span className="qa-edited">Edited by you</span>}
     {card.status === 'needs-prep' && <span className="qa-needs-prep text-amber-500">Needs prep</span>}
     {card.status === 'empty' && <span className="qa-empty text-amber-500">Empty</span>}
+    {card.gap && <span className="qa-gap rounded border border-sky-300/50 px-1 text-sky-200" title="Your career data does not show this, so the answer says so honestly.">Honest gap</span>}
     {details && card.source && <details className="w-full"><summary className="cursor-pointer">Question source</summary>
       {card.source.date && <p>Source date: {card.source.date}</p>}
       {card.source.quote && <blockquote className="mt-1 border-l-2 border-white/15 pl-2">{card.source.quote}</blockquote>}

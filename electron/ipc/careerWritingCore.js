@@ -64,6 +64,8 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-glance-cues': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a cue (docs/ai-model-selection.md).
   'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // qa-gap-answers (which unanswered questions the career text cannot answer, and the honest admission, closest experience and reminders for those; one call per Prepare that has unanswered cards): Opus medium, not yet tested. It reads the whole career text against every open question and a wrong "gap" tells the person to deny real experience, so it gets the same thought as qa-approach-reminders.
+  'qa-gap-answers': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // qa-technical-topics (the list of technical subjects a posting's interview would test, one call per posting): Sonnet low, not yet tested. Chosen by analogy with qa-disclosures, another extraction from supplied text where Sonnet low kept everything and Haiku dropped items.
   'qa-technical-topics': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
   // Typed-job stages (a typed link, or a company and role, turned into a job for Prepare; electron/ipc/interviewTypedJob.js). All four are chosen by analogy and need a test (docs/ai-model-selection.md).

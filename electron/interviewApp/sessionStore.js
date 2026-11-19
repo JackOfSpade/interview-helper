@@ -6,12 +6,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { parseWorkspaceText } from '../ipc/workspaceContentPool.js';
 
 const INTERVIEW_SESSIONS_VERSION = 1;
 const MAX_SESSIONS = 200;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
-const MAX_CANVAS_BYTES = 512 * 1024 * 1024;
 const SESSION_ID = /^[A-Za-z0-9_-]{1,160}$/u;
 const DATA_KEY = /^(?:interviewHelper[A-Za-z]{1,60}|practiceSteering)$/u;
 
@@ -75,6 +73,8 @@ export function createInterviewSessionStore({ filePath } = {}) {
   }
 
   return Object.freeze({
+    // Resolves once every save asked for so far is on disk; quitting waits for it.
+    flush: () => queue.then(() => undefined),
     load: () => serialized(async () => { cached ||= await read(); return structuredClone(cached); }),
     save: state => serialized(async () => {
       const next = normalizeInterviewSessionsState(state);
@@ -97,25 +97,50 @@ export function createInterviewSessionStore({ filePath } = {}) {
   });
 }
 
-function collectInterviewHelperNodes(nodes, found, depth = 0) {
-  if (!Array.isArray(nodes) || depth > 32) return;
-  for (const node of nodes) {
-    if (!isRecord(node)) continue;
-    if (node.type === 'interviewhelper' && SESSION_ID.test(node.id || '')) found.push({ id: node.id, data: interviewSessionData(node.data) });
-    // Groups hold a nested canvas.
-    collectInterviewHelperNodes(node.data?.canvasData?.nodes, found, depth + 1);
-  }
+
+// ------------------------------------------------------- a saved state file --
+
+const STATE_FILE_KIND = 'interview-helper-state';
+const STATE_FILE_VERSION = 1;
+
+/**
+ * The text of a state file the person saves: the interview list as it is stored, in a
+ * wrapper that says what the file is. It holds the list only. Career text, Q&A, briefs and
+ * recordings stay in the app's data folder and are found again by each interview's id.
+ */
+export function encodeInterviewStateFile(state, now = Date.now()) {
+  return `${JSON.stringify({ kind: STATE_FILE_KIND, version: STATE_FILE_VERSION, savedAt: new Date(now).toISOString(), state: normalizeInterviewSessionsState(state) }, null, 2)}\n`;
 }
 
-/** Read-only: the Interview Helper nodes saved in a canvas file, as interviews. */
-export async function readInterviewHelperNodesFromCanvas(canvasPath) {
-  if (typeof canvasPath !== 'string' || !path.isAbsolute(canvasPath)) throw new TypeError('A canvas file path is required.');
-  const stat = await fs.promises.stat(canvasPath);
-  if (!stat.isFile() || stat.size > MAX_CANVAS_BYTES) throw new Error('That file cannot be read as a canvas.');
-  let workspace;
-  try { workspace = parseWorkspaceText(await fs.promises.readFile(canvasPath, 'utf8')); }
-  catch { throw new Error('That file is not a readable Infinite Canvas file.'); }
-  const found = [];
-  collectInterviewHelperNodes(workspace?.nodes, found);
-  return { interviews: found };
+/** The state in a saved file. Anything that is not a state file saved by this app is refused. */
+export function decodeInterviewStateFile(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > MAX_STATE_BYTES) throw new Error('That file is too large to be a saved Interview Helper state.');
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw new Error('That file is not a saved Interview Helper state.'); }
+  if (!isRecord(parsed) || parsed.kind !== STATE_FILE_KIND || !isRecord(parsed.state) || !Array.isArray(parsed.state.sessions)) throw new Error('That file is not a saved Interview Helper state.');
+  if (parsed.version !== STATE_FILE_VERSION) throw new Error('That file was saved by a newer version of Interview Helper.');
+  return normalizeInterviewSessionsState(parsed.state);
 }
+
+/**
+ * Asks the window to send its newest state now and waits for it, so closing the window or
+ * quitting the app never drops a change that had not been written yet. Resolves true when
+ * the window answered, false when it could not (already gone, still loading, or too slow).
+ */
+export function saveWindowStateNow({ win, ipcMain, timeoutMs = 2000 }) {
+  let contents;
+  try {
+    contents = win && !win.isDestroyed() ? win.webContents : null;
+    if (!contents || contents.isDestroyed() || contents.isLoading()) return Promise.resolve(false);
+  } catch { return Promise.resolve(false); }
+  return new Promise((resolve) => {
+    let timer = null;
+    const done = (answered) => { clearTimeout(timer); ipcMain.removeListener(STATE_SAVED_NOW_CHANNEL, onAnswer); resolve(answered); };
+    const onAnswer = (event) => { if (event?.sender === contents) done(true); };
+    timer = setTimeout(() => done(false), timeoutMs);
+    ipcMain.on(STATE_SAVED_NOW_CHANNEL, onAnswer);
+    try { contents.send(STATE_SAVE_NOW_CHANNEL); } catch { done(false); }
+  });
+}
+export const STATE_SAVE_NOW_CHANNEL = 'interview-app:save-state-now';
+export const STATE_SAVED_NOW_CHANNEL = 'interview-app:state-saved-now';

@@ -54,11 +54,31 @@ optional description and two actions, modelled on Infinite Canvas.
   `interview-app:save-bug-report`). The cue card and practice call windows have
   no button and their events are not recorded.
 
+## Saving (2026-11-19)
+
+- **Every change is saved as it is made**; there is no Save step for the app's
+  own copy (`interview-helper-sessions.json` in the data folder).
+- **Closing the window or quitting** (⌘Q, the menu, or Quit from the Dock icon)
+  first asks the window for its newest state and waits for it, then waits for
+  every queued write (`saveWindowStateNow` and `flush` in
+  `electron/interviewApp/sessionStore.js`). A window that does not answer in
+  two seconds is closed anyway. Checked from source on 2026-11-19 by quitting a
+  trial copy with a quit Apple event; closing by the red button was not checked.
+- **Save… and Load…** in the interview list write the list to a file the
+  person chooses and read one back. The file holds the interview list only:
+  career text, Q&A, briefs and recordings stay in the data folder and are found
+  again by interview id, so a file loaded on another machine brings the list
+  without them. Load replaces the list after a confirmation, keeps the Applied
+  Jobs folder of this machine, and first writes the replaced list to
+  `interview-helper-sessions.before-load-<time>.json` in the data folder.
+
 ## Text size (built 2026-11-18)
 
 One setting for every window the app opens: the main window, the cue card and
 the practice call (`electron/interviewApp/textSize.js`).
 
+- **The list control is − 125% +.** The percentage is a readout, not a button:
+  it used to reset to 100% when clicked, which undid the choice.
 - **Where it is changed:** "Text size" at the bottom of the interview list, and
   View > Bigger Text (⌘+), Smaller Text (⌘−), Default Text Size (⌘0). The menu
   works from any window. Steps: 80, 90, 100, 110, 125, 150, 175, 200%.
@@ -90,6 +110,26 @@ verified facts).
   title, employer and dates). Contact lines are left out.
 - Practice interviewers get the whole text. The practice call greets the
   candidate by the name stated near the top of the text, when there is one.
+- **The job is never fitted to the candidate** (owner's request, 2026-11-19).
+  A found or generated listing may not match the career data at all, and the
+  interview is held anyway. The call planner picks questions, people and
+  problems from the role and company alone and uses the career text only for
+  probes; the interviewer runs the role's real interview at its real bar, never
+  asks why the candidate was invited, and takes "I have never done that" as an
+  ordinary answer; the review judges against the role and counts an honest gap
+  as a gap, not as a bad answer.
+- **Honest-gap answers** (`electron/ipc/interviewAnswerGap.js`, stage
+  `qa-gap-answers`, built 2026-11-19, not yet run against a real job). After
+  the answer writer and the topics step, Prepare offers every card that is
+  still empty to one more call, with the career text. A question the career
+  text does not answer at all gets a gap card: an admission ("I have not
+  done X"), at most one closest-experience line tied to one career piece, and
+  two or three reminders on how to carry on. The host refuses an admission
+  that denies nothing or holds a number, a closest line with a number its
+  career piece lacks, and reminders that describe the person. A question the
+  career text can answer is not a gap and stays empty for the answer writer.
+  The card is stored with `gap: true`, shows "Honest gap" in the Q&A panel and
+  leads with the admission on the cue card; an edit makes it an ordinary card.
 - A snapshot compiled before the split is still readable from
   `career-snapshot-store/career-snapshots`, so an interview prepared then keeps
   working. Nothing writes that folder.
@@ -113,6 +153,11 @@ The Q&A is always on screen in the side panel, in three tabs.
   posting from the listing; after that only the person changes it. An unanswered
   question from the posting or from reported past interviews that the AI marks
   technical becomes a topic and its empty card is removed.
+
+General Q&A is one file (`interview-helper-qa/foundation.json`), not part of
+any interview: deleting an interview never touches it. When a Prepare writes
+Q&A the main process sends `interview-app:qa-changed`, and the Q&A panel on
+screen reloads, whichever interview it shows.
 
 Prepare only fills empty answers. A saved answer, generated or edited, is never
 rewritten, and a deleted question or topic does not come back. A first Prepare
@@ -158,8 +203,9 @@ are verified once at launch. Details: `docs/interview-live-ai-matching.md`.
 ## What replaced the canvas
 
 - One interview is what one Interview Helper node was, under the same id (before a posting is chosen, Q&A
-  and practice history are stored per id). "Import from canvas file" reads a
-  canvas without writing it.
+  and practice history are stored per id). Interviews cannot be imported from
+  a canvas file: that import and its button were removed on 2026-11-19 (owner's
+  decision). The one-time copy of data on first start, above, is unchanged.
 - Career files are dropped on the window or picked with "Choose files".
 - Applications come from an `Applied Jobs` folder chosen once in the app.
 - Changes save immediately; there is no undo.

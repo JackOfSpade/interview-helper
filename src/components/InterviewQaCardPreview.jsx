@@ -41,6 +41,7 @@ export function qaCardToDisplayCard(card, scope) {
     source: source.source && typeof source.source.url === 'string' ? { url: source.source.url, date: String(source.source.date || 'unknown'), quote: String(source.source.quote || '') } : null,
     author: source.author === 'user' ? 'user' : 'generated',
     status: answered ? 'ready' : origin === 'disclosed' ? 'needs-prep' : 'empty',
+    ...(source.gap === true && answered ? { gap: true } : {}),
   };
 }
 

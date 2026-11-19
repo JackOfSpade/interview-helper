@@ -39,7 +39,8 @@ import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
 import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
-import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { generateInterviewGapAnswers } from './interviewAnswerGap.js';
+import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { generateInterviewTopics } from './interviewQaTopics.js';
 import { createQuestionHistory } from '../practiceCall/questionHistory.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
@@ -1445,6 +1446,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   preparePractice = defaultPreparePractice,
   fillCues = fillInterviewQaCues,
   fillApproaches = fillInterviewQaApproaches,
+  fillGaps = fillInterviewQaGaps,
+  // Told after a Prepare wrote Q&A, so a window showing another interview reloads the shared sets.
+  onQaChanged = null,
   practiceRegistry = null,
   resolveAppliedJobsRoot = null,
   typedJob = null,
@@ -1674,12 +1678,26 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
           const bundle = await loadPrivateInterviewPreparationBundle({ artifactId: args.bundleArtifactId, userDataPath });
           await fillTopics({ userDataPath, nodeId: args.nodeId, generate: ({ needList, questions }) => writeTopics({ brief: published.brief, listingText: bundle?.listingText || '', needList, questions, callText, signal }) });
         });
+        // Honest-gap answers: the job is never fitted to the person, so a question may ask about
+        // something the career text does not show. Such a card gets an honest "I have not done
+        // this" answer instead of staying empty. It runs after the topics step, which first
+        // turns unanswered technical questions into topics.
+        await optionalStep('honest-gap answers', 'Answers for questions outside your experience could not be written this time; those cards stay empty.', async () => {
+          const filled = await fillGaps({ userDataPath, nodeId: args.nodeId,
+            generate: units => generateInterviewGapAnswers({ units, evidence: checkedBank?.evidence, callText, signal, logWarning }) });
+          // The new lines get their short live-card reminders in the same Prepare.
+          if (filled?.saved > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
+            generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
+        });
         // Practice mode: an AI-planned interview order over every Foundation and
         // company question, each recorded once with an on-device voice.
         await optionalStep('practice preparation', 'Practice recordings could not be prepared this time.', () => preparePractice({
           userDataPath, nodeId: args.nodeId, signal, callText, company,
           questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question) }));
       }
+      // General Q&A is one set for every interview, and a posting's set is shared by its interviews:
+      // whichever interview is on screen must show what this Prepare wrote.
+      if (qa) { try { onQaChanged?.({ nodeId: args.nodeId }); } catch { /* a listener cannot fail a finished Prepare */ } }
       await rememberPrepared(args, published.briefRecordId);
       return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}) };
     }

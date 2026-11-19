@@ -27,6 +27,9 @@ const base = [
     name: 'interview practice prompt: the interviewer knows the candidate name only when one is given',
     run() {
       const without = buildInterviewerInstructions({ persona, brief, plan });
+      assert.match(without, /never ask why they were invited/u, 'the interviewer takes the candidate\'s place in the interview as given');
+      assert.match(without, /Never make a question easier, skip a planned question or change the subject because the candidate's background does not cover it/u);
+      assert.match(without, /"I have never done that" or "I do not know" is an ordinary answer/u);
       assert.equal(without.includes('You do not have the candidate\'s name in front of you. Never guess one.'), true);
       assert.equal(without.includes('name on their application'), false);
       for (const blank of ['', '   ', null, 7]) assert.equal(buildInterviewerInstructions({ persona, brief, plan, candidateName: blank }), without);

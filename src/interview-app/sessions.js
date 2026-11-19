@@ -64,21 +64,6 @@ export function removeInterview(state, id) {
   return { ...state, sessions, selectedId: state.selectedId === id ? (sessions[0]?.id || null) : state.selectedId };
 }
 
-/**
- * Add interviews read from a canvas file. An id that already exists here is
- * skipped, never overwritten: the copy in this app is the newer one.
- */
-export function importCanvasInterviews(state, interviews, now = Date.now()) {
-  let next = state;
-  let added = 0;
-  for (const item of Array.isArray(interviews) ? interviews : []) {
-    if (!item || typeof item.id !== 'string' || next.sessions.some(session => session.id === item.id)) continue;
-    next = addInterview(next, { id: item.id, now, data: item.data });
-    added += 1;
-  }
-  return { state: next, added, skipped: (Array.isArray(interviews) ? interviews.length : 0) - added };
-}
-
 export const RUN_ID_RE = INTERVIEW_RUN_ID_RE;
 
 /** Worker run ids an interview may still own, so deleting it can retire them. */

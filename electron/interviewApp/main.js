@@ -4,6 +4,8 @@
 // and repository. Feature code lives under electron/ and src/.
 import electronPkg from 'electron';
 import path from 'path';
+import fs from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 import { getRecentLogs, logger } from '../logger.js';
 import { pathToFileURL } from 'node:url';
 import { registerCareerTextHandlers } from '../ipc/careerText.js';
@@ -21,7 +23,7 @@ import { registerNetworkHandlers } from '../ipc/network.js';
 import { flushNonApiAiPersistence, getNonApiAiHandoffLifecycleSnapshot, registerNonApiAiHandlers } from '../ipc/nonApiAi.js';
 import { claudeTaskWorkerActivity, claudeTaskWorkerStatus, registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from '../ipc/claudeTaskWorker.js';
 import { isRendererSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
-import { createInterviewSessionStore, readInterviewHelperNodesFromCanvas } from './sessionStore.js';
+import { createInterviewSessionStore, decodeInterviewStateFile, encodeInterviewStateFile, saveWindowStateNow } from './sessionStore.js';
 import { interviewAppDataRoots } from './dataRoots.js';
 import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
@@ -63,6 +65,10 @@ let mainWindow = null;
 let interviewWindowController = null;
 let practiceCallController = null;
 let quitting = false;
+let sessionStore = null;
+
+/** The window's newest state, then every queued write, on disk. Never rejects: closing must go on. */
+const saveEverythingNow = win => saveWindowStateNow({ win, ipcMain }).catch(() => false).then(() => sessionStore?.flush()).catch(() => {});
 
 const isMainWindow = owner => !!owner && owner === mainWindow && !owner.isDestroyed();
 function ownerOf(sender) {
@@ -87,6 +93,13 @@ function createMainWindow() {
   mainWindow = win;
   win.webContents.__isInterviewAppRenderer = true;
   win.once('ready-to-show', () => { try { win.show(); } catch { /* closed before show */ } });
+  // Closing the window saves first. Quitting saves in before-quit, before any window closes.
+  let savedForClose = false;
+  win.on('close', (event) => {
+    if (savedForClose || quitting) return;
+    event.preventDefault();
+    saveEverythingNow(win).finally(() => { savedForClose = true; try { if (!win.isDestroyed()) win.close(); } catch { /* already gone */ } });
+  });
   win.on('closed', () => {
     interviewWindowController?.cleanupOwner(win);
     if (mainWindow === win) mainWindow = null;
@@ -131,6 +144,7 @@ if (!app.requestSingleInstanceLock()) {
     try { registerRendererPrivateAppRoot(roots.data); registerRendererPrivateAppRoot(roots.profile); } catch { /* guard is advisory here */ }
 
     const sessions = createInterviewSessionStore({ filePath: path.join(roots.data, 'interview-helper-sessions.json') });
+    sessionStore = sessions;
     const guarded = handler => async (event, ...args) => {
       // Only the top frame of this app's own window may read or change saved interviews.
       if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || (event.senderFrame && event.senderFrame.parent)) throw new Error('Interview Helper request was not authorized.');
@@ -152,6 +166,41 @@ if (!app.requestSingleInstanceLock()) {
     ]));
     ipcMain.handle('interview-app:load-state', guarded(() => sessions.load()));
     ipcMain.handle('interview-app:save-state', guarded(state => sessions.save(state)));
+    // The interview list as a file the person keeps. It holds the list only: career text, Q&A,
+    // briefs and recordings stay in this app's data folder and are found again by interview id.
+    ipcMain.handle('interview-app:save-state-to-file', guarded(async () => {
+      const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Save interviews to a file', defaultPath: `Interview Helper ${new Date().toISOString().slice(0, 10)}.json`,
+        filters: [{ name: 'Interview Helper state', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return { cancelled: true };
+      await sessions.flush();
+      await atomicWriteFile(result.filePath, encodeInterviewStateFile(await sessions.load()));
+      return { saved: true, fileName: path.basename(result.filePath) };
+    }));
+    ipcMain.handle('interview-app:load-state-from-file', guarded(async () => {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Load interviews from a file', properties: ['openFile'],
+        filters: [{ name: 'Interview Helper state', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePaths[0]) return { cancelled: true };
+      const stat = await fs.promises.stat(result.filePaths[0]);
+      if (!stat.isFile() || stat.size > 4 * 1024 * 1024) throw new Error('That file is too large to be a saved Interview Helper state.');
+      const loaded = decodeInterviewStateFile(await fs.promises.readFile(result.filePaths[0], 'utf8'));
+      await sessions.flush();
+      const current = await sessions.load();
+      const count = list => `${list.length} interview${list.length === 1 ? '' : 's'}`;
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'warning', buttons: ['Replace', 'Cancel'], defaultId: 1, cancelId: 1,
+        message: `Replace the ${count(current.sessions)} in this window with the ${count(loaded.sessions)} in "${path.basename(result.filePaths[0])}"?`,
+        detail: 'The list as it is now is kept as a backup file in the app\'s data folder. Saved Q&A, career data and recordings are not touched.',
+      });
+      if (answer.response !== 0) return { cancelled: true };
+      // The replaced list is never lost: it is written beside the live one first.
+      await atomicWriteFile(path.join(roots.data, `interview-helper-sessions.before-load-${Date.now()}.json`), encodeInterviewStateFile(current));
+      // The folder is this machine's setting; a file from elsewhere must not point it at a missing path.
+      return { state: await sessions.save({ ...loaded, appliedJobsFolder: current.appliedJobsFolder || loaded.appliedJobsFolder }) };
+    }));
     ipcMain.handle('interview-app:choose-career-files', guarded(async () => {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose career files', properties: ['openFile', 'multiSelections'],
@@ -167,15 +216,6 @@ if (!app.requestSingleInstanceLock()) {
         ...(current ? { defaultPath: current } : {}),
       });
       return result.canceled || !result.filePaths[0] ? null : result.filePaths[0];
-    }));
-    ipcMain.handle('interview-app:read-canvas-interviews', guarded(async () => {
-      const result = await dialog.showOpenDialog(mainWindow, {
-        title: 'Choose an Infinite Canvas file', properties: ['openFile'],
-        filters: [{ name: 'Canvas', extensions: ['json'] }],
-      });
-      if (result.canceled || !result.filePaths[0]) return { cancelled: true };
-      // Read-only: the canvas file is never written from this app.
-      return { ...(await readInterviewHelperNodesFromCanvas(result.filePaths[0])), canvasFolder: path.dirname(result.filePaths[0]) };
     }));
 
     // Career files of any type are converted to text in a private folder; that folder and
@@ -199,6 +239,7 @@ if (!app.requestSingleInstanceLock()) {
       appInstance: dataApp,
       // No canvas here: the list comes from the folder chosen in this app.
       resolveAppliedJobsRoot: async () => (await sessions.load()).appliedJobsFolder || null,
+      onQaChanged: (change) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('interview-app:qa-changed', change); },
     });
     interviewWindowController = createInterviewWindowController({
       BrowserWindow, ipcMain, appInstance: dataApp,
@@ -292,6 +333,8 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true;
     event.preventDefault();
     Promise.resolve()
+      // The interview list first: the window's newest change, then every queued write.
+      .then(() => saveEverythingNow(mainWindow))
       .then(() => flushNonApiAiPersistence())
       .catch(() => {})
       // A practice call in progress is saved (recording and transcript, no review) before the app goes.

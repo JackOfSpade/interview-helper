@@ -170,6 +170,7 @@ const RULES = [
   '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title.',
   '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
+  '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). Never fault the interviewer for asking about something the candidate has not done.',
   '- Typed turns: a transcript turn marked (chat) was typed, not spoken. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure.',
 ].join('\n');
 

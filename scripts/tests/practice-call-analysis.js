@@ -195,6 +195,8 @@ export default [
     assert.match(checkReview(null, transcript).error, /not a JSON object/u);
     assert.deepEqual(checkReview(review, transcript).review.chapters, [{ questionTurnIndex: 4, title: 'Motivation' }, { questionTurnIndex: 2, title: 'Background' }]);
     const prompt = buildReviewPrompt({ callRecord: { ...callRecord, toneSamples: [] }, plan: { cards: [] }, metrics: {}, wordsByTurn: { 3: [{ text: 'um' }] } });
+    assert.match(prompt, /never against an easier bar because of the candidate's background/u, 'the review holds the role\'s real bar');
+    assert.match(prompt, /Never fault the interviewer for asking about something the candidate has not done/u);
     assert.match(prompt, /\(no prepared answers were part of this call\)/u);
     assert.doesNotMatch(prompt, /TONE NOTES|tone notes/u, 'the always-empty live tone notes section is gone');
     assert.match(prompt, /\(no tone samples\)/u);

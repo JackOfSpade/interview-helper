@@ -108,9 +108,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
 contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
   loadState: () => ipcRenderer.invoke('interview-app:load-state'),
   saveState: state => ipcRenderer.invoke('interview-app:save-state', state),
+  // The window is closing or the app is quitting: the main process asks for the newest state and waits for the answer.
+  onSaveStateNow: createListener('interview-app:save-state-now'),
+  stateSavedNow: () => ipcRenderer.send('interview-app:state-saved-now'),
+  // The interview list as a file the person keeps, and back from one.
+  saveStateToFile: () => ipcRenderer.invoke('interview-app:save-state-to-file'),
+  loadStateFromFile: () => ipcRenderer.invoke('interview-app:load-state-from-file'),
   chooseCareerFiles: () => ipcRenderer.invoke('interview-app:choose-career-files'),
   chooseAppliedJobsFolder: () => ipcRenderer.invoke('interview-app:choose-applied-jobs-folder'),
-  readCanvasInterviews: () => ipcRenderer.invoke('interview-app:read-canvas-interviews'),
   resolveInterviewTypedJob: (args) => {
     const { nodeId, text } = args || {};
     return ipcRenderer.invoke('resolve-interview-typed-job', { nodeId, text });
@@ -132,6 +137,8 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
     return ipcRenderer.invoke('interview-app:set-text-size', { percent });
   },
   onTextSizeChanged: createListener('interview-app:text-size-changed'),
+  // A Prepare wrote Q&A. General Q&A is shared by every interview, so whichever one is on screen reloads.
+  onInterviewQaChanged: createListener('interview-app:qa-changed'),
   // Bug report: the typed description and what the window saw. The main process adds the rest.
   copyBugReport: (args) => {
     const { description, renderer } = args || {};

@@ -72,7 +72,8 @@ function QaCard({ card, scope, company, links, mutate, busy, readOnly }) {
       <InterviewQaBadges card={card} details />
       {card.variants?.length > 0 && <details className="text-xs text-white/60"><summary className="cursor-pointer">Question variants ({card.variants.length})</summary><ul className="list-disc pl-4">{card.variants.map((variant, index) => <li key={index}>{variant}</li>)}</ul></details>}
       {(card.status === 'needs-prep' || card.status === 'empty') && <p className="text-xs text-amber-500">No prepared answer yet. Write your own answer, or Prepare to fill empty answers.</p>}
-      {card.approach?.length > 0 && <div className="text-xs"><p className="font-medium">Approach reminders (shown on the cue card)</p><ul className="list-disc pl-4">{card.approach.map((item, index) => <li key={index}>{item.text}{item.example && <ul className="list-[circle] pl-4 text-white/60"><li>{item.example}</li></ul>}</li>)}</ul></div>}
+      {card.gap && <p className="text-xs text-sky-200">Your career data does not show this, so this answer says so plainly, then gives the closest thing you have done and how to carry on. If you have done it, edit the card with your real answer.</p>}
+      {card.approach?.length > 0 && <div className="text-xs"><p className="font-medium">{card.gap ? 'How to carry the rest of the answer' : 'Approach reminders (shown on the cue card)'}</p><ul className="list-disc pl-4">{card.approach.map((item, index) => <li key={index}>{item.text}{item.example && <ul className="list-[circle] pl-4 text-white/60"><li>{item.example}</li></ul>}</li>)}</ul></div>}
       {card.headline && <p className="whitespace-pre-wrap text-sm font-medium">{card.headline}</p>}
       {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{bullet.stage && <span className="text-white/60">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
       {card.example && <div className="text-xs"><p className="font-medium">Example</p><p className="whitespace-pre-wrap">{card.example}</p></div>}
@@ -163,7 +164,9 @@ export function InterviewQaPanel({ nodeId, snapshotId, jobUrl = null, bundleArti
     const changed = event => { if (event.detail?.nodeId !== nodeId) void reload(); };
     window.addEventListener('interview-qa-changed', changed);
     window.addEventListener('focus', reload);
-    return () => { clearTimeout(initial); sequence.current += 1; window.removeEventListener('interview-qa-changed', changed); window.removeEventListener('focus', reload); };
+    // A Prepare that finished for any interview, this one or one no longer on screen: General Q&A is shared.
+    const unsubscribe = window.interviewAppAPI?.onInterviewQaChanged?.(() => { void reload(); });
+    return () => { clearTimeout(initial); sequence.current += 1; unsubscribe?.(); window.removeEventListener('interview-qa-changed', changed); window.removeEventListener('focus', reload); };
   }, [nodeId, reload, refreshKey]);
   const guarded = async (run) => {
     if (disabled || mutating.current) throw new Error('Q&A is busy. Try again in a moment.');

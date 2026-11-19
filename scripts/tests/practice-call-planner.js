@@ -157,6 +157,8 @@ const tests = [
       const prompt = buildPlanPrompt({ brief, application, pool, voices, targetMinutes: 30, steering: 'Focus on caching.', candidateName: 'Pat Example' });
       for (const item of pool) assert.ok(prompt.includes(`Question ${item.number}: ${item.question}`));
       assert.doesNotMatch(prompt, /PRIVATE-ANSWER/u, 'prepared answers never reach the planner');
+      assert.match(prompt, /THE CANDIDATE MAY NOT FIT THIS JOB\..*Never pick, drop, soften or reword a question because of what the application shows/u, 'the plan is the role\'s real interview, not one fitted to the candidate');
+      assert.doesNotMatch(prompt, /Base it on the role, the company, the application/u, 'the planner\'s own question is not based on the application');
       assert.doesNotMatch(prompt, /Prepared answer/u);
       assert.match(prompt, /RESUME-LINE Built widget pipelines\./u);
       assert.match(prompt, /LETTER-LINE I love gadgets\./u);

@@ -227,6 +227,8 @@ async function locked(userDataPath, scope, nodeId, task) {
     author: card.author === 'user' ? 'user' : 'generated',
     status: cardStatus(card),
     thinEvidence: card.thinEvidence === true,
+    // An honest-gap answer: the career text does not show what the question asks about.
+    gap: card.gap === true && isAnsweredCard(card),
   };
 }
 
@@ -525,6 +527,65 @@ export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate
         if (!card || Array.isArray(card.approach) || card.question !== unit.question) continue;
         const current = new Set(linesOf(card).map(line => line.text));
         card.approach = approachOf({ approach: approaches.get(unit.id) }).map(item => ({ text: item.text, example: current.has(item.example) ? item.example : '' }));
+        changed += 1;
+      }
+      if (changed) await writeStore(userDataPath, scope, nodeId, store);
+      saved += changed;
+    });
+  }
+  return { requested: units.length, saved };
+}
+
+// ------------------------------------------------------- honest-gap answers --
+
+/**
+ * Write an honest-gap answer on cards that still have no answer after the
+ * answer writer ran: questions about something the career text does not show.
+ * `generate(units)` receives `[{ id, question }]` and resolves to a Map of id
+ * to `{ admission, closest, approach }` for the questions that are gaps
+ * (electron/ipc/interviewAnswerGap.js); a question missing from the Map is left
+ * empty. Only an empty generated card with no approach reminders is offered: a
+ * card the person wrote is theirs, and a card with reminders is a "how do you
+ * work" question, not one about past experience. A written gap answer is an
+ * answer like any other, so it is never rewritten; an edit by the person makes
+ * it an ordinary card.
+ */
+export async function fillInterviewQaGaps({ userDataPath, nodeId, generate }) {
+  const scopes = ['foundation', 'company'];
+  const open = card => !isAnsweredCard(card) && card.author !== 'user' && !approachOf(card).length;
+  const units = [];
+  for (const scope of scopes) {
+    const store = await readStore(userDataPath, scope, nodeId);
+    for (const card of store.cards) if (open(card)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question });
+  }
+  if (!units.length) return { requested: 0, saved: 0 };
+  const gaps = await generate(units.map(({ id, question }) => ({ id, question })));
+  let saved = 0;
+  for (const scope of scopes) {
+    const mine = units.filter(unit => unit.scope === scope && gaps?.get?.(unit.id));
+    if (!mine.length) continue;
+    await locked(userDataPath, scope, nodeId, async () => {
+      const store = await readStore(userDataPath, scope, nodeId);
+      let changed = 0;
+      for (const unit of mine) {
+        const card = store.cards.find(item => item.id === unit.cardId);
+        // Checked again inside the lock: an answer written meanwhile is kept.
+        if (!card || !open(card) || card.question !== unit.question) continue;
+        const gap = gaps.get(unit.id);
+        const admission = typeof gap.admission === 'string' ? gap.admission.trim() : '';
+        if (!admission || !text(admission, MAX_LINE)) continue;
+        const closest = gap.closest && typeof gap.closest.text === 'string' && gap.closest.text.trim() && text(gap.closest.text, MAX_LINE)
+          && typeof gap.closest.evidenceId === 'string' && typeof gap.closest.quote === 'string' ? gap.closest : null;
+        card.headline = { text: admission, evidenceIds: [], quotes: [] };
+        card.bullets = closest ? [{ stage: 'point', text: closest.text.trim(), evidenceIds: [closest.evidenceId], quotes: [{ evidenceId: closest.evidenceId, quote: closest.quote }] }] : [];
+        card.example = { text: '', evidenceIds: [], quotes: [] };
+        card.extensions = [];
+        card.approach = approachOf({ approach: gap.approach });
+        card.consistency = { consistentWithResume: false, resumeQuote: '' };
+        card.thinEvidence = false;
+        card.gap = true;
+        card.author = 'generated';
+        card.updatedAt = new Date().toISOString();
         changed += 1;
       }
       if (changed) await writeStore(userDataPath, scope, nodeId, store);

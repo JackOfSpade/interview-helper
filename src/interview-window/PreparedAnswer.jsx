@@ -40,6 +40,8 @@ function CueLine({ line, recentEmployer }) {
  * Every other card shows its first three prepared lines (headline, then
  * points, then the example if there is room) as sibling bullets, because
  * separate prepared lines are separate stories.
+ * An honest-gap card (a question about something the person has not done)
+ * shows its admission and closest experience first, then reminders.
  * Renders nothing for a question with no prepared answer.
  */
 export function PreparedAnswer({ card: rawCard }) {
@@ -54,6 +56,17 @@ export function PreparedAnswer({ card: rawCard }) {
     ...(example ? [{ kind: 'glance-example', text: example.text, cue: example.cue }] : []),
   ];
   const approach = approachOf(card).slice(0, CUE_CARD_MAX_LINES);
+  // An honest-gap card: say you have not done it, then the closest thing you have done, then how
+  // you would go about it. The admission comes first, so reminders only fill the lines left over.
+  if (card.gap === true && lines.length) {
+    const said = lines.slice(0, CUE_CARD_MAX_LINES);
+    return <section className="spoken-answer" aria-label="Cues">
+      <ul className="spoken-bullets">
+        {said.map((line, index) => <CueLine key={index} line={line} recentEmployer={recentEmployer} />)}
+        {approach.slice(0, CUE_CARD_MAX_LINES - said.length).map((item, index) => <li key={`approach-${index}`} className="answer-approach"><span className="glance-cue">{item.text.trim()}</span></li>)}
+      </ul>
+    </section>;
+  }
   if (approach.length) {
     // One real example at most: the first reminder that has one.
     const instanceOf = item => (typeof item.example === 'string' && item.example ? lines.find(line => line.text.trim() === item.example.trim()) : null);
