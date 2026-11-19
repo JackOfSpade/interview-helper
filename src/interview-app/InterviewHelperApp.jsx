@@ -3,6 +3,7 @@ import { Bug, CircleHelp, FolderInput, Plus, Trash2 } from 'lucide-react';
 import './interviewApp.css';
 import { InterviewHelperPanel } from './InterviewHelperPanel';
 import { BugReportDialog } from './BugReportDialog';
+import { TextSizeControl } from './TextSizeControl';
 import { installEventCapture, logEvent } from '../utils/eventLog';
 import { ClaudePauseNotice } from '../components/ClaudePauseNotice';
 import { JobRunStatusSection } from '../components/ClaudeRunStatus';
@@ -130,6 +131,7 @@ export default function InterviewHelperApp() {
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 hover:bg-violet-500/30" onClick={newInterview}><Plus size={13} />New interview</button>
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={importFromCanvas}><FolderInput size={13} />Import from canvas file…</button>
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={() => setReportingBug(true)}><Bug size={13} />Report a bug…</button>
+        <TextSizeControl onError={setNotice} />
       </div>
     </aside>
     <main className="flex min-w-0 flex-1 flex-col">

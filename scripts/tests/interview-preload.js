@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'loadState', 'readCanvasInterviews', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'onTextSizeChanged', 'readCanvasInterviews', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'setTextSize']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder(); await appApi.readCanvasInterviews();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
@@ -94,6 +94,11 @@ const tests = [
         ['interview-app:copy-bug-report', { description: 'It froze', renderer: { events: [] } }],
         ['interview-app:save-bug-report', { description: 'It froze', renderer: { events: [] } }],
       ], 'a bug report forwards only the description and the window details, never a path');
+      await appApi.getTextSize(); await appApi.setTextSize({ percent: 150, zoom: 9 });
+      assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, args.map(arg => ({ ...arg }))]), [
+        ['interview-app:get-text-size', []],
+        ['interview-app:set-text-size', [{ percent: 150 }]],
+      ], 'the text size call forwards only the percent');
       // There is no canvas here: the application list never forwards a renderer-supplied path.
       const listed = await api.listInterviewApplicationFolders({ nodeId: 'interview-node', canvasFilePath: '/Users/someone/elsewhere.json' });
       assert.deepEqual({ ...listed.args[0] }, { nodeId: 'interview-node', canvasFilePath: null });

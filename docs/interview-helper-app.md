@@ -54,6 +54,27 @@ optional description and two actions, modelled on Infinite Canvas.
   `interview-app:save-bug-report`). The cue card and practice call windows have
   no button and their events are not recorded.
 
+## Text size (built 2026-11-18)
+
+One setting for every window the app opens: the main window, the cue card and
+the practice call (`electron/interviewApp/textSize.js`).
+
+- **Where it is changed:** "Text size" at the bottom of the interview list, and
+  View > Bigger Text (⌘+), Smaller Text (⌘−), Default Text Size (⌘0). The menu
+  works from any window. Steps: 80, 90, 100, 110, 125, 150, 175, 200%.
+- **It is a page zoom, not a font size.** Text, boxes, icons and spacing scale
+  together, so larger words cannot outgrow a box that stayed small.
+- **Windows keep up.** Each window's minimum size is multiplied by the setting,
+  a window that is now too small is grown, and a new window opens larger by the
+  same factor, all within the screen it is on. A window therefore never shows
+  less than its 100% minimum layout (main 720×520, cue card 320×380, practice
+  call 760×520), unless the screen itself is smaller than that.
+- **Saved** in `text-size.json` in the profile folder; a missing or damaged
+  file is 100%.
+- Every window is picked up through `browser-window-created` in `main.js`, so a
+  new kind of window needs no code of its own. Give it a `minWidth` and
+  `minHeight` at which its layout holds.
+
 ## Career data is plain text (2026-11-18)
 
 Career files are used as written. Nothing compiles them into a structured

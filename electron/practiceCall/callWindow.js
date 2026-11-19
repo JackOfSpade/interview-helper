@@ -99,7 +99,9 @@ export function createPracticeCallController(deps = {}) {
       return win;
     }
     const options = {
-      width: 960, height: 640, title: 'Practice call', backgroundColor: '#202124', show: false,
+      // Below 760 by 520 the call tiles, names and the chat panel start to cover each other.
+      // The text size setting scales this minimum, so it holds at every size.
+      width: 960, height: 640, minWidth: 760, minHeight: 520, title: 'Practice call', backgroundColor: '#202124', show: false,
       webPreferences: { preload: preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true },
     };
     winMode = replay ? 'replay' : 'call';

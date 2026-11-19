@@ -125,6 +125,13 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
     const { token } = args || {};
     return ipcRenderer.invoke('interview-app:reveal-converted-career-file', { token });
   },
+  // Text size of every window of this app, in percent. The View menu changes it too.
+  getTextSize: () => ipcRenderer.invoke('interview-app:get-text-size'),
+  setTextSize: (args) => {
+    const { percent } = args || {};
+    return ipcRenderer.invoke('interview-app:set-text-size', { percent });
+  },
+  onTextSizeChanged: createListener('interview-app:text-size-changed'),
   // Bug report: the typed description and what the window saw. The main process adds the rest.
   copyBugReport: (args) => {
     const { description, renderer } = args || {};

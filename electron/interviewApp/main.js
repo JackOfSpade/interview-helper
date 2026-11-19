@@ -27,8 +27,9 @@ import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
 import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
 import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
+import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
 
-const { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } = electronPkg;
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell } = electronPkg;
 
 // The profile folder must be this app's own: two running Electron apps cannot
 // share one. Set before `ready`, and before anything reads the path.
@@ -135,6 +136,20 @@ if (!app.requestSingleInstanceLock()) {
       if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || (event.senderFrame && event.senderFrame.parent)) throw new Error('Interview Helper request was not authorized.');
       return handler(...args);
     };
+    // Text size: one setting for the main window, the cue card and the practice call.
+    const textSize = createTextSizeController({
+      store: createTextSizeStore({ filePath: path.join(roots.profile, 'text-size.json') }),
+      getAllWindows: () => BrowserWindow.getAllWindows(),
+      screen: electronPkg.screen, logger,
+      onChange: (state) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(TEXT_SIZE_CHANGED_CHANNEL, state); },
+    });
+    app.on('browser-window-created', (_event, win) => textSize.adopt(win));
+    registerTextSizeHandlers({ ipcMain, guarded, controller: textSize });
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' }, { role: 'fileMenu' }, { role: 'editMenu' },
+      { label: 'View', submenu: [...textSizeMenuItems(textSize), { type: 'separator' }, { role: 'togglefullscreen' }, { type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }] },
+      { role: 'windowMenu' },
+    ]));
     ipcMain.handle('interview-app:load-state', guarded(() => sessions.load()));
     ipcMain.handle('interview-app:save-state', guarded(state => sessions.save(state)));
     ipcMain.handle('interview-app:choose-career-files', guarded(async () => {
