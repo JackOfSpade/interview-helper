@@ -119,14 +119,8 @@ export const elapsedLabel = ms => {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
 };
 
-/** The window title while the call is live; null leaves the app's own title in place. */
-export function callTitle(phase, callerName) {
-  if (phase === 'ringing') return 'Incoming call';
-  if (phase === 'missed') return 'Missed call';
-  if (phase === 'calling') return callerName ? `Calling ${callerName}` : 'Calling';
-  if (phase === 'connecting' || phase === 'in-call') return callerName || 'Call';
-  return null;
-}
+/** The call window's title, in every phase. It never names this app. */
+export const CALL_WINDOW_TITLE = 'Virtual Call';
 
 /**
  * What the missed-call screen says. `missed` is how the ring ended ('declined' or 'unanswered'),

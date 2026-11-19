@@ -222,8 +222,9 @@ their tabs.
 
 **The call stays in the fiction (2026-11-19).** From the ring to the hang-up
 nothing the candidate sees or hears says practice, AI, voice, transcription or
-this app: the ring screen reads "Incoming call", the window is titled with the
-caller's name (`callTitle` in `src/practice-call/callModel.js`), mid-call
+this app: the ring screen reads "Incoming call", the window is titled
+"Virtual Call" in every phase, setup and review included (`CALL_WINDOW_TITLE`
+in `src/practice-call/callModel.js`), never the app's name, mid-call
 notices and errors are worded as connection problems, and the prepared answers
 panel is labelled "Notes". The interviewer's instructions tell it that the call
 is real, to answer "are you an AI?" in character, and to give no feedback or

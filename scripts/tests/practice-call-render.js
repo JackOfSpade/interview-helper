@@ -618,22 +618,23 @@ export default [
             await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'ready', attempt: 1, calling: true } });
             assert(byLabel('Waiting for call')?.textContent.startsWith('Waiting for call'), 'after Ready only the wait is shown');
             assert(!byLabel('Setup progress') && !window.document.querySelector('button'), 'the setup card is gone while waiting');
+            assert(window.document.title === 'Virtual Call', `before the ring the window is titled Virtual Call, not with the app's name, got ${window.document.title}`);
             await push({ phase: 'ringing', persona: PERSONA });
-            assert(window.document.title === 'Incoming call', `the ringing window is titled as a call, got ${window.document.title}`);
+            assert(window.document.title === 'Virtual Call', `the ringing window keeps the call title, got ${window.document.title}`);
             assert(!/practice/iu.test(window.document.body.textContent), 'the ring screen never says practice');
             assert(byLabel('Answer call') && byLabel('Decline call'), 'ringing must offer Answer and Decline');
             // Declining, or letting it ring out, leaves a missed call that can be returned.
             await act(() => byLabel('Decline call').click());
             assert(invoked.includes('decline') && hangUps.length === 0, 'declining must not hang up: the window stays');
             await push({ phase: 'missed', missed: 'declined', persona: PERSONA });
-            assert(byLabel('Call declined')?.textContent.includes('Dana Whitfield') && window.document.title === 'Missed call', 'a declined ring stays on screen as a missed call');
+            assert(byLabel('Call declined')?.textContent.includes('Dana Whitfield') , 'a declined ring stays on screen as a missed call');
             await push({ phase: 'missed', missed: 'unanswered', persona: PERSONA });
             assert(byLabel('Missed call')?.textContent.includes('Dana tried to reach you.'), 'a ring that rang out is a missed call');
             assert(!/practice/iu.test(window.document.body.textContent), 'the missed call screen never says practice');
             await act(() => byLabel('Call back').click());
             assert(invoked.includes('callBack'), 'Call back returns the call');
             await push({ phase: 'calling', persona: PERSONA });
-            assert(byLabel('Calling')?.textContent.includes('Dana Whitfield') && window.document.title === 'Calling Dana Whitfield', 'the returned call rings out to the caller');
+            assert(byLabel('Calling')?.textContent.includes('Dana Whitfield') , 'the returned call rings out to the caller');
             await act(() => byLabel('End call').click());
             assert(invoked.includes('cancelCallBack'), 'ending the outgoing call cancels it');
             await push({ phase: 'missed', missed: 'expired', persona: PERSONA });
@@ -643,7 +644,7 @@ export default [
             await push({ phase: 'connecting', persona: PERSONA });
             assert(byLabel('Connecting call'), 'a picked-up call connects');
             await push({ phase: 'in-call', persona: PERSONA, elapsedMs: 65_000, speaking: 'interviewer' });
-            assert(window.document.title === 'Dana Whitfield', `the call window is titled with the caller, got ${window.document.title}`);
+            assert(window.document.title === 'Virtual Call', `the call window keeps the call title, got ${window.document.title}`);
             assert(!/practice|\bAI\b/iu.test(window.document.body.textContent), 'the call screen never says practice or AI');
             assert(byLabel('Hang up') && byLabel('Mute microphone') && byLabel('Captions'), 'in-call must expose the control bar');
             assert(byLabel('Call timer')?.textContent === '1:05', 'the in-call timer must follow elapsedMs');

@@ -10,7 +10,7 @@ import InCall from './InCall.jsx';
 import EndedScreen from './EndedScreen.jsx';
 import Replay from './Replay.jsx';
 import ErrorScreen from './ErrorScreen.jsx';
-import { MISSING_PRELOAD, callTitle, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
+import { MISSING_PRELOAD, CALL_WINDOW_TITLE, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
 
 function readApi() {
   return typeof window === 'undefined' ? null : window.practiceCallAPI || null;
@@ -50,16 +50,13 @@ export default function PracticeCallApp() {
   }, []);
 
   const phase = isReplayWindow() && state && state.phase !== 'error' ? 'replay' : state?.phase;
-  // From the ring to the hang-up the window is titled like a call, not like this app.
-  const callerName = state?.persona?.name || '';
+  // The window is titled like a call, never like this app.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
-    const title = callTitle(phase, callerName);
-    if (!title) return undefined;
     const before = document.title;
-    document.title = title;
+    document.title = CALL_WINDOW_TITLE;
     return () => { document.title = before; };
-  }, [phase, callerName]);
+  }, []);
   useEffect(() => {
     if (phase !== 'replay') return undefined;
     const api = readApi();
