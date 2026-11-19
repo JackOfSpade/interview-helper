@@ -324,8 +324,13 @@ export default [
         for (const fragment of ['role="progressbar"', 'aria-valuenow="50"', '50%', 'Downloading practice models']) {
           assert(downloading.includes(fragment), `downloading screen is missing ${fragment}`);
         }
-        const precheck = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0.42, usageWarning: 'Use real examples only.', persona: PERSONA }));
-        for (const fragment of ['role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
+        const precheck = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0.42, usageWarning: 'Use real examples only.', persona: PERSONA, setup: { step: 'plan', attempt: 2 } }));
+        assert(/data-status="done"[^>]*>(?:(?!<\/li>).)*Choosing the interviewer voices/.test(precheck), 'a finished setup step is marked done');
+        assert(/data-status="active" aria-current="step"[^>]*>(?:(?!<\/li>).)*Planning the interview…(?:(?!<\/li>).)*attempt 2/.test(precheck), 'the running step is marked active and says when the plan is being written again');
+        assert(/data-status="pending"[^>]*>(?:(?!<\/li>).)*Turning on your microphone/.test(precheck), 'a later setup step is still pending');
+        assert(precheck.includes('not on yet'), 'the meter says the microphone is not on while the plan is written');
+        assert(!/say something/i.test(precheck), 'the setup screen must not ask the candidate to speak: nothing waits on the microphone');
+        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
           assert(precheck.includes(fragment), `precheck screen is missing ${fragment}`);
         }
       } finally { await bundle.dispose(); }
@@ -556,7 +561,10 @@ export default [
             assert(invoked.includes('agree'), 'agreeing must call agreeModelDownload');
             await push({ phase: 'downloading', modelDownload: { receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 } });
             assert(byLabel('Model download progress')?.getAttribute('aria-valuenow') === '25', 'downloading must follow the pushed progress');
-            await push({ phase: 'precheck', level: 0.5, persona: PERSONA });
+            await push({ phase: 'precheck', level: 0, setup: { step: 'voices', attempt: 1 } });
+            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Choosing the interviewer voices'), 'precheck must show the setup step in progress');
+            await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'sessions', attempt: 1 } });
+            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Bringing the interviewer in'), 'precheck must follow the pushed setup step');
             assert(byLabel('Microphone level')?.getAttribute('aria-valuenow') === '50', 'precheck must meter the live level');
             await push({ phase: 'ringing', persona: PERSONA });
             assert(byLabel('Answer call') && byLabel('Decline call'), 'ringing must offer Answer and Decline');
@@ -797,6 +805,9 @@ export default [
         assert(callModel.downloadPercent({ receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }) === 25, 'downloadPercent reports the received fraction');
         assert(callModel.levelPercent(0.426) === 43, 'levelPercent rounds the meter level');
         assert(callModel.humanizeKey('pauseCount') === 'pause count', 'humanizeKey splits camelCase keys');
+        assert(callModel.setupProgress({ step: 'voice' }).map(item => item.status).join(',') === 'done,done,done,active,pending,pending', 'setupProgress marks the steps before the running one as done');
+        assert(callModel.setupProgress(null).every(item => item.status === 'pending'), 'setupProgress with no step leaves everything pending');
+        assert(callModel.elapsedLabel(59999) === '59s' && callModel.elapsedLabel(65000) === '1m 05s', 'elapsedLabel counts seconds, then minutes');
         assert(JSON.stringify(callModel.mergeState({ phase: 'consent', level: 0 }, { phase: 'precheck' })) === JSON.stringify({ phase: 'precheck', level: 0 }), 'mergeState keeps the previous fields');
         const merged = callModel.mergeEvent({ phase: 'in-call', captions: [] }, { kind: 'caption', caption: { speaker: 'candidate', text: 'Hi', atMs: 1 } });
         assert(merged.captions.length === 1 && merged.phase === 'in-call', 'mergeEvent appends captions without dropping the phase');

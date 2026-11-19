@@ -92,3 +92,30 @@ export function describeDeliveryValue(value) {
   }
   return String(value);
 }
+
+// The setup steps in the order the service runs them, as the candidate reads them.
+export const SETUP_STEPS = Object.freeze([
+  { step: 'account', label: 'Checking your voice account' },
+  { step: 'voices', label: 'Choosing the interviewer voices' },
+  { step: 'plan', label: 'Planning the interview', hint: 'the longest step, about a minute' },
+  { step: 'voice', label: "Warming up the interviewer's voice" },
+  { step: 'audio', label: 'Turning on your microphone' },
+  { step: 'sessions', label: 'Bringing the interviewer in' },
+]);
+
+/** Each setup step as done, active or pending, from the step the service says is running. */
+export function setupProgress(setup) {
+  const at = SETUP_STEPS.findIndex(item => item.step === setup?.step);
+  const attempt = Number(setup?.attempt) || 1;
+  return SETUP_STEPS.map((item, index) => ({
+    ...item,
+    status: at < 0 ? 'pending' : index < at ? 'done' : index === at ? 'active' : 'pending',
+    // A plan the checks rejected is written again; say so instead of looking stuck.
+    note: index === at && item.step === 'plan' && attempt > 1 ? `attempt ${attempt}` : '',
+  }));
+}
+
+export const elapsedLabel = ms => {
+  const seconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+};

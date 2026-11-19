@@ -421,7 +421,7 @@ const isAbort = (error, signal) => Boolean(signal?.aborted) || error?.name === '
  * The retry prompt carries the raw text of the rejected attempt. Returns { plan, attempts: [{ problems }] (the failed attempts), ms }. An abort is passed on and
  * never retried. When no attempt validates, throws an error with code 'plan-failed'.
  */
-export async function planCall({ callText, brief, application, pool, voices, targetMinutes, steering, candidateName, signal, logger } = {}) {
+export async function planCall({ callText, brief, application, pool, voices, targetMinutes, steering, candidateName, signal, logger, onAttempt } = {}) {
   if (typeof callText !== 'function') throw new TypeError('planCall needs callText');
   const inputs = { brief, application, pool, voices, targetMinutes, steering, candidateName };
   const started = Date.now();
@@ -430,6 +430,8 @@ export async function planCall({ callText, brief, application, pool, voices, tar
   let rejected = '';
   for (let attempt = 1; attempt <= PLAN_ATTEMPTS; attempt += 1) {
     if (signal?.aborted) throw Object.assign(new Error('The planning was cancelled.'), { name: 'AbortError', code: 'aborted' });
+    // Progress only: a listener that throws must not cost the plan.
+    try { onAttempt?.(attempt); } catch { /* ignored */ }
     const prompt = attempt === 1 ? buildPlanPrompt(inputs) : buildPlanRetryPrompt(inputs, problems, rejected);
     let raw;
     try {

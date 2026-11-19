@@ -22,6 +22,8 @@ const LATE_JOIN_MIN_MS = 40000;
 const LATE_JOIN_MAX_MS = 210000;
 const COLLEAGUE_IDS = Object.freeze(['B', 'C', 'D', 'E']);
 // Shown while the planning step runs, before the call can ring.
+// The setup steps in the order they run; the window lists them and marks the one in progress.
+const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio', 'sessions']);
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
@@ -223,7 +225,7 @@ function shiftTimes(value, byMs) {
 function freshState() {
   return {
     phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null,
-    typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, error: null, notice: null, analysisStage: null,
+    typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, feedbackRequested: true, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
   };
@@ -264,7 +266,7 @@ export function createPracticeCallService(deps = {}) {
   const replayListeners = new Set();
   const snapshot = () => ({
     ...state, chat: state.chat.map(item => ({ ...item })), captions: state.captions.map(item => ({ ...item })),
-    notice: state.notice ? { ...state.notice } : null, participants: state.participants.map(item => ({ ...item })),
+    notice: state.notice ? { ...state.notice } : null, setup: state.setup ? { ...state.setup } : null, participants: state.participants.map(item => ({ ...item })),
     screen: state.screen ? { ...state.screen } : null, sharing: state.sharing ? { ...state.sharing } : null, pad: { ...state.pad },
   });
   const publish = () => { const next = snapshot(); for (const listener of stateListeners) { try { listener(next); } catch { /* listeners stay isolated */ } } };
@@ -283,7 +285,14 @@ export function createPracticeCallService(deps = {}) {
   const setPhase = phase => {
     if (!PHASES.includes(phase)) return;
     state.phase = phase;
+    if (phase !== 'precheck') state.setup = null;
     if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.speakingId = null; clearOver(); }
+    publish();
+  };
+  /** Names the setup step now running (and the planner's attempt) for the window's progress list. */
+  const setSetupStep = (step, attempt = 1) => {
+    if (!SETUP_STEPS.includes(step)) return;
+    state.setup = { step, attempt };
     publish();
   };
   function stopElapsedTimer() {
@@ -908,7 +917,7 @@ export function createPracticeCallService(deps = {}) {
   async function planInterview(self, { drawnVoices, targetMinutes }) {
     self.planAbort = new AbortController();
     state.notice = { ...PLANNING_NOTICE };
-    publish();
+    setSetupStep('plan');
     const startedAt = clock.now();
     let result;
     try {
@@ -923,6 +932,7 @@ export function createPracticeCallService(deps = {}) {
         voices: drawnVoices.map(voiceView), targetMinutes, steering: self.steering,
         ...(self.candidateName ? { candidateName: self.candidateName } : {}),
         signal: self.planAbort.signal, logger: deps.logger,
+        onAttempt: attempt => { if (call === self && !self.finished && state.phase === 'precheck') setSetupStep('plan', Number(attempt) || 1); },
       });
       if (!result?.plan || typeof result.plan !== 'object') throw new Error('the planner returned no plan');
     } catch (error) {
@@ -1050,6 +1060,7 @@ export function createPracticeCallService(deps = {}) {
   async function precheck() {
     const self = call;
     if (!self || self.finished) return snapshot();
+    state.setup = { step: 'account', attempt: 1 };
     setPhase('precheck');
     const usageLimit = await resolve('usageLimit');
     self.usageLimit = await usageLimit();
@@ -1071,6 +1082,7 @@ export function createPracticeCallService(deps = {}) {
     const rateForTier = await resolve('rateForTier');
     const voiceRate = Number(rateForTier(tier)) || 24000;
     self.tier = tier;
+    setSetupStep('voices');
     const catalog = await resolve('catalog');
     // The pool file only names the voices used before; it never grows, because the app
     // never writes to the ElevenLabs account.
@@ -1145,6 +1157,7 @@ export function createPracticeCallService(deps = {}) {
     // The plan decides the cast, the questions and the problems before any interviewer session exists.
     const planned = await planInterview(self, { drawnVoices, targetMinutes });
     if (!planned) return snapshot();
+    setSetupStep('voice');
     const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament });
     if (!settled) return snapshot();
     const { persona, factory } = settled;
@@ -1177,6 +1190,7 @@ export function createPracticeCallService(deps = {}) {
     const helperFactory = await resolve('helperFactory');
     const trackFactory = await resolve('trackFactory');
     if (call !== self || self.finished) return snapshot();
+    setSetupStep('audio');
     self.voiceRate = voiceRate;
     self.track = trackFactory({ sampleRate: voiceRate });
     const helper = helperFactory({ onEvent: onHelperEvent });
@@ -1210,6 +1224,7 @@ export function createPracticeCallService(deps = {}) {
       inference,
       onToneSample: sample => { self.toneSamples.push(sample); },
     });
+    setSetupStep('sessions');
     await createSessions(self);
     if (call !== self || self.finished) { await closeWarmSessions(self); return snapshot(); }
     self.timings.precheckMs = Math.round(clock.now() - self.startedAt);

@@ -109,8 +109,10 @@ const tests = [
         return answers.shift();
       };
       const controller = new AbortController();
-      const result = await planCall({ callText, brief, pool, voices, targetMinutes: 30, signal: controller.signal });
+      const started = [];
+      const result = await planCall({ callText, brief, pool, voices, targetMinutes: 30, signal: controller.signal, onAttempt: attempt => { started.push(attempt); throw new Error('a progress listener must not cost the plan'); } });
       assert.deepEqual(result.plan, goodPlan());
+      assert.deepEqual(started, [1, 2], 'each attempt is announced as it starts');
       assert.equal(result.attempts.length, 1);
       assert.match(result.attempts[0].problems[0], /lead\.voice is V9/u);
       assert.equal(prompts.length, 2);

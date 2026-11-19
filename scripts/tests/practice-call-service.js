@@ -3223,6 +3223,27 @@ test('plan: a plan that names a voice that was not drawn, or a planner that retu
   }
 });
 
+test('setup: each step is published in order, with the planner attempt, and cleared once the call rings', async () => {
+  let service;
+  const planCall = async input => {
+    input.onAttempt?.(1);
+    input.onAttempt?.(2);
+    return { plan: soloPlan(input.voices), attempts: [], ms: 1 };
+  };
+  const built = await startOf({ deps: { planCall } });
+  service = built.service;
+  const seen = [];
+  service.onState(item => {
+    if (item.phase !== 'precheck' || !item.setup) return;
+    const key = `${item.setup.step}:${item.setup.attempt}`;
+    if (seen[seen.length - 1] !== key) seen.push(key);
+  });
+  const state = await service.start(ARGS);
+  assert.deepEqual(seen, ['account:1', 'voices:1', 'plan:1', 'plan:2', 'voice:1', 'audio:1', 'sessions:1']);
+  assert.equal(state.phase, 'ringing');
+  assert.equal(state.setup, null);
+});
+
 test('plan: the setup phase shows a planning notice that is gone once the call rings', async () => {
   const notices = [];
   let service;
