@@ -337,10 +337,10 @@ async function timedCall(overrides = {}) {
 }
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
-test('a ring nobody answers becomes a missed call after 30 s, and calling back opens the call with that context', async () => {
+test('a ring nobody answers becomes a missed call after 10 s, and calling back opens the call with that context', async () => {
   const live = await timedCall();
   assert.equal((await live.service.start(ARGS)).phase, 'ringing');
-  live.fire(30000);
+  live.fire(10000);
   let state = live.service.getState();
   assert.equal(state.phase, 'missed');
   assert.equal(state.missed, 'unanswered');
@@ -349,7 +349,7 @@ test('a ring nobody answers becomes a missed call after 30 s, and calling back o
   live.advance(120000);
   assert.equal(live.service.callBack().phase, 'calling');
   assert.equal(live.timers.some(timer => timer.ms === 10 * 60 * 1000), false, 'the wait for a call back stops once it is returned');
-  live.fire(5750); // the interviewer picks up half-way through the 3.5 to 8 s window
+  live.fire(3500); // half-way through the 2 to 5 s the interviewer takes to pick up
   await settle();
   state = live.service.getState();
   assert.equal(state.phase, 'in-call');
@@ -365,14 +365,14 @@ test('declining keeps the call; the outgoing ring can be cancelled; a plain answ
   let state = live.service.decline();
   assert.equal(state.phase, 'missed');
   assert.equal(state.missed, 'declined');
-  assert.equal(live.timers.some(timer => timer.ms === 30000), false, 'the ring timeout is cancelled with the ring');
+  assert.equal(live.timers.some(timer => timer.ms === 10000), false, 'the ring timeout is cancelled with the ring');
   assert.equal(live.service.decline().phase, 'missed', 'a second decline changes nothing');
   assert.equal(live.service.callBack().phase, 'calling');
   assert.equal(live.service.cancelCallBack().phase, 'missed', 'hanging up before they pick up goes back to the missed call');
-  assert.equal(live.timers.some(timer => timer.ms === 5750), false, 'nobody picks up a cancelled call');
+  assert.equal(live.timers.some(timer => timer.ms === 3500), false, 'nobody picks up a cancelled call');
   assert.equal(live.timers.filter(timer => timer.ms === 10 * 60 * 1000).length, 1, 'and the caller waits again');
   live.service.callBack();
-  live.fire(5750);
+  live.fire(3500);
   await settle();
   assert.equal(live.service.getState().phase, 'in-call');
   assert.equal(live.engineOptions[0].callback.how, 'declined');
@@ -382,7 +382,7 @@ test('declining keeps the call; the outgoing ring can be cancelled; a plain answ
   await plain.service.start(ARGS);
   assert.equal((await plain.service.answer()).phase, 'in-call');
   assert.equal('callback' in plain.engineOptions[0], false);
-  assert.equal(plain.timers.some(timer => timer.ms === 30000), false, 'answering stops the ring timeout');
+  assert.equal(plain.timers.some(timer => timer.ms === 10000), false, 'answering stops the ring timeout');
   await plain.service.hangUp();
   assert.equal('returnedCall' in (await plain.deps.store.readRecord('call-1')), false);
 });
@@ -1588,12 +1588,13 @@ test('closing the window during a call asks how to leave before it closes', asyn
   });
   await ipc.get('practice-call:start')({}, { nodeId: 'n1' });
   made.close();
-  assert.equal(made.destroyed, false, 'the first close is held back');
-  assert.equal(sent.includes('practice-call-window:leave-requested'), true, 'the window is asked to show its leave dialog');
+  assert.equal(made.destroyed, false, 'the first close ends the call and keeps the window for the feedback question');
+  assert.deepEqual(hangUps, [{ feedback: 'ask' }], 'closing the window mid-call is the red button');
+  assert.equal(sent.includes('practice-call-window:leave-requested'), false, 'no dialog is asked for');
   assert.equal(abandons.length, 0);
-  await ipc.get('practice-call-window:hang-up')({}, { feedback: false });
-  assert.deepEqual(hangUps, [{ feedback: false }]);
-  assert.equal(made.destroyed, true, 'leaving without feedback closes the window');
+  made.close();
+  assert.equal(made.destroyed, true, 'closing it again goes through');
+  assert.equal(abandons.length, 1, 'and counts as no feedback');
 });
 
 test('a full start never sends POST or DELETE to the voices API', async () => {

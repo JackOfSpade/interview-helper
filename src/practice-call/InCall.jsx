@@ -45,7 +45,7 @@ function tileLayout(count, panelOpen) {
   return { grid: 'grid-cols-3 grid-rows-2', tile: none, avatar };
 }
 
-export default function InCall({ state, api, leaveRequest = 0 }) {
+export default function InCall({ state, api }) {
   const [captionsOn, setCaptionsOn] = useState(false);
   // One side panel at a time, as in a meeting window: 'chat', 'cards' or none.
   const [panel, setPanel] = useState(null);
@@ -53,10 +53,6 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
   const [cards, setCards] = useState([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState(null);
-  const [leaving, setLeaving] = useState(false);
-  // Closing the window mid-call arrives as a new request number and opens the same dialog.
-  const [seenLeaveRequest, setSeenLeaveRequest] = useState(leaveRequest);
-  if (leaveRequest !== seenLeaveRequest) { setSeenLeaveRequest(leaveRequest); setLeaving(true); }
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const stopCamera = useCallback(() => {
@@ -104,9 +100,8 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
     if (typeof api?.getPreparedCards !== 'function') return;
     try { const result = await api.getPreparedCards(); setCards(Array.isArray(result) ? result : []); } catch { setCards([]); }
   };
-  // Leaving only ends the call. Whether to write feedback is asked on the screen after it.
+  // The red button ends the call at once, as in any call app. Whether to write feedback is asked on the screen after it.
   const leave = () => {
-    setLeaving(false);
     stopCamera();
     if (typeof api?.leave === 'function') api.leave();
   };
@@ -287,7 +282,7 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
         <button type="button" className={roundClass(muted ? 'off' : 'idle')} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}</button>
         <button type="button" className={roundClass(cameraOn ? 'idle' : 'off')} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <Video size={20} aria-hidden="true" /> : <VideoOff size={20} aria-hidden="true" />}</button>
         <button type="button" className={roundClass(captionsOn ? 'active' : 'idle')} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}>{captionsOn ? <Captions size={20} aria-hidden="true" /> : <CaptionsOff size={20} aria-hidden="true" />}</button>
-        <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" aria-haspopup={interviewerLeft ? undefined : 'dialog'} onClick={() => (interviewerLeft ? leave() : setLeaving(true))}><PhoneOff size={20} aria-hidden="true" /></button>
+        <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" onClick={leave}><PhoneOff size={20} aria-hidden="true" /></button>
       </div>
       <div className="flex items-center justify-end gap-1">
         <button type="button" className={flatClass(cardsOpen)} aria-pressed={cardsOpen} aria-label="Notes" onClick={toggleCards}><ListChecks size={20} aria-hidden="true" /></button>
@@ -301,16 +296,5 @@ export default function InCall({ state, api, leaveRequest = 0 }) {
         <span className="mt-2 block text-sm font-medium text-white/60">Press P to resume (⌘P while typing)</span>
       </span>
     </p>}
-    {leaving && <div className="pc-fade fixed inset-0 z-30 grid place-items-center bg-black/60 p-4" onClick={event => { if (event.target === event.currentTarget) setLeaving(false); }}>
-      <section role="dialog" aria-modal="true" aria-label="Leave the call" className="pc-rise w-full max-w-sm rounded-3xl bg-white p-6 text-[#202124] shadow-2xl"
-        onKeyDown={event => { if (event.key === 'Escape') setLeaving(false); }}>
-        <h2 className="text-xl font-normal">Leave the call?</h2>
-        {!interviewerLeft && <p className="mt-2 text-sm leading-snug text-[#5f6368]">The interview isn't finished yet.</p>}
-        <div className="mt-5 flex flex-col gap-2">
-          <button type="button" autoFocus onClick={leave} className="rounded-full bg-[#ea4335] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ea4335]">Leave call</button>
-          <button type="button" onClick={() => setLeaving(false)} className="rounded-full px-5 py-2.5 text-sm font-medium text-[#5f6368] hover:bg-black/5">Stay on the call</button>
-        </div>
-      </section>
-    </div>}
   </main>;
 }

@@ -230,7 +230,7 @@ is real, to answer "are you an AI?" in character, and to give no feedback or
 coaching. A brief with no team names none (no "the hiring team"). The screens
 before the ring and after the hang-up do not say practice either (they keep
 the disclosures: what is downloaded, that the voice is AI, that feedback uses
-AI, that camera video never leaves the Mac). While the call window is in front
+AI). While the call window is in front
 the menu bar shows a short call menu (`callMenu` in
 `electron/interviewApp/main.js`, passed to the call window; off in the unit
 suites); the app name in the menu bar cannot change per window. The pause

@@ -275,12 +275,14 @@ seconds later. `readyGate: false` (the unit suites) rings at once.
 
 **Missed call and call back (2026-11-19).** The ring is the "Meeting app" chime
 (`startRingtone` in `src/practice-call/ringtone.js`). A ring that is declined
-(`decline`) or not answered within 30 seconds (`RING_TIMEOUT_MS`) does not end
-anything: the service moves to phase `missed` with `missed: 'declined'` or
+(`decline`) or not answered within 10 seconds (`RING_TIMEOUT_MS`, the owner's
+choice) does not end anything: the service moves to phase `missed` with `missed: 'declined'` or
 `'unanswered'`, and the window shows the caller with Call back and Close. The
 microphone, the recording and the three warm sessions stay up. Call back
-(`callBack`) moves to phase `calling` (outgoing tone, `startRingback`); the
-interviewer picks up 3.5 to 8 seconds later and the call connects as usual.
+(`callBack`) moves to phase `calling`, where `startRingback` plays the North
+American phone network's ringing tone (440 Hz and 480 Hz together, 2 seconds on,
+4 off); the interviewer picks up 2 to 5 seconds later and the call connects as
+usual.
 Hanging up before that (`cancelCallBack`) returns to `missed`. The engine gets
 `callback: { how, agoMs }` and the first message becomes `[call connected: the
 candidate is calling you back. You called them and it rang out with no answer
@@ -299,9 +301,11 @@ their connection" (`state.connectionLost`). The candidate leaves when they
 choose, and the record keeps `reason: 'session-error'`, so the review still
 treats it as a technical ending.
 
-**Feedback is chosen after the call (2026-11-19).** The red button asks only
-"Leave the call?" (and nothing at all once the interviewer has gone). The
-window calls `leave`, which is `hangUp({ feedback: 'ask' })`: the call is saved
+**Feedback is chosen after the call (2026-11-19).** The red button ends
+the call at once, with no confirmation, whether or not the interviewer is still
+there; after the interviewer leaves, the candidate stays on the call until they
+press it. Closing the window mid-call does the same and keeps the window for
+the question. The window calls `leave`, which is `hangUp({ feedback: 'ask' })`: the call is saved
 as one left without feedback, the service waits in phase `ended` with
 `feedbackChoice: 'pending'`, and the ended screen asks "Want feedback on this
 call?". `chooseFeedback(true)` runs the transcription and review;

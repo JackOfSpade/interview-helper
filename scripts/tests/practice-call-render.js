@@ -332,7 +332,7 @@ export default [
         assert(/data-status="pending"[^>]*>(?:(?!<\/li>).)*Turning on your microphone/.test(precheck), 'a later setup step is still pending');
         assert(precheck.includes('not on yet'), 'the meter says the microphone is not on while the plan is written');
         assert(!/say something/i.test(precheck), 'the setup screen must not ask the candidate to speak: nothing waits on the microphone');
-        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'video stays on this Mac and is never recorded or sent', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
+        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
           assert(precheck.includes(fragment), `precheck screen is missing ${fragment}`);
         }
         const quiet = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, usageWarning: null, persona: PERSONA, setup: { step: 'plan', attempt: 1 } }));
@@ -371,7 +371,8 @@ export default [
         assert(notes.slice(0, 4).every((hertz, index) => index === 0 || hertz > notes[index - 1]), 'the chime rises');
         const before = created.length;
         const stopRingback = ringtone.startRingback({ AudioContext: FakeAudioContext });
-        assert(created.length === before + 4 && created.slice(before).every(oscillator => [440, 480].includes(oscillator.frequencies[0])), 'the outgoing tone is two soft low notes');
+        assert(JSON.stringify(created.slice(before).map(oscillator => oscillator.frequencies[0])) === '[440,480]', 'the outgoing tone is the phone network ring: 440 Hz and 480 Hz together');
+        assert(ringtone.RINGBACK_ON_SECONDS === 2 && ringtone.RINGBACK_CYCLE_MS === 6000, 'two seconds on, four seconds off');
         stopRingback();
         context.closed = false;
         assert(context.closed === false, 'the ring keeps playing until it is stopped');
@@ -646,26 +647,20 @@ export default [
             assert(!/practice|\bAI\b/iu.test(window.document.body.textContent), 'the call screen never says practice or AI');
             assert(byLabel('Hang up') && byLabel('Mute microphone') && byLabel('Captions'), 'in-call must expose the control bar');
             assert(byLabel('Call timer')?.textContent === '1:05', 'the in-call timer must follow elapsedMs');
-            // The interviewer leaving keeps the call screen up; the red button asks how to leave.
+            // The interviewer leaving keeps the call screen up; the red button ends it.
             await push({ interviewerLeft: true, speaking: null });
             assert(byLabel('Dana Whitfield left')?.textContent.includes('Dana Whitfield left the call'), 'the call screen must say the interviewer left');
             assert(byLabel('Hang up') && !byLabel('Leave the call'), 'the call stays up with no dialog until Hang up is pressed');
             // A dropped connection reads as one, not as a goodbye.
             await push({ connectionLost: true });
             assert(byLabel('Dana Whitfield left')?.textContent.includes('Dana Whitfield lost their connection'), 'a dropped interviewer is shown as a lost connection');
-            // Mid-interview the red button asks first, and the dialog says nothing about feedback or AI.
+            // The interviewer leaving does not end the call: the candidate stays until they press the red button.
+            assert(!invoked.includes('leave') && byLabel('Hang up'), 'the candidate is still on the call');
+            // The red button ends the call at once, with no dialog, whether or not the interviewer is still there.
             await push({ interviewerLeft: false, connectionLost: false });
             await act(() => byLabel('Hang up').click());
-            assert(!invoked.includes('leave'), 'pressing Hang up mid-interview must not end the call by itself');
-            const choices = [...byLabel('Leave the call').querySelectorAll('button')].map(node => node.textContent);
-            assert(choices.join('|') === 'Leave call|Stay on the call', `unexpected leave choices: ${choices.join('|')}`);
-            assert(!/feedback|\bAI\b|practice/iu.test(byLabel('Leave the call').textContent), 'the leave dialog stays inside the call');
-            await act(() => [...byLabel('Leave the call').querySelectorAll('button')].find(node => node.textContent === 'Stay on the call').click());
-            assert(!byLabel('Leave the call') && byLabel('Hang up'), 'staying closes the dialog and keeps the call');
-            // Once the interviewer has gone there is nothing to confirm: the red button leaves.
-            await push({ interviewerLeft: true });
-            await act(() => byLabel('Hang up').click());
-            assert(invoked.filter(name => name === 'leave').length === 1 && hangUps.length === 0 && !byLabel('Leave the call'), 'leaving ends the call without choosing about feedback');
+            assert(invoked.filter(name => name === 'leave').length === 1 && hangUps.length === 0, 'Hang up ends the call without choosing about feedback');
+            assert(!window.document.querySelector('[role="dialog"]'), 'no confirmation is shown');
             // The choice about feedback comes after the call.
             await push({ phase: 'ended', feedbackChoice: null, feedbackRequested: true });
             assert(!byLabel('Feedback choice'), 'nothing is asked while the call is still being saved');

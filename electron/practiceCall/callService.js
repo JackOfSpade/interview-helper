@@ -27,14 +27,15 @@ const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio'
 // How long after Ready the call rings: long enough to feel like someone dialling in, short enough not to drag.
 const RING_DELAY_MIN_MS = 3000;
 const RING_DELAY_MAX_MS = 7000;
-// An unanswered ring gives up after this long, as a caller would, and becomes a missed call.
-const RING_TIMEOUT_MS = 30000;
+// An unanswered ring gives up after this long and becomes a missed call (the owner's choice: three rings of the chime).
+const RING_TIMEOUT_MS = 10000;
 // A missed call can be returned for this long. The microphone, the recording and the three
 // warm sessions stay up meanwhile, so the wait is bounded; after it the interviewer is gone.
 const MISSED_HOLD_MS = 10 * 60 * 1000;
-// How long the interviewer takes to pick up a returned call.
-const CALLBACK_PICKUP_MIN_MS = 3500;
-const CALLBACK_PICKUP_MAX_MS = 8000;
+// How long the interviewer takes to pick up a returned call: they were just trying to reach the
+// candidate, so the phone is in their hand. Usually long enough to hear it ring once on their side.
+const CALLBACK_PICKUP_MIN_MS = 2000;
+const CALLBACK_PICKUP_MAX_MS = 5000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;

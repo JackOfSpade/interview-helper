@@ -67,14 +67,35 @@ export function startRingtone(win, { intervalMs = 3200 } = {}) {
   });
 }
 
-// Outgoing-call tone, heard while the other side's phone rings: two soft low
-// notes, then a pause. Quieter than the incoming ring. Returns a stop function.
-export function startRingback(win, { intervalMs = 3000 } = {}) {
-  return startLoop(win, intervalMs, (context, out, now) => {
-    partial(context, out, now, 440, 0.9, 0.09);
-    partial(context, out, now, 480, 0.9, 0.09);
-    partial(context, out, now + 1.0, 440, 0.9, 0.09);
-    partial(context, out, now + 1.0, 480, 0.9, 0.09);
+// One steady sine tone with short fades at both ends, so it starts and stops without a click.
+function steady(context, out, at, hertz, seconds, level) {
+  try {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(hertz, at);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(level, at + 0.03);
+    gain.gain.setValueAtTime(level, at + seconds - 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + seconds);
+    oscillator.connect(gain);
+    gain.connect(out);
+    oscillator.start(at);
+    oscillator.stop(at + seconds + 0.02);
+  } catch { /* a closed context stays silent */ }
+}
+
+// The tone a caller hears while the other phone rings, as the North American phone network
+// plays it (the Precise Tone Plan's audible ringing): 440 Hz and 480 Hz together, two seconds
+// on and four seconds off.
+export const RINGBACK_HERTZ = Object.freeze([440, 480]);
+export const RINGBACK_ON_SECONDS = 2;
+export const RINGBACK_CYCLE_MS = 6000;
+
+// Outgoing-call tone, played until the returned stop function is called.
+export function startRingback(win) {
+  return startLoop(win, RINGBACK_CYCLE_MS, (context, out, now) => {
+    for (const hertz of RINGBACK_HERTZ) steady(context, out, now, hertz, RINGBACK_ON_SECONDS, 0.11);
   });
 }
 

@@ -116,16 +116,12 @@ export function createPracticeCallController(deps = {}) {
     win = new BrowserWindow(options);
     const created = win;
     created.once?.('ready-to-show', () => { try { created.show(); } catch { /* closed before show */ } });
-    // Closing the window mid-call asks the same question as the red button. A second
-    // close within ten seconds goes through, so a stuck page can never trap the window.
-    let leaveAskedAt = 0;
+    // Closing the window mid-call is the red button: the call ends and the window stays for the
+    // question that follows it (feedback or not). Closing it again answers "no" and goes through.
     created.on?.('close', event => {
       if (win !== created || winMode !== 'call' || service.getState?.()?.phase !== 'in-call') return;
-      const now = Date.now();
-      if (now - leaveAskedAt < 10_000) return;
-      leaveAskedAt = now;
       try { event?.preventDefault?.(); } catch { return; }
-      send(`${WINDOW_PREFIX}leave-requested`, null);
+      Promise.resolve(service.hangUp?.({ feedback: 'ask' })).catch(() => {});
       try { created.show(); created.focus(); } catch { /* window is going away */ }
     });
     // The menu bar follows the call window: a short call menu while it is in front, the app's own menu otherwise.

@@ -28,7 +28,6 @@ const practiceCallAPI = Object.freeze({
   getState: () => invoke('get-state'),
   onState: cb => subscribe(`${PREFIX}state`, cb),
   onEvent: cb => subscribe(`${PREFIX}event`, cb),
-  onLeaveRequested: cb => subscribe(`${PREFIX}leave-requested`, cb),
   agreeModelDownload: () => invoke('agree-model-download'),
   ready: () => invoke('ready'),
   answer: () => invoke('answer'),

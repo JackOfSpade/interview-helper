@@ -29,8 +29,6 @@ export default function PracticeCallApp() {
   const [state, setState] = useState(initialState);
   const [replay, setReplay] = useState(null);
   const [busy, setBusy] = useState(false);
-  // Counts window-close attempts during a call; the call screen answers each with its leave dialog.
-  const [leaveRequest, setLeaveRequest] = useState(0);
 
   useEffect(() => {
     const api = readApi();
@@ -38,7 +36,6 @@ export default function PracticeCallApp() {
     let live = true;
     const apply = value => { if (live && value && typeof value === 'object') setState(previous => mergeState(previous, value)); };
     const offState = typeof api.onState === 'function' ? api.onState(apply) : null;
-    const offLeave = typeof api.onLeaveRequested === 'function' ? api.onLeaveRequested(() => { if (live) setLeaveRequest(value => value + 1); }) : null;
     const offEvent = typeof api.onEvent === 'function' ? api.onEvent(event => { if (live) setState(previous => mergeEvent(previous, event)); }) : null;
     try {
       const initial = api.getState();
@@ -49,7 +46,6 @@ export default function PracticeCallApp() {
       live = false;
       if (typeof offState === 'function') offState();
       if (typeof offEvent === 'function') offEvent();
-      if (typeof offLeave === 'function') offLeave();
     };
   }, []);
 
@@ -113,7 +109,7 @@ export default function PracticeCallApp() {
     case 'missed': return <MissedCall persona={state.persona} missed={state.missed} onCallBack={() => invoke('callBack')} onClose={() => invoke('close')} />;
     case 'calling': return <OutgoingCall persona={state.persona} onCancel={() => invoke('cancelCallBack')} />;
     case 'connecting': return <ConnectingScreen persona={state.persona} />;
-    case 'in-call': return <InCall state={state} leaveRequest={leaveRequest} api={{
+    case 'in-call': return <InCall state={state} api={{
       setMuted: value => invoke('setMuted', value),
       leave: () => invoke('leave'),
       getPreparedCards: () => invoke('getPreparedCards'),
