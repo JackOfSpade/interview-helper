@@ -99,7 +99,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   const canCall = ready && !disabled && !practiceBusy;
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
-    <p className="text-[11px] text-white/60">An AI interviewer calls you inside the app: small talk, your prepared questions reworded, follow-ups and curveballs. Answer out loud, or type in the call's chat — typed answers are heard as if you said them. Feedback on the whole call comes with the replay.</p>
+    <p className="text-[11px] text-white/60">An AI interviewer calls you for a mock interview. You get feedback on the call when it ends.</p>
     <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
       <label className="block space-y-1">
         <span className="text-[10px] font-semibold uppercase text-white/45">Steer this interview (optional)</span>

@@ -333,6 +333,8 @@ export default [
         for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
           assert(precheck.includes(fragment), `precheck screen is missing ${fragment}`);
         }
+        const quiet = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, usageWarning: null, persona: PERSONA, setup: { step: 'plan', attempt: 1 } }));
+        assert(!quiet.includes('aria-label="Usage warning"'), 'the setup screen shows no notice when there is no usage warning');
       } finally { await bundle.dispose(); }
     },
   },

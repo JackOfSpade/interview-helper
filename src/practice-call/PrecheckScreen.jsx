@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Check, Headphones, Mic } from 'lucide-react';
-import { USAGE_WARNING, elapsedLabel, levelPercent, setupProgress } from './callModel.js';
+import { elapsedLabel, levelPercent, setupProgress } from './callModel.js';
 
 /** Milliseconds since this screen appeared, ticking once a second. */
 function useElapsed() {
@@ -59,7 +59,7 @@ export default function PrecheckScreen({ level, usageWarning, persona, setup, on
       <p className="flex items-start gap-1.5 text-[11px] text-white/70"><Headphones size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Headphones recommended — the interviewer's voice can otherwise be picked up as if it were you.</p>
       {isReady && <button type="button" onClick={onReady}
         className="w-full rounded-lg bg-emerald-500/25 px-3 py-2 text-[13px] font-semibold text-emerald-50 hover:bg-emerald-500/35">I'm ready</button>}
-      <div role="note" aria-label="Usage warning" className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{usageWarning || USAGE_WARNING}</div>
+      {usageWarning ? <div role="note" aria-label="Usage warning" className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{usageWarning}</div> : null}
     </section>
   </main>;
 }

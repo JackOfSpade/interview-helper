@@ -64,8 +64,6 @@ export function analysisStageIndex(stage) {
   return index < 0 ? 0 : index;
 }
 
-export const USAGE_WARNING = 'The interviewer is an AI voice. It hears everything you say and the call is analysed afterwards, so use real examples only.';
-
 export const levelPercent = level => {
   const value = Number(level);
   if (!Number.isFinite(value)) return 0;
