@@ -593,6 +593,55 @@ export default [
     },
   },
   {
+    name: 'interview answer preparation: Prepare writes Q&A only for the tabs with no cards, and calls no AI when both have cards and the inputs are already prepared',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-empty-tabs-'));
+      try {
+        const { args, value } = await fixture(root);
+        const handlers = new Map(); const loadSnapshot = async () => snapshot;
+        const order = []; const scoped = {}; let aiCalls = 0; let empty = []; let changed = 0; const asked = [];
+        const step = name => async request => { order.push(name); scoped[name] = request.scopes; };
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
+          buildBrief: a => buildInterviewBrief({ ...a, callRaw: async () => { aiCalls++; return research; }, callText: async (_prompt, opts) => { aiCalls++; opts.responseValidator(assessment); return assessment; } }),
+          buildAnswers: a => buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => { aiCalls++; return answerReply(value, prompt, opts); } }),
+          publishAnswers: a => publishInterviewPreparedAnswers({ ...a, loadSnapshot }),
+          loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
+          emptyQaScopes: async request => { asked.push(request.company); return [...empty]; },
+          mapDisclosures: async () => { order.push('disclosures'); return []; },
+          fillQa: async request => { order.push('qa'); scoped.qa = request.scopes; return { foundation: { cards: [{ question: 'Tell me about yourself.' }] }, company: { cards: [] } }; },
+          fillCues: step('cues'), fillApproaches: step('approaches'), fillGaps: step('gaps'),
+          fillTopics: async () => { order.push('topics'); }, writeTopics: async () => ({ topics: [], technical: [] }),
+          preparePractice: async () => { order.push('practice'); },
+          onQaChanged: () => { changed += 1; } });
+        const run = request => handlers.get('build-interview-brief')({}, request);
+        // Both tabs have cards and these inputs were never prepared: research and the sealed answers are
+        // still built for the cue card, and no Q&A step runs.
+        const kept = await run({ ...args });
+        assert(!kept.reused && kept.qaKept === true && kept.answerBankAvailable && aiCalls > 0, 'a new preparation with both tabs holding cards is built and says the tabs were kept');
+        assert(order.join() === 'qa,practice' && scoped.qa.length === 0 && changed === 0, `no Q&A writing step runs when no tab is empty, got ${order.join()}`);
+        assert(asked.length === 2 && asked[0] === undefined && typeof asked[1] === 'string' && asked[1].length > 0, 'the tabs are checked before the run and again with the company name');
+        // The same inputs again: nothing to write and a saved preparation exists, so "Prepare again" calls no AI.
+        const before = aiCalls; order.length = 0;
+        const again = await run({ ...args });
+        assert(again.reused === true && again.qaKept === true && again.briefRecordId === kept.briefRecordId && aiCalls === before && order.length === 0, 'both tabs with cards and a saved preparation: nothing is generated');
+        // Only the posting tab is empty: every Q&A step runs for that tab alone.
+        empty = ['company'];
+        const posting = await run({ ...args });
+        assert(!posting.reused && !Object.hasOwn(posting, 'qaKept') && aiCalls > before, 'an empty tab makes Prepare again run');
+        assert(order.join() === 'disclosures,qa,cues,approaches,topics,gaps,practice' && changed === 1, `the posting tab gets every step, got ${order.join()}`);
+        for (const name of ['qa', 'cues', 'approaches', 'gaps']) assert(scoped[name].join() === 'company', `${name} is limited to the empty tab`);
+        // Only General is empty: past interview questions and technical topics belong to the posting and are skipped.
+        empty = ['foundation']; order.length = 0;
+        await run({ ...args });
+        assert(order.join() === 'qa,cues,approaches,gaps,practice' && changed === 2, `General alone skips disclosures and topics, got ${order.join()}`);
+        for (const name of ['qa', 'cues', 'approaches', 'gaps']) assert(scoped[name].join() === 'foundation', `${name} is limited to General`);
+        // A first Prepare may still reuse while a tab is empty; it does not claim the tabs were kept.
+        const first = await run({ ...args, reuseExisting: true });
+        assert(first.reused === true && !Object.hasOwn(first, 'qaKept'), 'reuse with an empty tab leaves Prepare again able to write it');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'interview answer preparation: stable resume prompt, no partial acceptance and cancellation before another handoff',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-resume-'));

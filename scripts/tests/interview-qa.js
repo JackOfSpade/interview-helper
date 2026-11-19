@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, isAnsweredCard, isFoundationQuestion,
+  addInterviewQaCard, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaFromPreparation, isAnsweredCard, isFoundationQuestion,
   loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
@@ -45,56 +45,78 @@ export default [
       assert.equal(stat.mode & 0o077, 0, 'store files are private');
     });
   } },
-  { name: 'interview Q&A: fill-only never replaces a non-empty answer (generated or user) and respects tombstones', async run() {
+  { name: 'interview Q&A: a tab that has cards is left exactly as it is by a later Prepare', async run() {
     await userData(async dir => {
       await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(card('intro', 'Tell me about yourself.', 'Original intro.'), card('why-role', 'Why are you interested in this role?', 'Original why.'), card('lead', 'Describe your approach to leadership.', 'Original lead.')) });
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h' }), []);
       const loaded = await loadInterviewQa({ userDataPath: dir, nodeId: 'h' });
       const why = loaded.company.cards.find(item => item.question === 'Why are you interested in this role?');
       await saveInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { ...why, headline: 'My own why.', bullets: [{ text: 'My own bullet.' }], example: '' } });
       const lead = loaded.company.cards.find(item => item.question === 'Describe your approach to leadership.');
       await deleteInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', cardId: lead.id });
-      const again = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(card('intro', 'Tell me about yourself.', 'NEW intro.'), card('why-role', 'Why are you interested in this role?', 'NEW why.'), card('lead', 'Describe your approach to leadership.', 'NEW lead.'), card('pressure', 'How do you work under pressure?', 'New pressure.')) });
-      assert.equal(again.foundation.cards[0].headline, 'Original intro.', 'a generated answer is kept');
-      const whyAfter = again.company.cards.find(item => item.question === 'Why are you interested in this role?');
-      assert.equal(whyAfter.headline, 'My own why.'); assert.equal(whyAfter.author, 'user');
-      assert(!again.company.cards.some(item => item.question === 'Describe your approach to leadership.'), 'a deleted question does not come back');
-      assert(again.company.cards.some(item => item.question === 'How do you work under pressure?' && item.headline === 'New pressure.'), 'a new question is added');
+      await addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { question: 'How do you adapt to change?', variants: [], headline: '', bullets: [], example: '', extensions: [] } });
+      const before = await loadInterviewQa({ userDataPath: dir, nodeId: 'h' });
+      const again = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h',
+        bank: bank(card('intro', 'Tell me about yourself.', 'NEW intro.'), card('project', 'Walk me through a project.', 'NEW project.'), card('why-role', 'Why are you interested in this role?', 'NEW why.'), card('lead', 'Describe your approach to leadership.', 'NEW lead.'), card('pressure', 'How do you work under pressure?', 'New pressure.'), card('adapt', 'How do you adapt to change?', 'New adapt.')),
+        disclosureMapping: [
+          { question: 'Why this job?', sourceUrl: 'https://example.test/b', sourceDate: '2026', evidenceQuote: 'q', target: 'company', cardQuestion: 'Why are you interested in this role?' },
+          { question: 'Tell us about you', sourceUrl: 'https://example.test/a', sourceDate: 'unknown', evidenceQuote: 'q', target: 'foundation', cardQuestion: 'Tell me about yourself.' }] });
+      assert.deepEqual(again, before, 'neither tab changes: no new card, no added wording, no filled answer, no link');
+      assert.equal(again.foundation.cards.length, 1); assert.equal(again.foundation.cards[0].headline, 'Original intro.');
+      assert.equal(again.company.cards.find(item => item.question === 'Why are you interested in this role?').headline, 'My own why.');
+      assert(!again.company.cards.some(item => item.question === 'Describe your approach to leadership.'), 'a deleted question does not come back while the tab has cards');
+      assert.equal(again.company.cards.find(item => item.question === 'How do you adapt to change?').status, 'empty', 'an empty card in a tab that has cards is not filled');
     });
   } },
-  { name: 'interview Q&A: empty cards get filled; disclosures become variants, foundation links or needs-prep cards', async run() {
+  { name: 'interview Q&A: only the empty tab is written, and an emptied tab is written again with its deleted questions', async run() {
     await userData(async dir => {
-      const qa0 = await addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { question: 'How do you work under pressure?', variants: [], headline: '', bullets: [], example: '', extensions: [] } });
-      assert.equal(qa0.cards[0].status, 'empty');
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h' }), ['foundation', 'company']);
+      const first = bank(card('intro', 'Tell me about yourself.', 'Original intro.'), card('why-role', 'Why are you interested in this role?', 'Original why.'), card('lead', 'Describe your approach to leadership.', 'Original lead.'));
+      // A tab that is not listed is not written even when it is empty.
+      const generalOnly = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: first, scopes: ['foundation'] });
+      assert.equal(generalOnly.foundation.cards.length, 1); assert.deepEqual(generalOnly.company.cards, []);
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h' }), ['company']);
+      const filled = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: first, scopes: ['company'] });
+      assert.equal(filled.company.cards.length, 2);
+      // Every posting card is deleted: the posting tab is empty and General is not.
+      for (const item of filled.company.cards) await deleteInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', cardId: item.id });
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h' }), ['company']);
+      const again = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h',
+        bank: bank(card('intro', 'Tell me about yourself.', 'NEW intro.'), card('project', 'Walk me through a project.', 'NEW project.'), card('why-role', 'Why are you interested in this role?', 'NEW why.'), card('lead', 'Describe your approach to leadership.', 'NEW lead.')) });
+      assert.deepEqual(again.foundation.cards.map(item => item.headline), ['Original intro.'], 'General has cards and stays as it is');
+      assert.deepEqual(again.company.cards.map(item => item.headline).sort(), ['NEW lead.', 'NEW why.'], 'the emptied tab is written again, deleted questions included');
+    });
+  } },
+  { name: 'interview Q&A: disclosures become variants, foundation links or needs-prep cards when the posting tab is written', async run() {
+    await userData(async dir => {
       const mapping = [
         { question: 'Tell us about yourself and your background', sourceUrl: 'https://example.test/a', sourceDate: 'unknown', evidenceQuote: 'q', target: 'foundation', cardQuestion: 'Tell me about yourself.' },
         { question: 'Why Discord?', sourceUrl: 'https://example.test/b', sourceDate: '2026', evidenceQuote: 'q2', target: 'company', cardQuestion: 'Why are you interested in this company?' },
         { question: 'Design a rate limiter for chat messages.', sourceUrl: 'https://example.test/c', sourceDate: 'unknown', evidenceQuote: 'q3', target: 'none', cardQuestion: '' },
+        // A company mapping whose card did not survive becomes a needs-prep disclosed card.
+        { question: 'Why do you want to join Acme?', sourceUrl: 'https://example.test/d', sourceDate: 'unknown', evidenceQuote: 'q4', target: 'company', cardQuestion: 'Why Acme?' },
       ];
       const qa = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(card('pressure', 'How do you work under pressure?', 'I prioritize.'), card('why-company', 'Why are you interested in this company?', 'Discord reaches millions.')), disclosureMapping: mapping });
       const pressure = qa.company.cards.find(item => item.question === 'How do you work under pressure?');
-      assert.equal(pressure.headline, 'I prioritize.', 'an empty card is filled'); assert.equal(pressure.author, 'generated');
+      assert.equal(pressure.headline, 'I prioritize.'); assert.equal(pressure.author, 'generated');
       const why = qa.company.cards.find(item => item.question === 'Why are you interested in this company?');
       assert(why.variants.includes('Why Discord?') && why.origin === 'disclosed' && why.source.url === 'https://example.test/b');
       const design = qa.company.cards.find(item => item.question === 'Design a rate limiter for chat messages.');
       assert.equal(design.status, 'needs-prep'); assert.equal(design.origin, 'disclosed');
       assert.deepEqual(qa.company.foundationLinks, [{ foundationQuestion: 'Tell me about yourself.', question: 'Tell us about yourself and your background', sourceUrl: 'https://example.test/a' }]);
       assert(!qa.company.cards.some(item => item.question === 'Tell us about yourself and your background'), 'a foundation-equivalent disclosure never duplicates into company Q&A');
-      // A company mapping whose card did not survive becomes a needs-prep disclosed card.
-      const orphan = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(), disclosureMapping: [
-        { question: 'Why do you want to join Acme?', sourceUrl: 'https://example.test/d', sourceDate: 'unknown', evidenceQuote: 'q4', target: 'company', cardQuestion: 'Why Acme?' }] });
-      const kept = orphan.company.cards.find(item => item.question === 'Why do you want to join Acme?');
+      const kept = qa.company.cards.find(item => item.question === 'Why do you want to join Acme?');
       assert(kept, 'the disclosed question is not lost'); assert.equal(kept.status, 'needs-prep'); assert.equal(kept.origin, 'disclosed');
       assert.equal(kept.source.url, 'https://example.test/d');
     });
   } },
-  { name: 'interview Q&A: a filled card never reuses an id already held by a different question', async run() {
+  { name: 'interview Q&A: a written card never reuses an id already held by a different question', async run() {
     await userData(async dir => {
-      await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'a', bank: bank(card('c3', 'Tell me about yourself.', 'By impact.')) });
-      const second = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'b', bank: bank(card('c3', 'Walk me through a project.', 'I weighed options.')) });
-      const ids = second.foundation.cards.map(item => item.id);
-      assert.equal(new Set(ids).size, ids.length, 'card ids stay unique');
-      const decision = second.foundation.cards.find(item => item.question === 'Walk me through a project.');
-      const after = await deleteInterviewQaCard({ userDataPath: dir, nodeId: 'b', scope: 'foundation', cardId: decision.id });
+      const qa = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'a', bank: bank(card('c3', 'Tell me about yourself.', 'By impact.'), card('c3', 'Walk me through a project.', 'I weighed options.')) });
+      const ids = qa.foundation.cards.map(item => item.id);
+      assert.equal(ids.length, 2); assert.equal(new Set(ids).size, ids.length, 'card ids stay unique');
+      const decision = qa.foundation.cards.find(item => item.question === 'Walk me through a project.');
+      const after = await deleteInterviewQaCard({ userDataPath: dir, nodeId: 'a', scope: 'foundation', cardId: decision.id });
       assert(after.cards.some(item => item.question === 'Tell me about yourself.'), 'deleting one card keeps the other');
     });
   } },
@@ -103,6 +125,8 @@ export default [
       await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', company: 'Acme', bank: bank(card('why', 'Why are you interested in this company?', 'Acme ships fast.')),
         disclosureMapping: [{ question: 'Tell us about you', sourceUrl: 'https://example.test/a', sourceDate: 'unknown', evidenceQuote: 'q', target: 'foundation', cardQuestion: 'Tell me about yourself.' }] });
       await addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { question: 'My own note?', headline: 'Mine.' } });
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h', company: 'Acme Inc.' }), ['foundation'], 'the same company with cards is not empty');
+      assert.deepEqual(await emptyInterviewQaScopes({ userDataPath: dir, nodeId: 'h', company: 'Globex' }), ['foundation', 'company'], 'a set re-pointed at another company is written again');
       const next = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', company: 'Globex', bank: bank(card('why', 'Why are you interested in this company?', 'Globex scales.')) });
       assert.equal(next.company.cards.find(item => item.question === 'Why are you interested in this company?').headline, 'Globex scales.', 'the new company answer replaces the old one');
       assert(next.company.cards.some(item => item.question === 'My own note?'), 'the person\'s card stays');
@@ -112,7 +136,7 @@ export default [
         disclosureMapping: [{ question: 'Tell us about you', sourceUrl: 'https://example.test/a', sourceDate: 'unknown', evidenceQuote: 'q', target: 'foundation', cardQuestion: 'Tell me about yourself.' }] });
       assert.equal(same.company.cards.find(item => item.question === 'Why are you interested in this company?').headline, 'Globex scales.');
       const placeholder = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', company: 'Unknown company', bank: bank() });
-      assert.equal(placeholder.company.foundationLinks.length, 1, 'a placeholder company never resets links');
+      assert.deepEqual(placeholder.company.foundationLinks, [], 'a tab that has cards gains no link');
       assert.equal(placeholder.company.company, 'Globex, Inc.', 'a placeholder never overwrites a real name');
     });
   } },

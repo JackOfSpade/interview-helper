@@ -40,7 +40,7 @@ import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from
 import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
 import { generateInterviewGapAnswers } from './interviewAnswerGap.js';
-import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { generateInterviewTopics } from './interviewQaTopics.js';
 import { createQuestionHistory } from '../practiceCall/questionHistory.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
@@ -1456,6 +1456,8 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   fillCues = fillInterviewQaCues,
   fillApproaches = fillInterviewQaApproaches,
   fillGaps = fillInterviewQaGaps,
+  // Which Q&A tabs hold no cards: the only ones a Prepare writes. It reads files only.
+  emptyQaScopes = emptyInterviewQaScopes,
   // Told after a Prepare wrote Q&A, so a window showing another interview reloads the shared sets.
   onQaChanged = null,
   practiceRegistry = null,
@@ -1646,10 +1648,15 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   registerHandler('build-interview-brief', async (_event, request, signal) => {
     validateInterviewPrepareArgs(request);
     const { reuseExisting = false, ...args } = request;
-    if (reuseExisting) {
+    // Prepare writes Q&A only for a tab with no cards. When both tabs hold cards there is nothing
+    // to write, so "Prepare again" uses the saved preparation of the same inputs, like a first Prepare.
+    await bindPosting(args);
+    const emptyAtStart = await emptyQaScopes({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId });
+    throwIfAborted(signal);
+    if (reuseExisting || !emptyAtStart.length) {
       const existing = await reusePrepared(args);
       throwIfAborted(signal);
-      if (existing) { await bindPosting(args); return existing; }
+      if (existing) return { ...existing, ...(emptyAtStart.length ? {} : { qaKept: true }) };
     }
     try {
       // Claude CLI with the application stage profiles (careerWritingCore).
@@ -1666,12 +1673,15 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throwIfAborted(signal);
       if (answerSummary?.answerBankAvailable !== true || !Number.isInteger(answerSummary.answerCardCount)
         || answerSummary.answerCardCount < INTERVIEW_ANSWER_MIN_CARDS || answerSummary.answerCardCount > 20) throw new Error('The interview answers could not be prepared safely.');
-      // Foundation (global) and company Q&A are filled from the sealed bank,
-      // fill-only: answers that already exist are never replaced.
+      // General and posting Q&A are written from the sealed bank, and only for a
+      // tab that holds no cards: a tab with cards is left exactly as it is.
       let qaWarning = null;
       let disclosureMapping = [];
       const userDataPath = appInstance.getPath('userData');
       const company = published.brief.role?.company || '';
+      const scopes = await emptyQaScopes({ userDataPath, nodeId: args.nodeId, company });
+      throwIfAborted(signal);
+      const writesPosting = scopes.includes('company');
       // Every step after the seal is optional: a failure leaves a warning and the
       // prepared answers stay usable; only a cancellation ends the run.
       const optionalStep = async (name, warning, run) => {
@@ -1682,32 +1692,31 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         }
         throwIfAborted(signal);
       };
-      await optionalStep('disclosure mapping', 'Past interview questions could not be checked this time; prepared answers are ready.', async () => {
+      // Reported past questions become cards and links of the posting's set only.
+      if (writesPosting) await optionalStep('disclosure mapping', 'Past interview questions could not be checked this time; prepared answers are ready.', async () => {
         const bankQuestions = (answers?.bank?.cards || []).map(card => card.question);
         disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText,
           foundationQuestions: INTERVIEW_FOUNDATION_QUESTIONS.map(item => item.question),
           companyQuestions: bankQuestions.filter(question => !isFoundationQuestion(question)) });
       });
       const checkedBank = answers?.bank;
-      // Foundation (global) and company Q&A are filled from the sealed bank,
-      // fill-only: answers that already exist are never replaced.
-      await bindPosting(args);
-      const qa = await fillQa({ userDataPath, nodeId: args.nodeId, bank: checkedBank, company, disclosureMapping });
+      // With no empty tab this writes nothing and only returns the saved Q&A for the practice step.
+      const qa = await fillQa({ userDataPath, nodeId: args.nodeId, bank: checkedBank, company, disclosureMapping, scopes });
       throwIfAborted(signal);
-      if (qa) {
-        // Live-card reminders: every stored answer line without a short cue
-        // gets one, including answers kept from an earlier Prepare.
+      if (qa && scopes.length) {
+        // Live-card reminders: every answer line of a tab written now gets a
+        // short cue. A tab that already had cards gets none.
         await optionalStep('glance cues', 'Short reminders could not be written this time; the live card shows trimmed answer lines.', () => fillCues({
-          userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
+          userDataPath, nodeId: args.nodeId, wants: needsGlanceCue, scopes,
           generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) }));
         // Approach reminders: for "how do you work" questions the live card
         // shows general good practice to illustrate, not a past-work claim.
         await optionalStep('approach reminders', 'Approach reminders could not be written this time; those cards show their prepared lines.', () => fillApproaches({
-          userDataPath, nodeId: args.nodeId,
+          userDataPath, nodeId: args.nodeId, scopes,
           generate: units => generateInterviewApproaches({ units, callText, signal, logWarning }) }));
         // Technical topics: the list is written once per posting and then left to the person to edit;
         // an unanswered technical question reported from past interviews becomes a topic, not a card.
-        await optionalStep('technical topics', 'Technical topics could not be listed this time; add your own in the Q&A panel.', async () => {
+        if (writesPosting) await optionalStep('technical topics', 'Technical topics could not be listed this time; add your own in the Q&A panel.', async () => {
           const bundle = await loadPrivateInterviewPreparationBundle({ artifactId: args.bundleArtifactId, userDataPath });
           await fillTopics({ userDataPath, nodeId: args.nodeId, generate: ({ needList, questions }) => writeTopics({ brief: published.brief, listingText: bundle?.listingText || '', needList, questions, callText, signal }) });
         });
@@ -1716,7 +1725,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         // this" answer instead of staying empty. It runs after the topics step, which first
         // turns unanswered technical questions into topics.
         await optionalStep('honest-gap answers', 'Answers for questions outside your experience could not be written this time; those cards stay empty.', async () => {
-          const filled = await fillGaps({ userDataPath, nodeId: args.nodeId,
+          const filled = await fillGaps({ userDataPath, nodeId: args.nodeId, scopes,
             generate: async (units, { needRole, existing } = {}) => {
               // Once per posting the same request also names the role's own experience questions the
               // career text cannot answer; that needs the listing.
@@ -1725,9 +1734,11 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
                 role: needRole ? { themes: published.brief.roleThemes, listingText: bundle?.listingText || '', existing } : null });
             } });
           // The new lines get their short live-card reminders in the same Prepare.
-          if (filled?.saved > 0 || filled?.added > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
+          if (filled?.saved > 0 || filled?.added > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue, scopes,
             generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
         });
+      }
+      if (qa) {
         // Practice mode: an AI-planned interview order over every Foundation and
         // company question, each recorded once with an on-device voice.
         await optionalStep('practice preparation', 'Practice recordings could not be prepared this time.', () => preparePractice({
@@ -1736,9 +1747,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       }
       // General Q&A is one set for every interview, and a posting's set is shared by its interviews:
       // whichever interview is on screen must show what this Prepare wrote.
-      if (qa) { try { onQaChanged?.({ nodeId: args.nodeId }); } catch { /* a listener cannot fail a finished Prepare */ } }
+      if (qa && scopes.length) { try { onQaChanged?.({ nodeId: args.nodeId }); } catch { /* a listener cannot fail a finished Prepare */ } }
       await rememberPrepared(args, published.briefRecordId);
-      return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}) };
+      return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}), ...(scopes.length ? {} : { qaKept: true }) };
     }
     catch (error) {
       if (signal?.aborted) throw error;

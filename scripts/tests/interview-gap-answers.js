@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 import { gapAdmissionFailure, gapCareerPieces, gapClosestFailure, gapRoleQuestionFailure, generateInterviewGapAnswers, interviewGapPrompt } from '../../electron/ipc/interviewAnswerGap.js';
-import { addInterviewQaCard, fillInterviewQaFromPreparation, fillInterviewQaGaps, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard } from '../../electron/ipc/interviewQaStore.js';
+import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, fillInterviewQaGaps, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard } from '../../electron/ipc/interviewQaStore.js';
 
 const PIECE = 'Engineer, Acme School, 2021 to 2024\nRan 3 Docker services on one virtual machine.';
 const evidence = [
@@ -132,7 +132,7 @@ export default [
     assert.equal(calls[0].prompt, interviewGapPrompt([], [{ id: 'p1', text: PIECE }, { id: 'p2', text: 'Engineer · Old Health: Wrote the billing export.' }], role));
     assert(calls[0].prompt.includes('You will carry the pager.') && calls[0].prompt.includes('never invent a gap') && calls[0].prompt.includes('Incident response and on-call'));
   } },
-  { name: 'interview gap: role questions become cards of the posting once, and a deleted one does not come back', async run() {
+  { name: 'interview gap: role questions become cards of the posting once, and return only when the emptied tab is written again', async run() {
     await userData(async dir => {
       const answer = { admission: 'I have not led an incident response.', closest: null, approach: [{ text: 'Explain how you would learn it', example: '' }, { text: 'Name what carries over', example: '' }] };
       const seen = [];
@@ -149,6 +149,26 @@ export default [
       let asked = 0;
       assert.deepEqual(await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async () => { asked += 1; return { asked: true, gaps: new Map(), added: [] }; } }), { requested: 0, saved: 0, added: 0 });
       assert.equal(asked, 0, 'with no open card and the role questions already written, nothing is asked');
+
+      // A tab that is not listed is neither offered nor written, and the role questions are not asked for.
+      await userData(async other => {
+        await fillInterviewQaFromPreparation({ userDataPath: other, nodeId: 'h', bank: { cards: [] }, disclosureMapping: [disclosed('Have you run Kubernetes in production?')] });
+        let scopedRequest = null;
+        const none = await fillInterviewQaGaps({ userDataPath: other, nodeId: 'h', scopes: ['foundation'], generate: async (units, options) => { scopedRequest = { units, options }; return { asked: true, gaps: new Map(), added: [] }; } });
+        assert.deepEqual(none, { requested: 0, saved: 0, added: 0 });
+        assert.equal(scopedRequest, null, 'an open posting card and the owed role questions are left alone when only General is written');
+      });
+
+      // The posting tab is emptied and written again: the role questions are owed again, deleted ones included.
+      await deleteInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', cardId: cards[0].id });
+      await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async () => { asked += 1; return { asked: true, gaps: new Map(), added: [] }; } });
+      assert.equal(asked, 0, 'emptying the tab alone asks for nothing');
+      await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: { cards: [] } });
+      const rewritten = await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async (_units, options) => {
+        assert.equal(options.needRole, true);
+        return { asked: true, gaps: new Map(), added: [{ question: 'Tell me about a time you led an incident response.', ...answer }] };
+      } });
+      assert.deepEqual(rewritten, { requested: 0, saved: 0, added: 1 }, 'a Prepare that writes the emptied tab brings the deleted role question back');
 
       // Nothing was judged (no career text): the role questions are still owed to the next Prepare.
       await userData(async other => {

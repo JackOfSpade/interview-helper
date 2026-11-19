@@ -369,7 +369,7 @@ const QA_SETUP_TESTS = [
         try {
           await settle(bundle);
           assert(button(window, 'Prepare interview brief').disabled, 'Prepare must stay disabled until an application is selected');
-          assert(window.document.body.textContent.includes('Only fills empty answers. Saved answers, including your edits, are never rewritten.'), 'the fill-only note must appear near Prepare');
+          assert(window.document.body.textContent.includes('Writes Q&A only for a tab with no cards. A tab that has cards is never changed; delete every card in it to have it written again.'), 'the empty-tabs-only note must appear near Prepare');
           assert(!window.document.querySelector('[aria-label="Original job listing URL"]'), 'the editable job URL field must be gone; the bundle URL is the only source');
           const combobox = window.document.querySelector('[role="combobox"]');
           assert(combobox && combobox.getAttribute('aria-expanded') === 'false', 'the application combobox must start collapsed');

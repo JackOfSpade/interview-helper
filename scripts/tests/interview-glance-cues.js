@@ -62,7 +62,12 @@ export default [
     await userData(async dir => {
       await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: { cards: [card()] } });
       const asked = [];
-      const first = await fillInterviewQaCues({ userDataPath: dir, nodeId: 'h', wants: needsGlanceCue, generate: async units => {
+      // Only the listed tabs are offered: a tab a Prepare did not write gets no cue.
+      const [written] = await loadInterviewQaLiveCards({ userDataPath: dir, nodeId: 'h' });
+      const other = written.scope === 'foundation' ? 'company' : 'foundation';
+      assert.deepEqual(await fillInterviewQaCues({ userDataPath: dir, nodeId: 'h', wants: needsGlanceCue, scopes: [other], generate: async () => { throw new Error('nothing is offered'); } }), { requested: 0, saved: 0 });
+      assert.deepEqual(await fillInterviewQaCues({ userDataPath: dir, nodeId: 'h', wants: needsGlanceCue, scopes: [], generate: async () => { throw new Error('nothing is offered'); } }), { requested: 0, saved: 0 });
+      const first = await fillInterviewQaCues({ userDataPath: dir, nodeId: 'h', wants: needsGlanceCue, scopes: [written.scope], generate: async units => {
         asked.push(...units);
         return new Map(units.map(unit => [unit.id, unit.text === HEADLINE ? 'Thompson: full-stack web app' : unit.text === BULLET ? 'Horizon: Python ETL, OCR' : 'dashboards, about 40 schools']));
       } });

@@ -72,6 +72,16 @@ optional description and two actions, modelled on Infinite Canvas.
   without them. Load replaces the list after a confirmation, keeps the Applied
   Jobs folder of this machine, and first writes the replaced list to
   `interview-helper-sessions.before-load-<time>.json` in the data folder.
+- **Both dialogs open on the current save** (built 2026-11-19): the file last
+  saved to or loaded from, kept in `save-location.json` in the profile folder
+  (`electron/interviewApp/saveLocation.js`). Save offers that same file name, so
+  saving again replaces it after the system's own confirmation. Before any
+  save or load, or when that folder is gone, Save offers a dated name and Load
+  opens where the system chooses. A cancelled dialog changes nothing. Not
+  driven through the real dialogs yet.
+- **Opening the app shows the list as it was last left**, including which
+  interview was selected: the window reads the app's own copy at start. A
+  saved file is never loaded on its own; it could be older than that copy.
 
 ## Text size (built 2026-11-18)
 
@@ -132,12 +142,12 @@ verified facts).
   The card is stored with `gap: true`, shows "Honest gap" in the Q&A panel and
   leads with the admission on the cue card; an edit makes it an ordinary card.
   The answer writer keeps only questions it can answer, so a job far from the
-  career often leaves no empty card. So once per posting
-  (`gapQuestionsGeneratedAt` in the posting's Q&A file) the same call also
+  career often leaves no empty card. So once each time the posting's tab is
+  written (`gapQuestionsGeneratedAt` in the posting's Q&A file) the same call also
   names up to five experience questions the role's interviewers would ask that
   the career text cannot answer, from the role themes and the listing; they are
-  added as posting cards with their gap answers, and a deleted one does not
-  come back. Live check from source, 2026-11-19: a music teacher's career
+  added as posting cards with their gap answers, and a deleted one stays away
+  until the tab is emptied and written again. Live check from source, 2026-11-19: a music teacher's career
   against a found Shopify Site Reliability Engineer posting. The first Prepare
   (before role questions existed) wrote no gap card; the second added two
   ("debugged a problem in a production software system", "contributing to open
@@ -172,10 +182,28 @@ any interview: deleting an interview never touches it. When a Prepare writes
 Q&A the main process sends `interview-app:qa-changed`, and the Q&A panel on
 screen reloads, whichever interview it shows.
 
-Prepare only fills empty answers. A saved answer, generated or edited, is never
-rewritten, and a deleted question or topic does not come back. A first Prepare
-on an interview reuses a finished preparation of the same career data, posting
-and application when one exists; "Prepare again" always runs.
+Prepare writes Q&A only for a tab that has no cards (owner's request,
+2026-11-19). It looks at General and at the posting's set separately and writes
+the empty ones; a tab that holds any card, generated, edited or added by hand,
+is left exactly as it is: no new question, no added wording, no filled answer,
+no short cue and no approach reminder. So an answer the person edits gets no new
+short cue, and the cue card shows its trimmed line. A card added by hand before
+the first Prepare makes its tab count as not empty. To have a tab written again,
+delete every card in it: its deleted questions then return, and for the posting
+the role's honest-gap questions are written again. While a tab has cards a
+deleted question stays away. Technical topics are a separate list: written once
+per posting, never again, and a deleted topic does not come back. Reported past
+interview questions and technical topics belong to the posting, so those steps
+run only when the posting's tab is written.
+
+The AI still writes one full answer set on every Prepare that runs, because the
+cue card needs a sealed set that holds the two required General questions; only
+what is saved to the tabs is limited. A first Prepare on an interview reuses a
+finished preparation of the same career data, posting and application when one
+exists. "Prepare again" does the same when both tabs have cards, so it then
+calls no AI and the panel says nothing was generated; redoing the research needs
+an empty tab or changed inputs. With changed inputs and both tabs holding cards,
+the research and the sealed answers are prepared again and the tabs are kept.
 
 Practice calls draw from the whole pool (General, posting, topics) and do not
 cover all of it in one call. Each entry shows "Practised ×N": how many practice

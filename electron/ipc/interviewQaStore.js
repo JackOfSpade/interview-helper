@@ -9,9 +9,10 @@
  * evidence IDs) plus `scope`, `origin`, `source`, `author` and `status`, so the
  * live window can match and display them like prepared cards.
  *
- * Preparation is FILL-ONLY: a card whose answer is not empty (generated or
- * written by the user) is never replaced; only empty or new questions receive
- * generated answers, and a deleted question (tombstone) never returns.
+ * Preparation writes EMPTY TABS ONLY: a set that holds any card is left
+ * exactly as it is, and a set with no cards is written in full. A deleted
+ * question (tombstone) stays away only until its set is emptied and written
+ * again.
  *
  * Files are private main-process data (0600 under a 0700 directory, atomic
  * replace, no symlinks). User-authored text is trusted as the user's own words
@@ -334,7 +335,7 @@ export async function deleteInterviewQaCard({ userDataPath, nodeId, scope, cardI
   });
 }
 
-// ------------------------------------------------------------- fill-only --
+// ------------------------------------------------------- empty tabs only --
 
 function generatedCard(card, { origin = 'catalog', source = null } = {}) {
   return { ...structuredClone(card), origin, source, author: 'generated', updatedAt: new Date().toISOString() };
@@ -342,6 +343,28 @@ function generatedCard(card, { origin = 'catalog', source = null } = {}) {
 
 function companyKey(value) { return normalizeQuestion(String(value || '').replace(/\b(?:incorporated|inc|llc|ltd|limited|corp|corporation|co|company|gmbh|plc)\b\.?/giu, ' ')); }
 const isCompanyPlaceholder = value => /^unknown(?: company)?$/iu.test(String(value || '').trim());
+/** A posting set re-pointed at another company. A placeholder or a legal-suffix spelling ("Acme" vs "Acme, Inc.") is the same company. */
+function isRepointed(store, company) {
+  const incoming = String(company || '').trim().slice(0, 200);
+  const prior = String(store.company || '').trim();
+  return !!incoming && !!prior && !isCompanyPlaceholder(incoming) && !isCompanyPlaceholder(prior) && companyKey(incoming) !== companyKey(prior);
+}
+const QA_SCOPES = Object.freeze(['foundation', 'company']);
+const scopesOf = scopes => QA_SCOPES.filter(scope => (Array.isArray(scopes) ? scopes : []).includes(scope));
+
+/**
+ * The Q&A tabs with no cards, in the order General then posting: the only ones
+ * a Prepare writes. A posting set re-pointed at `company` counts as empty:
+ * the old company's generated cards are dropped and the set is written for
+ * the new company, beside any card the person wrote.
+ */
+export async function emptyInterviewQaScopes({ userDataPath, nodeId, company = '' }) {
+  const [foundation, posting] = await Promise.all([readStore(userDataPath, 'foundation', nodeId), readStore(userDataPath, 'company', nodeId)]);
+  const empty = [];
+  if (!foundation.cards.length) empty.push('foundation');
+  if (!posting.cards.length || isRepointed(posting, company)) empty.push('company');
+  return empty;
+}
 
 function uniqueCardId(store, id, key) {
   const taken = new Set(store.cards.map(item => item.id));
@@ -365,7 +388,7 @@ function fillCards(store, incoming) {
       continue;
     }
     const existing = store.cards[index];
-    // FILL-ONLY: an answer that is not empty is kept, whoever wrote it.
+    // Two incoming cards for one question: the first answer is kept.
     if (isAnsweredCard(existing)) {
       if (card.variants?.length) existing.variants = [...new Set([...(existing.variants || []), ...card.variants])].slice(0, MAX_VARIANTS);
       continue;
@@ -379,8 +402,15 @@ function fillCards(store, incoming) {
  * Merge a freshly sealed answer bank and mapped disclosures into the stores.
  * `disclosureMapping` items: { question, sourceUrl, sourceDate, evidenceQuote,
  * target: 'foundation' | 'company' | 'none', cardQuestion }.
+ *
+ * Only a set that is listed in `scopes` and holds no cards (or is re-pointed
+ * at another company) is written. Its
+ * deletions are forgotten first, so every question can return, and the
+ * posting's role gap questions are owed again. A set that has cards is left
+ * exactly as it is: no new card, no added wording, no filled answer.
  */
-export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, bank, company = '', disclosureMapping = [] }) {
+export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, bank, company = '', disclosureMapping = [], scopes = QA_SCOPES }) {
+  const wanted = new Set(scopesOf(scopes));
   const generated = (bank?.cards || []).filter(isAnsweredCard);
   const foundationIncoming = generated.filter(card => isFoundationQuestion(card.question)).map(card => generatedCard(card));
   const companyIncoming = generated.filter(card => !isFoundationQuestion(card.question)).map(card => generatedCard(card));
@@ -408,7 +438,8 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   }
   await locked(userDataPath, 'foundation', nodeId, async () => {
     const store = await readStore(userDataPath, 'foundation', nodeId);
-    fillCards(store, foundationIncoming);
+    // Checked inside the lock: a card added meanwhile keeps the tab as it is.
+    if (wanted.has('foundation') && !store.cards.length) { store.tombstones = []; fillCards(store, foundationIncoming); }
     if (recentEmployer) store.recentEmployer = recentEmployer;
     await writeStore(userDataPath, 'foundation', nodeId, store);
   });
@@ -416,24 +447,29 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
     const store = await readStore(userDataPath, 'company', nodeId);
     const incomingCompany = String(company || '').trim().slice(0, 200);
     const priorCompany = String(store.company || '').trim();
-    // A placeholder or a legal-suffix spelling ("Acme" vs "Acme, Inc.") is the same company.
-    if (incomingCompany && priorCompany && !isCompanyPlaceholder(incomingCompany) && !isCompanyPlaceholder(priorCompany)
-      && companyKey(incomingCompany) !== companyKey(priorCompany)) {
+    const repointed = isRepointed(store, incomingCompany);
+    if (repointed) {
       // Re-pointed at another company: the old company's generated answers,
-      // links and deletions do not apply. The person's own cards stay.
+      // links and deletions do not apply. The person's own cards stay, and
+      // the set is written for the new company beside them.
       store.cards = store.cards.filter(card => card.author === 'user');
       store.foundationLinks = [];
       store.tombstones = [];
     }
-    fillCards(store, companyIncoming);
+    // Checked inside the lock: a card added meanwhile keeps the tab as it is.
+    if (wanted.has('company') && (repointed || !store.cards.length)) {
+      store.tombstones = [];
+      delete store.gapQuestionsGeneratedAt;
+      fillCards(store, companyIncoming);
+      const seen = new Set(store.foundationLinks.map(link => `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`));
+      for (const link of links) {
+        const key = `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`;
+        if (!seen.has(key)) { seen.add(key); store.foundationLinks.push(link); }
+      }
+      store.foundationLinks = store.foundationLinks.slice(-MAX_LINKS);
+    }
     if (recentEmployer) store.recentEmployer = recentEmployer;
     if (incomingCompany && !(isCompanyPlaceholder(incomingCompany) && priorCompany)) store.company = incomingCompany;
-    const seen = new Set(store.foundationLinks.map(link => `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`));
-    for (const link of links) {
-      const key = `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`;
-      if (!seen.has(key)) { seen.add(key); store.foundationLinks.push(link); }
-    }
-    store.foundationLinks = store.foundationLinks.slice(-MAX_LINKS);
     await writeStore(userDataPath, 'company', nodeId, store);
   });
   return loadInterviewQa({ userDataPath, nodeId });
@@ -459,8 +495,8 @@ const hasCue = statement => typeof statement.cue === 'string' && !!statement.cue
  * cue. A cue is saved only while its line still has the text it was written
  * for, so an edit made during the call is never paired with a stale cue.
  */
-export async function fillInterviewQaCues({ userDataPath, nodeId, generate, wants = () => true }) {
-  const scopes = ['foundation', 'company'];
+export async function fillInterviewQaCues({ userDataPath, nodeId, generate, wants = () => true, scopes: only = QA_SCOPES }) {
+  const scopes = scopesOf(only);
   const units = [];
   for (const scope of scopes) {
     const store = await readStore(userDataPath, scope, nodeId);
@@ -503,8 +539,8 @@ export async function fillInterviewQaCues({ userDataPath, nodeId, generate, want
  * a "how do you work" question is asked about only once. A card edited while
  * the request ran is left for the next Prepare.
  */
-export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate }) {
-  const scopes = ['foundation', 'company'];
+export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate, scopes: only = QA_SCOPES }) {
+  const scopes = scopesOf(only);
   const linesOf = card => cardStatements(card).filter(line => line.field !== 'extensions').map(line => ({ id: `${line.field}[${line.index}]`, text: line.statement.text }));
   const units = [];
   for (const scope of scopes) {
@@ -556,11 +592,12 @@ export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate
  * the person wrote is theirs, and a card with reminders is a "how do you work"
  * question, not one about past experience. A written gap answer is an answer
  * like any other, so it is never rewritten; an edit by the person makes it an
- * ordinary card. The role's questions are written once per posting, like the
- * topic list: a deleted one does not come back.
+ * ordinary card. The role's questions are written once each time the posting's
+ * set is written: a deleted one stays away until that set is emptied and
+ * written again. Only the tabs listed in `scopes` are offered or written.
  */
-export async function fillInterviewQaGaps({ userDataPath, nodeId, generate }) {
-  const scopes = ['foundation', 'company'];
+export async function fillInterviewQaGaps({ userDataPath, nodeId, generate, scopes: only = QA_SCOPES }) {
+  const scopes = scopesOf(only);
   const open = card => !isAnsweredCard(card) && card.author !== 'user' && !approachOf(card).length;
   const statement = value => ({ text: value, evidenceIds: [], quotes: [] });
   /** The stored fields of one gap answer, or null when it cannot be stored. */
@@ -580,13 +617,14 @@ export async function fillInterviewQaGaps({ userDataPath, nodeId, generate }) {
   const units = [];
   const existing = [];
   let needRole = false;
-  for (const scope of scopes) {
+  // Every kept question and topic is read, so an added question never repeats one; only the listed tabs are written.
+  for (const scope of QA_SCOPES) {
     const store = await readStore(userDataPath, scope, nodeId);
     for (const card of store.cards) {
       existing.push(card.question);
-      if (open(card)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question });
+      if (scopes.includes(scope) && open(card)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question });
     }
-    if (scope === 'company') { needRole = !store.gapQuestionsGeneratedAt; existing.push(...topicsOf(store).map(topic => topic.text)); }
+    if (scope === 'company') { needRole = scopes.includes('company') && !store.gapQuestionsGeneratedAt; existing.push(...topicsOf(store).map(topic => topic.text)); }
   }
   if (!units.length && !needRole) return { requested: 0, saved: 0, added: 0 };
   const reply = await generate(units.map(({ id, question }) => ({ id, question })), { needRole, existing });
