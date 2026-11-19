@@ -299,14 +299,16 @@ export function withPackagingLock(projectDir, operation, options = {}) {
 }
 
 export function readConfiguredMacSigningConfig(projectDir = process.cwd()) {
-  const packagePath = path.join(projectDir, 'package.json');
-  const packageConfig = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-  if (packageConfig?.build?.mac?.forceCodeSigning !== true) {
-    throw new Error('macOS packaging requires build.mac.forceCodeSigning to be true.');
+  // The signing settings live in the target's electron-builder configuration
+  // (the file electron-builder is run with), not in package.json.
+  const configName = activeTarget.builderConfig;
+  const mac = JSON.parse(fs.readFileSync(path.join(projectDir, configName), 'utf8'))?.mac;
+  if (mac?.forceCodeSigning !== true) {
+    throw new Error(`macOS packaging requires mac.forceCodeSigning to be true in ${configName}.`);
   }
-  const identity = packageConfig?.build?.mac?.identity;
+  const identity = mac?.identity;
   if (typeof identity !== 'string' || !identity.trim()) {
-    throw new Error('macOS packaging requires build.mac.identity to name a configured code-signing identity.');
+    throw new Error(`macOS packaging requires mac.identity in ${configName} to name a configured code-signing identity.`);
   }
   return { identity: identity.trim() };
 }
