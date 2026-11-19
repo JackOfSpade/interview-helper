@@ -3736,6 +3736,27 @@ test('asked marker: counted when the reply is delivered, once per number, in fir
   assert.deepEqual(rig.of('question-asked').map(event => event.number), [3, 1, 7]);
 });
 
+test('answered: a question is practised only once a real answer follows it', async () => {
+  const rig = makeRig({ createParser: askedParser });
+  await greet(rig);
+  await askedReply(rig, '<asked n="3"/>Tell me about a scheduler you built.');
+  let id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  assert.deepEqual(rig.engine.state().answeredQuestions, [], 'asked, not answered yet');
+  // Four words back ("I built a scheduler") are not an answer.
+  await askedReply(rig, 'Sure, take your time.');
+  id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  assert.deepEqual(rig.engine.state().askedQuestions, [3]);
+  assert.deepEqual(rig.engine.state().answeredQuestions, [], 'a short line is not an answer');
+  await speak(rig, 'it ran nightly jobs for the whole district and I wrote the retry logic and the alerting myself', 'long');
+  assert.deepEqual(rig.engine.state().answeredQuestions, [3], 'a real answer counts, even before the next reply');
+});
+
 test('asked marker: a speculative reply discarded because the candidate kept talking counts nothing', async () => {
   const rig = makeRig({ createParser: askedParser });
   await greet(rig);

@@ -30,6 +30,7 @@ const practiceCallAPI = Object.freeze({
   onEvent: cb => subscribe(`${PREFIX}event`, cb),
   onLeaveRequested: cb => subscribe(`${PREFIX}leave-requested`, cb),
   agreeModelDownload: () => invoke('agree-model-download'),
+  ready: () => invoke('ready'),
   answer: () => invoke('answer'),
   hangUp: options => invoke('hang-up', { feedback: options?.feedback !== false }),
   setMuted: muted => invoke('set-muted', booleanArg(muted, 'setMuted')),

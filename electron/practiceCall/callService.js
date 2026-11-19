@@ -24,6 +24,9 @@ const COLLEAGUE_IDS = Object.freeze(['B', 'C', 'D', 'E']);
 // Shown while the planning step runs, before the call can ring.
 // The setup steps in the order they run; the window lists them and marks the one in progress.
 const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio', 'sessions']);
+// How long after Ready the call rings: long enough to feel like someone dialling in, short enough not to drag.
+const RING_DELAY_MIN_MS = 3000;
+const RING_DELAY_MAX_MS = 7000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
@@ -1228,7 +1231,25 @@ export function createPracticeCallService(deps = {}) {
     await createSessions(self);
     if (call !== self || self.finished) { await closeWarmSessions(self); return snapshot(); }
     self.timings.precheckMs = Math.round(clock.now() - self.startedAt);
-    setPhase('ringing');
+    if (deps.readyGate === false) { setPhase('ringing'); return snapshot(); }
+    // Setup can take minutes and the candidate may have walked away: nothing rings until they say they are ready.
+    state.setup = { step: 'ready', attempt: 1 };
+    publish();
+    return snapshot();
+  }
+
+  /** The candidate pressed Ready: the interviewer calls a few seconds later, as a person dialling in would. */
+  function ready() {
+    const self = call;
+    if (!self || self.finished || state.phase !== 'precheck' || state.setup?.step !== 'ready' || state.setup.calling) return snapshot();
+    state.setup = { step: 'ready', attempt: 1, calling: true };
+    publish();
+    const random = deps.random ?? Math.random;
+    const delayMs = Math.round(RING_DELAY_MIN_MS + random() * (RING_DELAY_MAX_MS - RING_DELAY_MIN_MS));
+    clock.setTimeout(() => {
+      if (call !== self || self.finished || state.phase !== 'precheck' || !state.setup?.calling) return;
+      setPhase('ringing');
+    }, delayMs);
     return snapshot();
   }
 
@@ -1594,6 +1615,9 @@ export function createPracticeCallService(deps = {}) {
       // Plan numbers the engine counted as asked (a missing value reads as none), and the question ids behind them.
       const asked = [...new Set((Array.isArray(engineState.askedQuestions) ? engineState.askedQuestions : []).filter(n => Number.isInteger(n) && n >= 1 && n <= (self.plan?.length || 0)))];
       const askedIds = asked.map(n => self.plan[n - 1]?.id).filter(id => typeof id === 'string' && id);
+      // Asked and answered are different things: a question the candidate never answered was not practised.
+      // An engine that does not report answers (an older one) counts every asked question, as before.
+      const answered = Array.isArray(engineState.answeredQuestions) ? asked.filter(n => engineState.answeredQuestions.includes(n)) : asked;
       const unprepared = unpreparedOf(self);
       const record = {
         callId: self.callId, nodeId: self.args.nodeId, startedAt: self.startedAt, endedAt: Date.now(), durationMs,
@@ -1608,7 +1632,7 @@ export function createPracticeCallService(deps = {}) {
         // What the planning step decided and which drawn voices it used, so a setup that went wrong can be read back.
         ...(self.setup ? { setup: self.setup } : {}),
         ...(unprepared ? { unpreparedQuestion: unprepared } : {}),
-        askedQuestions: asked, askedQuestionIds: askedIds,
+        askedQuestions: asked, askedQuestionIds: askedIds, answeredQuestions: answered,
         steering: self.steering || null, transcript: onCallClock(engineState.transcript || []),
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
         pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
@@ -1618,12 +1642,12 @@ export function createPracticeCallService(deps = {}) {
       };
       self.record = record;
       await store.writeRecord(self.callId, record);
-      // What was asked feeds the next call's choice, whether or not feedback was requested. It costs
-      // no AI call and a failure here never fails the hang-up.
-      if (askedIds.length) {
+      // What was asked and answered feeds the next call's choice, whether or not feedback was requested.
+      // It costs no AI call and a failure here never fails the hang-up.
+      if (answered.length) {
         try {
           const history = await questionHistory();
-          const askedEntries = asked.map(n => self.plan[n - 1]).filter(entry => typeof entry?.id === 'string' && entry.id);
+          const askedEntries = answered.map(n => self.plan[n - 1]).filter(entry => typeof entry?.id === 'string' && entry.id);
           const general = askedEntries.filter(entry => entry.scope === 'foundation').map(entry => entry.id);
           const own = askedEntries.filter(entry => entry.scope !== 'foundation').map(entry => entry.id);
           if (general.length) await history.record(GENERAL_COUNTS_KEY, general);
@@ -1840,6 +1864,7 @@ export function createPracticeCallService(deps = {}) {
       if (!call || state.phase !== 'consent') return snapshot();
       return downloadModels();
     },
+    ready,
     answer: async () => {
       if (!call || call.engine || (state.phase !== 'ringing' && state.phase !== 'connecting')) return snapshot();
       const self = call;

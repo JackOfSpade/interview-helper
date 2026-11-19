@@ -31,6 +31,9 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
 const CANCEL_WAIT_MS = 500;
 const OFFSET_WINDOW_MS = 2000;
 const START_WATCH_MS = 3000;
+// A question was practised once this much followed it; fewer words is a greeting, a "say that again?" or nothing.
+const ANSWER_MIN_WORDS = 15;
+const ANSWER_MIN_PAD_CHARS = 20;
 // A line answered with <listen/> joins the candidate's next speech when it resumes within this long: one thought.
 const SCREEN_TITLE_CAP = 120;
 // Starting to share takes a moment (finding the window, clicking share); swapping what is already shared is quick.
@@ -74,6 +77,22 @@ function parseVerdict(value) {
 /** Words of `reply` whose end time is at or before the playback position. */
 function heardFor(reply, positionMs) {
   return reply.words.filter(word => word.endMs <= positionMs).map(word => word.word).join(' ');
+}
+
+const UNHEARD_MAX = 700;
+
+/**
+ * What the interviewer had written for a cut-off reply but the candidate never heard, so the next
+ * reply can pick the thread up from the right place. Empty when the heard part cannot be lined up
+ * with the written text.
+ */
+function unheardFor(reply) {
+  const squeeze = value => stripAudioTags(String(value ?? '')).replace(/\s+/g, ' ').trim();
+  const full = squeeze((reply?.parts || []).join(' '));
+  const heard = squeeze(reply?.heardText);
+  if (!full || !full.startsWith(heard)) return '';
+  const rest = full.slice(heard.length).trim();
+  return rest.length > UNHEARD_MAX ? `${rest.slice(0, UNHEARD_MAX).trimEnd()}…` : rest;
 }
 
 /** Spoken letters and digits in the words of `reply` that have ended by the playback position (tag-only words add none). */
@@ -141,6 +160,10 @@ export function createPracticeCallEngine({
   let nextGapMs = null; // a check-in reply's own <wait>: the gap to the next check-in, once
   let notSpoken = false;
   const askedQuestions = []; // plan numbers in first-asked order
+  const answeredQuestions = []; // asked questions the candidate went on to answer
+  let openQuestions = []; // the questions asked last, still waiting for an answer
+  let answerWords = 0; // words the candidate has said or typed since those were asked
+  let padAtAsk = 0; // length of the pad text when they were asked
   let pendingAcks = [];
   let pendingInterruption = null;
   let current = null; // reply being generated, committed or played
@@ -289,6 +312,7 @@ export function createPracticeCallEngine({
    */
   function keepPassedLine(reply) {
     const span = candidateSpan();
+    noteAnswer(reply.candidates);
     for (const entry of reply.candidates) addEntry({ ...entry }); // a typed turn's entries include any spoken words it overtook
     turnStartMs = Math.max(turnStartMs, span.endMs + 1);
     if (reply.typed) { pendingTyped = []; markTurnConsumed(); }
@@ -386,7 +410,7 @@ export function createPracticeCallEngine({
     else {
       const base = {
         elapsedMs: elapsed(), candidateText: text, channel, silenceMs, acknowledgements: pendingAcks.slice(),
-        interruption: pendingInterruption ? { heardText: pendingInterruption.reply.heardText ?? '' } : null,
+        interruption: pendingInterruption ? { heardText: pendingInterruption.reply.heardText ?? '', unheardText: unheardFor(pendingInterruption.reply) } : null,
         notSpoken, typing: typingNow, spokenText, ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
         ...(padText !== padSent ? { padText } : {}),
@@ -397,8 +421,8 @@ export function createPracticeCallEngine({
       // A silence prompt or pad progress answers nothing the candidate said, so there is nothing to acknowledge first.
       const withOpener = !reply.checkIn && !reply.padProgress && !handover;
       reply.messages = {
-        // The short opening reaction never needs the pad's code, so only the main message carries it.
-        ...(withOpener ? { opener: formatTurn({ ...base, padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint }) } : {}),
+        // The short opening reaction never needs the pad's code or the unheard rest of a cut-off reply, so only the main message carries them.
+        ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint }) } : {}),
         main: prefix + formatTurn({ ...base, openerPlaying: withOpener, pausedAck }),
       };
       if (!withOpener) reply.openerSettled = true;
@@ -1154,13 +1178,36 @@ export function createPracticeCallEngine({
     startSpokenTurn(true, reply.respeculated + 1);
   }
 
+  /** Answered questions, counting words and pad edits no reply has been committed for yet (a hang-up mid-answer). */
+  function answeredNow() {
+    const pending = tokens(candidateText()).length + pendingTyped.reduce((sum, item) => sum + tokens(item).length, 0);
+    const open = answerWords + pending >= ANSWER_MIN_WORDS || Math.abs(padText.length - padAtAsk) >= ANSWER_MIN_PAD_CHARS ? openQuestions : [];
+    return [...answeredQuestions, ...open.filter(number => !answeredQuestions.includes(number))];
+  }
+
   function noteAsked(reply) {
+    const fresh = [];
     for (const number of reply.asked) {
       if (!Number.isInteger(number) || number < 1 || askedQuestions.includes(number)) continue;
       askedQuestions.push(number);
+      fresh.push(number);
       emit({ type: 'question-asked', kind: 'question-asked', number });
     }
     reply.asked = [];
+    if (fresh.length) { openQuestions = fresh; answerWords = 0; padAtAsk = padText.length; }
+  }
+
+  /**
+   * A question counts as answered once the candidate has said or typed a real answer's worth of
+   * words after it, or written in the pad. "Could you repeat that?" is not an answer, and neither
+   * is hanging up straight after the question.
+   */
+  function noteAnswer(entries = []) {
+    if (!openQuestions.length) return;
+    for (const entry of entries) if (entry?.speaker === 'candidate' && !entry.acknowledgement) answerWords += tokens(entry.text).length;
+    if (answerWords < ANSWER_MIN_WORDS && Math.abs(padText.length - padAtAsk) < ANSWER_MIN_PAD_CHARS) return;
+    for (const number of openQuestions) if (!answeredQuestions.includes(number)) answeredQuestions.push(number);
+    openQuestions = [];
   }
 
   /** Only a delivered reply sets how long the interviewer waits next; a check-in without its own <wait> keeps the schedule. */
@@ -1191,6 +1238,7 @@ export function createPracticeCallEngine({
     reply.committed = true;
     // Commit is the one point where a reply is certain to be delivered: a speculative reply thrown away
     // (resumed, respeculated, listen) or one the voice never spoke never gets here, so it counts nothing.
+    noteAnswer(reply.candidates); // these words answer what was asked before this reply, so they are counted first
     noteAsked(reply);
     noteWait(reply);
     disarm('commit');
@@ -2076,7 +2124,7 @@ export function createPracticeCallEngine({
       joinedQueue.push(member.name);
     },
     hangUp() { end('candidate'); },
-    state: () => ({ phase, transcript: transcript.map(entry => ({ ...entry })), elapsedMs: elapsed(), paused, pausedMs: currentPauseMs(), askedQuestions: [...askedQuestions],
+    state: () => ({ phase, transcript: transcript.map(entry => ({ ...entry })), elapsedMs: elapsed(), paused, pausedMs: currentPauseMs(), askedQuestions: [...askedQuestions], answeredQuestions: answeredNow(),
       screen: screenShown ? { ...screenShown } : null, pad: { ...padState } }),
   };
 }

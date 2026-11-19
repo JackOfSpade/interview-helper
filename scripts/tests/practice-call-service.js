@@ -79,6 +79,8 @@ function makeDeps(overrides = {}) {
     store, userDataPath: tmp, fs: fakeFs(),
     newId: () => 'call-1',
     clock: { now: () => 1000, setTimeout: () => 1, clearTimeout: () => {} },
+    // Most suites test what follows the ring, so setup rings at once; the Ready gate has its own test.
+    readyGate: false,
     validateArgs: () => {},
     loadBrief: async () => ({ ...BRIEF, inputs: { ...BRIEF.inputs, jobUrlSha256: (await import('node:crypto')).createHash('sha256').update(ARGS.canonicalJobUrl).digest('hex') } }),
     loadCards: async () => [CARD],
@@ -153,6 +155,45 @@ function makeDeps(overrides = {}) {
   };
   return { deps, events, engineEvents, engine: () => engineListener };
 }
+
+test('setup ends at Ready: nothing rings until the candidate says so, and then only after a short delay', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-ready-'));
+  const { deps } = makeDeps({ tmp, modelReady: true });
+  const timers = [];
+  const service = createPracticeCallService({ ...deps, readyGate: undefined, random: () => 0.5, clock: { now: () => 1000, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: () => {} } });
+  let state = await service.start(ARGS);
+  assert.equal(state.phase, 'precheck');
+  assert.deepEqual(state.setup, { step: 'ready', attempt: 1 });
+  assert.equal((await service.answer()).phase, 'precheck', 'there is no call to answer yet');
+  state = service.ready();
+  assert.deepEqual(state.setup, { step: 'ready', attempt: 1, calling: true });
+  const rings = timers.filter(timer => timer.ms === 5000);
+  assert.equal(rings.length, 1, 'the ring is 3 to 7 seconds away');
+  service.ready();
+  assert.equal(timers.filter(timer => timer.ms === 5000).length, 1, 'a second press changes nothing');
+  rings[0].fn();
+  assert.equal(service.getState().phase, 'ringing');
+  assert.equal(service.getState().setup, null);
+});
+
+test('a question asked but never answered is not recorded as practised', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-unanswered-'));
+  const history = { recorded: [], counts: async () => ({}), record: async (nodeId, ids) => { history.recorded.push({ nodeId, ids }); } };
+  const engineFactory = options => ({
+    start() { options.onEvent({ type: 'phase', phase: 'listening' }); }, hangUp() {}, helperEvent() {}, typed() {},
+    state: () => ({ transcript: [{ speaker: 'candidate', text: 'hello' }], elapsedMs: 5000, askedQuestions: [1, 2], answeredQuestions: [2] }),
+  });
+  const { deps } = makeDeps({ tmp, modelReady: true });
+  const service = createPracticeCallService({ ...deps, questionHistory: history, engineFactory, loadCards: async () => PLAN_CARDS, planCall: fakePlanner(voices => ({ ...soloPlan(voices), questions: [{ number: 1 }, { number: 2 }] })) });
+  await service.start(ARGS);
+  await service.answer();
+  await service.hangUp({ feedback: false });
+  const record = await deps.store.readRecord('call-1');
+  assert.deepEqual(record.askedQuestions, [1, 2]);
+  assert.deepEqual(record.answeredQuestions, [2]);
+  assert.equal(history.recorded.length, 1);
+  assert.equal(history.recorded[0].ids.length, 1, 'only the answered question is counted');
+});
 
 test('consent, download, usage warning, ringing and answer', async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-consent-'));

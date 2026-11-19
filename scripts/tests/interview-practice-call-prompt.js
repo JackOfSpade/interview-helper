@@ -81,7 +81,7 @@ const base = [
       assert(text.includes('[elapsed mm:ss]'));
       assert(text.includes('45 to 60 minute call'));
       assert(text.includes('[candidate silent Ns, check K of 3]'));
-      assert(text.includes('The unheard') === false && text.includes('the unheard part was never said'));
+      assert(text.includes('The unheard') === false && text.includes('they heard only the words the note quotes') && text.includes('say the cut-off thought again from a natural starting point'));
       assert(text.endsWith('Reply only READY now.'), 'the setup answer is a bare READY');
       assert(!text.includes('CONVERSATION SO FAR'));
       const custom = buildInterviewerInstructions({ persona, brief, plan, targetMinutes: [30, 40], history: 'Interviewer: synthetic earlier line.' });
@@ -128,6 +128,9 @@ const base = [
         '[elapsed 00:00] [Candidate acknowledgements while you spoke: "right", "mm-hm"] Candidate: \'ok\'');
       assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'sorry?', interruption: { heardText: 'So tell me about' } }),
         "[elapsed 01:01] [You were interrupted after saying: 'So tell me about'. The rest was not heard.] Candidate: 'sorry?'");
+      // The unheard rest of the reply goes along, so the next reply can pick the thread up where it broke.
+      assert.equal(formatTurnMessage({ elapsedMs: 61000, candidateText: 'hello', interruption: { heardText: "I'm Dana, a lead on the Atlas", unheardText: 'platform team. We have thirty minutes.' } }),
+        "[elapsed 01:01] [You were interrupted after saying: 'I'm Dana, a lead on the Atlas'. The rest was not heard. What you had not yet said: 'platform team. We have thirty minutes.'] Candidate: 'hello'");
       assert.equal(formatTurnMessage({ elapsedMs: 3_600_000, silenceMs: 10_000 }), '[elapsed 60:00] [candidate silent 10s]');
       const all = formatTurnMessage({ elapsedMs: 1_000, candidateText: 'y', acknowledgements: ['yeah'], interruption: { heardText: 'abc' } });
       assert(all.indexOf('acknowledgements') < all.indexOf('interrupted') && all.indexOf('interrupted') < all.indexOf('Candidate:'));

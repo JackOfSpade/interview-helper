@@ -163,6 +163,7 @@ service.onState(state => {
   last = { key };
   log('state', { ...view, download, persona: state.persona, participants: state.participants?.map(item => `${item.id}:${item.name}:${item.status}`), speakingId: state.speakingId || undefined, errorMessage: state.error?.message, usageWarning: state.usageWarning || undefined });
   if (state.phase === 'consent' && !consented) { consented = true; service.agreeModelDownload(); }
+  if (state.phase === 'precheck' && state.setup?.step === 'ready' && !state.setup.calling) service.ready();
   if (state.phase === 'ringing' && !answered) { answered = true; setTimeout(() => { log('answering'); service.answer(); }, 1500); }
   if ((state.phase === 'replay' || state.phase === 'error') && !done) { done = true; setTimeout(finish, 500); }
 });

@@ -9,7 +9,7 @@ import { createReplayHandler } from './replayProtocol.js';
 const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
-  'get-state', 'agree-model-download', 'answer', 'hang-up', 'set-muted', 'send-chat',
+  'get-state', 'agree-model-download', 'ready', 'answer', 'hang-up', 'set-muted', 'send-chat',
   'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
 ]);
 
@@ -145,6 +145,7 @@ export function createPracticeCallController(deps = {}) {
   const handlers = {
     async [WINDOW_PREFIX + 'get-state']() { return service.getState(); },
     async [WINDOW_PREFIX + 'agree-model-download']() { return service.agreeModelDownload(); },
+    async [WINDOW_PREFIX + 'ready']() { return service.ready(); },
     async [WINDOW_PREFIX + 'answer']() { return service.answer(); },
     async [WINDOW_PREFIX + 'hang-up'](options) {
       const feedback = options?.feedback !== false;

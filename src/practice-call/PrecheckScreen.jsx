@@ -13,19 +13,30 @@ function useElapsed() {
   return elapsed;
 }
 
-// Nothing here is a gate: the call rings when setup finishes, whether or not the meter moved.
-export default function PrecheckScreen({ level, usageWarning, persona, setup }) {
+// Setup can take minutes, so nothing rings by itself: once it finishes the candidate presses
+// Ready, and the call comes a few seconds later. The meter is never a gate.
+export default function PrecheckScreen({ level, usageWarning, persona, setup, onReady }) {
   const percent = levelPercent(level);
   const elapsed = useElapsed();
   const steps = setupProgress(setup);
+  const isReady = setup?.step === 'ready';
+  const calling = isReady && !!setup?.calling;
+  // Ready was pressed: the setup card is gone and there is only the wait for the ring.
+  if (calling) {
+    return <main className="grid min-h-screen place-items-center bg-[#202124] p-4 text-violet-50" aria-label="Waiting for call">
+      <h1 role="status" aria-label="Waiting for call" className="text-lg font-semibold text-violet-100">Waiting for call<span className="pc-dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span></h1>
+    </main>;
+  }
+  const lead = isReady ? `Everything is set. Press Ready when you are, and ${persona?.name || 'the interviewer'} calls a few seconds later.`
+      : 'This can take a couple of minutes. Nothing starts until you press Ready at the end, so you can step away.';
   const micOn = steps.some(item => (item.step === 'audio' && item.status === 'done') || (item.step === 'sessions' && item.status !== 'pending'));
   return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Microphone check">
     <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#2d2e30] p-4">
       <div className="flex items-baseline justify-between gap-2">
-        <h1 className="text-base font-semibold text-violet-100">Getting your interview ready</h1>
-        <span className="text-[11px] tabular-nums text-white/45" aria-label="Time so far">{elapsedLabel(elapsed)}</span>
+        <h1 className="text-base font-semibold text-violet-100">{isReady ? 'Your interview is ready' : 'Getting your interview ready'}</h1>
+        {!isReady && <span className="text-[11px] tabular-nums text-white/45" aria-label="Time so far">{elapsedLabel(elapsed)}</span>}
       </div>
-      <p className="text-[12px] text-white/70">{persona?.name ? `${persona.name} is about to call.` : 'The interviewer calls as soon as this finishes.'} There is nothing you need to do here.</p>
+      <p className="text-[12px] text-white/70" aria-live="polite">{lead}</p>
       <ol aria-label="Setup progress" className="space-y-1.5">
         {steps.map(item => <li key={item.step} data-status={item.status} aria-current={item.status === 'active' ? 'step' : undefined}
           className={`flex items-center gap-2 text-[12px] ${item.status === 'active' ? 'text-violet-100' : item.status === 'done' ? 'text-white/55' : 'text-white/30'}`}>
@@ -46,6 +57,8 @@ export default function PrecheckScreen({ level, usageWarning, persona, setup }) 
         <p className="text-[11px] text-white/55">Speaking is optional: you can type every answer in the call's chat.</p>
       </div>
       <p className="flex items-start gap-1.5 text-[11px] text-white/70"><Headphones size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Headphones recommended — the interviewer's voice can otherwise be picked up as if it were you.</p>
+      {isReady && <button type="button" onClick={onReady}
+        className="w-full rounded-lg bg-emerald-500/25 px-3 py-2 text-[13px] font-semibold text-emerald-50 hover:bg-emerald-500/35">I'm ready</button>}
       <div role="note" aria-label="Usage warning" className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{usageWarning || USAGE_WARNING}</div>
     </section>
   </main>;

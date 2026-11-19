@@ -254,8 +254,24 @@ position, the app works out what the candidate actually heard and tells the
 interviewer:
 
 ```
-[You were interrupted after saying: '<heard text>'. The rest was not heard.] Candidate: '<text>'
+[You were interrupted after saying: '<heard text>'. The rest was not heard. What you had not yet said: '<unheard text>'] Candidate: '<text>'
 ```
+
+The unheard text (added 2026-11-19, at most 700 characters) is what the reply
+had written past the cut; only the main session gets it, not the
+acknowledgement session. The rule that went with the note used to say "do not
+resume the cut sentence", so after a "hello" typed over the introduction the
+interviewer left a sentence hanging ("...on the Vindictus: Defying Fate") and
+moved to the next one. Now a cut-in that changes nothing (a greeting, "sorry,
+go on") is returned in a word or two and the cut-off thought is said again
+whole, in fresh words, before carrying on; a question, correction or answer is
+dealt with first. Unit-tested only: not yet heard in a live call.
+
+**Ready, then the ring (2026-11-19).** Setup can take minutes, so nothing rings
+by itself. When setup finishes the service stays in `precheck` with
+`setup: { step: 'ready' }` and the window shows "I'm ready". Pressing it
+(`ready`) clears the screen to "Waiting for call…" and the call rings 3 to 7
+seconds later. `readyGate: false` (the unit suites) rings at once.
 
 **Time and silence.** Every message carries the elapsed time. Silence is
 reported as `[candidate silent 10s]`.
@@ -381,7 +397,7 @@ A call may have a panel: the lead interviewer plus up to four colleagues (ids A 
 
 - **One mind, several voices.** The lead's main Claude session plays every interviewer and marks who speaks with `<speaker id="B"/>`. Each interviewer has an ElevenLabs voice of their own (`eleven/panelVoice.js` plays the segments of one reply in order as one utterance). This is what lets them talk to each other: hand-overs, building on each other's questions, catching a colleague up.
 - **The AI casts the call from the questions (redesigned 2026-11-17, agreed with the owner).** Nothing about the cast is chance, and the lead never picks a number of interviewers. During setup four more library voices are drawn as candidates (only the chosen ones are warmed up). On its READY line the lead writes one JSON object: its own job title (`role`), the plan numbers of the questions it will ask in this call in order (`questions`), its voice setting, and the colleagues it brings (`panel`, each with a role and a focus). Its instructions walk it through this order: pick the questions for this call and its length; for each, ask whether a person in its own role could credibly ask it and judge the answer; group the ones it cannot cover by the expertise needed, one colleague per group; nothing outside its role means a solo call. A focus note that says who should be on the call overrides this. The random lean towards a panel and the random pick between two lead titles are gone. With no title in the reply the lead is "Hiring Manager".
-- **Question rotation.** Each prepared question is shown to the lead with how many earlier calls for the same job asked it (`timesAskedBefore`). It favours questions never asked, may repeat a staple, and once all were asked favours the least asked; code never shuffles or draws. The lead marks the first time it asks a prepared question with `<asked n="3"/>`, which is never spoken. The engine counts the tag only for a reply that is delivered, and at hang-up the service adds one per asked question to `<userData>/practice-question-history.json` (per job, by prepared-card id, so re-running Prepare starts fresh counts). This costs no AI call and happens with or without feedback. `call.json` gains `pickedQuestions`, `askedQuestions` and `askedQuestionIds`.
+- **Question rotation.** Each prepared question is shown to the lead with how many earlier calls for the same job asked it (`timesAskedBefore`). It favours questions never asked, may repeat a staple, and once all were asked favours the least asked; code never shuffles or draws. The lead marks the first time it asks a prepared question with `<asked n="3"/>`, which is never spoken. The engine counts the tag only for a reply that is delivered, and at hang-up the service adds one per asked question that was also answered (`answeredQuestions`: at least 15 candidate words or a pad edit after it, since 2026-11-19) to `<userData>/practice-question-history.json` (per job, by prepared-card id, so re-running Prepare starts fresh counts). This costs no AI call and happens with or without feedback. `call.json` gains `pickedQuestions`, `askedQuestions` and `askedQuestionIds`.
 - **Measured on the real prepared job (2026-11-17, four setups).** With no focus note: a recruiter lead who picked 9 of 17 questions and brought one staff engineer for the two coding questions; and an engineer lead who picked 6 including a coding question and ran it alone. "About 10 minutes": an engineer lead, 5 questions, alone. "45 minutes, behavioural only": an engineer lead, 11 behavioural questions, alone. So the title the lead gives itself decides solo versus panel: a lead that makes itself an engineer covers the coding questions itself. The owner asked for that to change the same day: the lead is now told it owns the interview (the hiring manager, the lead of the team or a recruiter), settles its title before looking at the questions, and never stretches the title to cover everything; a hands-on exercise or deep specialist question belongs to a practitioner. Four setups after that: twice an engineering manager who picked 7 questions and brought a senior engineer for the coding question; "about 10 minutes", a manager with 4 questions and no coding, alone; "behavioural only", a manager with 10 questions, alone. Drawing the lead and four candidates took 9 to 14 library requests, 2.2 to 5.1 s in all; the ring came 12 to 19 s after start.
 - **Late joiners are rolled by chance.** Each candidate colleague is late with 60% chance and then joins 40 to 210 s after the call is answered, whatever is happening at that moment. Their tile appears with a chime, they say nothing, and the next message to the lead carries a note that they joined. The lead introduces them at the next pause and catches them up in a sentence. Until then nobody may speak as them (the engine ignores a speaker tag for someone not on the call).
 - **Conduct.** The same rules are in the casting instructions and in the settled instructions, because the lead's session is never restarted after it picks its colleagues: a hand-over is finished in the same reply, a specialist does not repeat the introduction questions, the colleague who asked usually takes the answer, the lead says the farewell.
@@ -642,7 +658,7 @@ video-call look, with no Google Meet branding.
 
 Run after building the app. Wear headphones for the first call. Timings come from the call record (`<userData>/practice-calls/<callId>/call.json`, `timings` and `transcript`).
 
-1. **Setup.** Interview Helper → Prepare done → "Start practice call". First time: the consent screen lists the two models (32 MB, 610 MB); agree and wait for the download. Pass: the pre-call check shows a moving mic level and the incoming-call screen rings with a persona name.
+1. **Setup.** Interview Helper → Prepare done → "Start practice call". First time: the consent screen lists the two models (32 MB, 610 MB); agree and wait for the download. Pass: the pre-call check shows a moving mic level and when setup finishes nothing rings until "I'm ready" is pressed; then "Waiting for call…" shows and the incoming-call screen rings with a persona name a few seconds later.
 2. **Answer and first reply.** Answer; the interviewer greets you. Pass: speech starts within about 3 s, sounds like one consistent voice, captions (if turned on) match.
 3. **Thinking pause.** Answer a question, pause 2-3 s mid-thought, then continue. Pass: no interruption in most tries (a rare short "mm" reaction that stops is acceptable).
 4. **Acknowledgement.** Say "right" or "mm-hm" quietly while it talks. Pass: it keeps talking without a hiccup and does not reply to it.

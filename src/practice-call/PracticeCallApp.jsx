@@ -96,7 +96,7 @@ export default function PracticeCallApp() {
   switch (phase) {
     case 'consent': return <ConsentScreen onAgree={agree} busy={busy} />;
     case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
-    case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} />;
+    case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} onReady={() => invoke('ready')} />;
     case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('hangUp', { feedback: false })} />;
     case 'connecting': return <ConnectingScreen persona={state.persona} />;
     case 'in-call': return <InCall state={state} leaveRequest={leaveRequest} api={{

@@ -105,7 +105,8 @@ export const SETUP_STEPS = Object.freeze([
 
 /** Each setup step as done, active or pending, from the step the service says is running. */
 export function setupProgress(setup) {
-  const at = SETUP_STEPS.findIndex(item => item.step === setup?.step);
+  // 'ready' comes after the last step: everything is done and the call waits for the candidate.
+  const at = setup?.step === 'ready' ? SETUP_STEPS.length : SETUP_STEPS.findIndex(item => item.step === setup?.step);
   const attempt = Number(setup?.attempt) || 1;
   return SETUP_STEPS.map((item, index) => ({
     ...item,

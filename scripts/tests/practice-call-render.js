@@ -552,6 +552,7 @@ export default [
             onState: listener => { listeners.push(listener); return () => { const at = listeners.indexOf(listener); if (at >= 0) listeners.splice(at, 1); }; },
             onEvent: () => () => {},
             agreeModelDownload: async () => { invoked.push('agree'); },
+            ready: async () => { invoked.push('ready'); },
             hangUp: async options => { hangUps.push(options); },
             getReplay: async () => REPLAY,
           };
@@ -571,6 +572,13 @@ export default [
             await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'sessions', attempt: 1 } });
             assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Bringing the interviewer in'), 'precheck must follow the pushed setup step');
             assert(byLabel('Microphone level')?.getAttribute('aria-valuenow') === '50', 'precheck must meter the live level');
+            await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'ready', attempt: 1 } });
+            assert(!window.document.querySelector('[aria-current="step"]'), 'ready: no step is still running');
+            await act(() => [...window.document.querySelectorAll('button')].find(node => node.textContent === "I'm ready").click());
+            assert(invoked.includes('ready'), 'pressing Ready must call ready');
+            await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'ready', attempt: 1, calling: true } });
+            assert(byLabel('Waiting for call')?.textContent.startsWith('Waiting for call'), 'after Ready only the wait is shown');
+            assert(!byLabel('Setup progress') && !window.document.querySelector('button'), 'the setup card is gone while waiting');
             await push({ phase: 'ringing', persona: PERSONA });
             assert(byLabel('Answer call') && byLabel('Decline call'), 'ringing must offer Answer and Decline');
             await push({ phase: 'in-call', persona: PERSONA, elapsedMs: 65_000, speaking: 'interviewer' });

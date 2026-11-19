@@ -49,7 +49,8 @@ function assertInterruption(result, label, typedMessage) {
   const heard = heardBefore(result, cancels[0]);
   const full = result.voice.find(item => item.utteranceId === cancels[0].utteranceId).texts.join(' ');
   assert(heard.length > 0 && heard.length < full.length, `${label}: heard is a non-empty strict prefix of what was sent`);
-  assert(lastMain(result).includes(`[You were interrupted after saying: '${heard}'. The rest was not heard.]`), `${label}: interruption note carries the played words`);
+  assert(lastMain(result).includes(`[You were interrupted after saying: '${heard}'. The rest was not heard.`), `${label}: interruption note carries the played words`);
+  assert(lastMain(result).includes(" What you had not yet said: '"), `${label}: interruption note carries what was written but not heard`);
   const trimmed = interviewerLines(result).filter(entry => entry.interrupted === true);
   assert.equal(trimmed.length, 1, `${label}: one trimmed interviewer line`);
   assert.equal(trimmed[0].text, heard);

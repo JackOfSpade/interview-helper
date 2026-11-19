@@ -207,7 +207,11 @@ the research and the sealed answers are prepared again and the tabs are kept.
 
 Practice calls draw from the whole pool (General, posting, topics) and do not
 cover all of it in one call. Each entry shows "Practised ×N": how many practice
-calls asked it. General questions are counted across every job, the rest per
+calls asked it and got an answer. Since 2026-11-19 a question counts only once
+the candidate has said or typed at least 15 words after it, or written in the
+pad, before the next planned question or the end of the call; a question asked
+just before hanging up, or met only with "could you repeat that?", is not
+counted. This is a word count, not a judgment of the answer. General questions are counted across every job, the rest per
 posting (`practice-question-history.json`). The planner favours entries asked
 least, so repeated practice goes through the pool. For a topic the interviewer
 makes up its own question or exercise each call.
