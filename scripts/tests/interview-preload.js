@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'loadState', 'readCanvasInterviews', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveState']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'loadState', 'readCanvasInterviews', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder(); await appApi.readCanvasInterviews();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
@@ -88,6 +88,12 @@ const tests = [
       assert.deepEqual({ ...invocations.at(-2).args[0] }, { nodeId: 'interview-node', filePaths: ['/a/resume.pdf'] }, 'conversion forwards only nodeId and filePaths');
       assert.deepEqual({ ...invocations.at(-1).args[0] }, { token: 'tok' }, 'reveal forwards only an opaque token, never a path');
       assert.deepEqual({ ...invocations.at(-3).args[0] }, { nodeId: 'interview-node', text: 'Engineer at Acme' }, 'the typed job call forwards only its two reviewed fields');
+      await appApi.copyBugReport({ description: 'It froze', renderer: { events: [] }, path: '/etc/passwd' });
+      await appApi.saveBugReport({ description: 'It froze', renderer: { events: [] }, filePath: '/etc/passwd' });
+      assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, { ...args[0] }]), [
+        ['interview-app:copy-bug-report', { description: 'It froze', renderer: { events: [] } }],
+        ['interview-app:save-bug-report', { description: 'It froze', renderer: { events: [] } }],
+      ], 'a bug report forwards only the description and the window details, never a path');
       // There is no canvas here: the application list never forwards a renderer-supplied path.
       const listed = await api.listInterviewApplicationFolders({ nodeId: 'interview-node', canvasFilePath: '/Users/someone/elsewhere.json' });
       assert.deepEqual({ ...listed.args[0] }, { nodeId: 'interview-node', canvasFilePath: null });

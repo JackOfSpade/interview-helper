@@ -22,6 +22,38 @@ with that repository at build or run time.
 The launcher rebuilds only when a file the build read has changed
 (`dist-electron-interview/build-inputs.json`).
 
+The build reads its signing settings (`mac.forceCodeSigning`, `mac.identity`)
+from `electron-builder.interview.json`, the file electron-builder runs with.
+`package.json` has no `build` block.
+
+## Bug reports (built 2026-11-18)
+
+"Report a bug…" at the bottom of the interview list opens a dialog with an
+optional description and two actions, modelled on Infinite Canvas.
+
+- **Copy to clipboard** writes the full report to
+  `~/Library/Application Support/Interview Helper/bug-reports/bug-report-<time>.md`
+  and copies a pointer: the file path, its size and the typed description. An AI
+  assistant reads the file from disk. If the file cannot be written, the whole
+  report is copied instead. Reports older than 7 days or beyond the 20 newest
+  are removed at start and on each write.
+- **Save to file…** writes the same report where the person chooses.
+- **What a report holds** (`electron/interviewApp/bugReport.js`): versions, open
+  windows, each interview as states and counts, the Claude worker and its
+  tasks, usage pauses, requests still running, AI step counts, the top level of
+  the data folder (names and sizes), status and error messages on screen, the
+  window's events and the main process log of this run.
+- **What it leaves out:** interview names, job links, file names of career
+  data, career text, questions, answers, posting text and recordings. Log and
+  event lines lose URL queries, local paths, credentials and opaque ids.
+- **Window events** (`src/utils/eventLog.js`) are the last 300 lines of buttons
+  pressed, uncaught errors, rejected promises and console warnings and errors
+  in the main window, kept in memory only. Typed text is not recorded.
+- There are no filter codes: a report here is small enough to read whole.
+- Only the main window can ask for a report (`interview-app:copy-bug-report`,
+  `interview-app:save-bug-report`). The cue card and practice call windows have
+  no button and their events are not recorded.
+
 ## Career data is plain text (2026-11-18)
 
 Career files are used as written. Nothing compiles them into a structured

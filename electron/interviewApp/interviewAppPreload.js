@@ -125,4 +125,13 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
     const { token } = args || {};
     return ipcRenderer.invoke('interview-app:reveal-converted-career-file', { token });
   },
+  // Bug report: the typed description and what the window saw. The main process adds the rest.
+  copyBugReport: (args) => {
+    const { description, renderer } = args || {};
+    return ipcRenderer.invoke('interview-app:copy-bug-report', { description, renderer });
+  },
+  saveBugReport: (args) => {
+    const { description, renderer } = args || {};
+    return ipcRenderer.invoke('interview-app:save-bug-report', { description, renderer });
+  },
 }));

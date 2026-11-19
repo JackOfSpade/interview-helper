@@ -4,7 +4,7 @@
 // and repository. Feature code lives under electron/ and src/.
 import electronPkg from 'electron';
 import path from 'path';
-import { logger } from '../logger.js';
+import { getRecentLogs, logger } from '../logger.js';
 import { pathToFileURL } from 'node:url';
 import { registerCareerTextHandlers } from '../ipc/careerText.js';
 import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from '../ipc/interviewHelper.js';
@@ -15,19 +15,20 @@ import { createPracticeCallController, createReplayHandler } from '../practiceCa
 import { createPracticeAudioHelper, practiceAudioHelperPath } from '../interviewPracticeAudio.js';
 import { getInterviewPracticeRegistry } from '../ipc/interviewPracticeRegistry.js';
 import { createInterviewClaudeTransport } from '../ipc/interviewClaudeTransport.js';
-import { recheckClaudeUsageAfterWake } from '../ipc/claudePause.js';
-import { recordClaudePauseEvent } from '../ipc/claudePauseDiagnostics.js';
+import { claudeUsageLimit, recheckClaudeUsageAfterWake } from '../ipc/claudePause.js';
+import { claudePauseDiagnosticsMarkdown, recordClaudePauseEvent } from '../ipc/claudePauseDiagnostics.js';
 import { registerNetworkHandlers } from '../ipc/network.js';
-import { flushNonApiAiPersistence, registerNonApiAiHandlers } from '../ipc/nonApiAi.js';
-import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from '../ipc/claudeTaskWorker.js';
+import { flushNonApiAiPersistence, getNonApiAiHandoffLifecycleSnapshot, registerNonApiAiHandlers } from '../ipc/nonApiAi.js';
+import { claudeTaskWorkerActivity, claudeTaskWorkerStatus, registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from '../ipc/claudeTaskWorker.js';
 import { isRendererSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import { createInterviewSessionStore, readInterviewHelperNodesFromCanvas } from './sessionStore.js';
 import { interviewAppDataRoots } from './dataRoots.js';
 import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
-import { handleSafe } from '../ipc/ipcUtils.js';
+import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
+import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
 
-const { app, BrowserWindow, dialog, ipcMain, protocol, shell } = electronPkg;
+const { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } = electronPkg;
 
 // The profile folder must be this app's own: two running Electron apps cannot
 // share one. Set before `ready`, and before anything reads the path.
@@ -239,6 +240,29 @@ if (!app.requestSingleInstanceLock()) {
         try { recordClaudePauseEvent({ kind: 'system-resume' }); recheckClaudeUsageAfterWake(); wakeClaudeTaskWorker(); } catch { /* a wake re-check cannot affect the app */ }
       });
     } catch { /* no power monitor: timers alone still resume the work */ }
+    // "Report a bug": states, counts and logs only; see bugReport.js for what a report holds.
+    const bugReports = createBugReportStore({ directory: path.join(roots.profile, BUG_REPORT_DIRECTORY) });
+    void bugReports.prune().then((result) => { if (result.error) logger.warn(`[BugReport] saved reports were not cleaned up: ${result.error}`); });
+    registerBugReportHandlers({
+      ipcMain, guarded,
+      service: createBugReportService({
+        store: bugReports, clipboard, dialog,
+        getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+        desktopPath: () => app.getPath('desktop'),
+        sources: {
+          app: () => app,
+          windows: () => ({ 'Cue card': (interviewWindowController?.sessionCount?.() || 0) > 0, 'Practice call': Boolean(practiceCallController?.getWindow()) }),
+          sessions: () => sessions.load(),
+          claudeStatus: () => claudeTaskWorkerStatus(),
+          claudeActivity: () => claudeTaskWorkerActivity(),
+          claudePauses: () => claudePauseDiagnosticsMarkdown({ current: claudeUsageLimit() }),
+          activeTasks: () => snapshotActiveNodeTasks(),
+          handoffs: () => getNonApiAiHandoffLifecycleSnapshot(),
+          dataFolder: () => listDataFolder(roots.data),
+          logs: () => getRecentLogs(500),
+        },
+      }),
+    });
     createMainWindow();
     app.on('activate', () => createMainWindow());
   }).catch(error => {
