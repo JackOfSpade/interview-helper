@@ -1910,7 +1910,9 @@ export function createPracticeCallService(deps = {}) {
     // A call already being finished (the window was closed, the app is quitting) is waited for, so
     // whoever asks again gets the state after the recording and record are saved.
     hangUp: async options => (finishTask ? finishTask.then(() => snapshot(), () => snapshot()) : finishCall('candidate', { analyze: options?.feedback !== false })),
-    abandon: async () => (call && !call.finished ? finishCall('window-closed') : snapshot()),
+    // The window was closed without choosing how to leave. Nobody is there to read a review, so none
+    // is written: the recording and transcript are saved and nothing more is spent on transcription or Claude.
+    abandon: async () => (call && !call.finished ? finishCall('window-closed', { analyze: false }) : snapshot()),
     setMuted: muted => {
       state.muted = !!muted;
       try { call?.audioMirror?.mute(!!muted); } catch { /* mute is best effort */ }

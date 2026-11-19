@@ -122,6 +122,10 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
     const { nodeId, text, runId } = args || {};
     return ipcRenderer.invoke('resolve-interview-typed-job', { nodeId, text, ...(typeof runId === 'string' ? { runId } : {}) });
   },
+  cancelInterviewBrief: (args) => {
+    const { nodeId, runId } = args || {};
+    return ipcRenderer.invoke('cancel-interview-brief', { nodeId, runId });
+  },
   cancelInterviewTypedJob: (args) => {
     const { nodeId, runId } = args || {};
     return ipcRenderer.invoke('cancel-interview-typed-job', { nodeId, runId });

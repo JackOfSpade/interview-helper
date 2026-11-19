@@ -952,6 +952,37 @@ export default [
     },
   },
   {
+    name: 'interview helper render: Cancel ends the Prepare in flight and puts the node back as it was',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const pending = deferred(); const updates = []; const cancels = []; let prepareArgs;
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+          prepareInterviewBrief: async args => { prepareArgs = args; return pending.promise; },
+          completeNonApiAiRun: async () => ({ absent: true }),
+        };
+        window.interviewAppAPI = { cancelInterviewBrief: async args => { cancels.push(args); return { success: true, cancelled: true }; } };
+        const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperJobUrl: JOB_URL }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
+        try {
+          await bundle.module.act(async () => { await flush(); });
+          assert(!button(window, 'Cancel preparation'), 'there is nothing to cancel before Prepare starts');
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
+          assert(button(window, 'Cancel preparation'), 'a running Prepare offers Cancel');
+          await bundle.module.act(async () => { button(window, 'Cancel preparation').click(); await flush(); });
+          assert(cancels.length === 1 && cancels[0].nodeId === 'interview-helper' && cancels[0].runId === prepareArgs.manualAiRunId, 'Cancel names the run in flight');
+          const last = updates.at(-1).next;
+          assert(last.interviewHelperPreparation === null && last.interviewHelperPreparationRunId === null, 'the node is no longer preparing and holds no run to resume');
+          assert(!button(window, 'Cancel preparation') && text(window).includes('Preparation cancelled.'), 'the Cancel button goes and the panel says what happened');
+          await bundle.module.act(async () => { pending.resolve({ success: true, cancelled: true }); await flush(); });
+          assert(!updates.some(item => item.patch.interviewHelperPreparation?.status === 'failed'), 'a cancelled Prepare is not reported as a failure');
+          const again = button(window, 'Prepare interview brief');
+          assert(again && !again.disabled, 'Prepare can be started again once the cancelled run has ended');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
     name: 'interview helper render: preparation is fenced after URL invalidation and a valid public brief launches the narrow view',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {

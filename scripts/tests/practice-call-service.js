@@ -277,6 +277,28 @@ test('leaving without feedback saves the recording and spends nothing on analysi
   assert.equal((await service.getReplay('call-1')).feedback, null);
 });
 
+test('closing the window mid-call saves the recording and spends nothing on analysis', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-window-closed-'));
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: { afconvert: async args => { await nodeFs.writeFile(args.at(-1), 'm4a'); } } });
+  let analysed = 0;
+  let transcribed = 0;
+  deps.analyze = async () => { analysed += 1; return { status: 'ready', chapters: [], feedback: null }; };
+  deps.transcribe = async () => { transcribed += 1; return { words: [] }; };
+  const service = createPracticeCallService(deps);
+  await service.start(ARGS);
+  await service.answer();
+  const callDir = path.join(tmp, 'practice-calls', 'call-1');
+  await nodeFs.writeFile(path.join(callDir, 'candidate.wav'), 'candidate');
+  await nodeFs.writeFile(path.join(callDir, 'interviewer.wav'), 'interviewer');
+  const state = await service.abandon();
+  assert.equal(state.phase, 'replay');
+  assert.equal(analysed + transcribed, 0, 'no analysis or transcription runs for a closed window');
+  assert.equal(await deps.store.readAnalysis('call-1'), null, 'no analysis is stored');
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.reason, 'window-closed');
+  assert.equal(record.feedbackSkipped, true);
+});
+
 test('hang-up from every phase is safe', async () => {
   for (const [phase, setup] of [
     ['ringing', async service => service.start(ARGS)],

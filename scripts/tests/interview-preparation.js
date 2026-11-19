@@ -19,6 +19,7 @@ import {
   publishTypedJobBundle,
   validateTypedJobArgs,
   validateTypedJobCancelArgs,
+  validateInterviewPrepareCancelArgs,
   validateInterviewBriefAssessment,
   validateInterviewBriefRequestArgs,
   validateInterviewPreparationLoadArgs,
@@ -489,6 +490,30 @@ export default [
         const reply = await handlers.get('build-interview-brief')({}, { nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: bundle.artifactId, manualAiRunId: 'run-prepared-brief' });
         assert(handed.callText === syntheticAiTransport.callText && handed.callRaw === syntheticAiTransport.callRaw, 'the build handler must hand the brief builder its injected AI transport');
         assert(reply?.briefRecordId === interviewPreparedBriefRecordId(sealedBrief) && (await loadInterviewPreparedBrief({ briefRecordId: reply.briefRecordId, brief: reply.brief, userDataPath: root })), 'the build handler must publish and reload the sealed record before returning success');
+        // Cancel ends the Prepare in flight: its Claude calls see the abort, and the reply is an answer, not an error.
+        const cancelHandlers = new Map();
+        let enteredBuild; const insideBuild = new Promise(resolve => { enteredBuild = resolve; });
+        let buildSignal;
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => cancelHandlers.set(channel, handler), aiTransport: syntheticAiTransport,
+          buildBrief: async args => {
+            buildSignal = args.signal; enteredBuild();
+            await new Promise((_resolve, reject) => args.signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })), { once: true }));
+          },
+          buildAnswers: async () => ({ bank: {} }), publishAnswers: async () => ({ answerBankAvailable: true, answerCardCount: 16 }), logWarning: () => {} });
+        const cancelPrepare = args => cancelHandlers.get('cancel-interview-brief')({}, args);
+        const session = new AbortController();
+        const running = cancelHandlers.get('build-interview-brief')({}, { nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: bundle.artifactId, manualAiRunId: 'run-cancelled-brief' }, session.signal);
+        await insideBuild;
+        strict.deepEqual(await cancelPrepare({ nodeId: 'node-1', runId: 'run-other' }), { cancelled: false }, 'another run id ends nothing');
+        assert(!buildSignal.aborted, 'the run is untouched by a cancel for another run');
+        strict.deepEqual(await cancelPrepare({ nodeId: 'node-1', runId: 'run-cancelled-brief' }), { cancelled: true });
+        assert(buildSignal.aborted, 'the signal every Claude call of the Prepare holds is aborted');
+        strict.deepEqual(await running, { cancelled: true }, 'a cancelled Prepare is an answer, not an error');
+        assert(!session.signal.aborted, 'Cancel does not end the other tasks of the session');
+        strict.deepEqual(await cancelPrepare({ nodeId: 'node-1', runId: 'run-cancelled-brief' }), { cancelled: false }, 'a finished run is no longer there');
+        for (const bad of [null, { nodeId: 'node-1' }, { nodeId: 'node-1', runId: 'a b' }, { nodeId: 'node-1', runId: 'run-1', extra: 1 }]) {
+          strict.throws(() => validateInterviewPrepareCancelArgs(bad), TypeError);
+        }
         return { recordId: published.briefRecordId.slice(0, 12) };
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },

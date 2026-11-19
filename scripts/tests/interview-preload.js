@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['cancelInterviewTypedJob', 'chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['cancelInterviewBrief', 'cancelInterviewTypedJob', 'chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
@@ -94,6 +94,8 @@ const tests = [
         ['resolve-interview-typed-job', { nodeId: 'interview-node', text: 'Engineer at Acme', runId: 'run-1' }],
         ['cancel-interview-typed-job', { nodeId: 'interview-node', runId: 'run-1' }],
       ], 'a run id is forwarded when given, and Cancel names that run only');
+      await appApi.cancelInterviewBrief({ nodeId: 'interview-node', runId: 'interview-helper:prepare:abc', extra: 'dropped' });
+      assert.deepEqual([invocations.at(-1).channel, { ...invocations.at(-1).args[0] }], ['cancel-interview-brief', { nodeId: 'interview-node', runId: 'interview-helper:prepare:abc' }], 'cancelling a Prepare names that run only');
       await appApi.copyBugReport({ description: 'It froze', renderer: { events: [] }, path: '/etc/passwd' });
       await appApi.saveBugReport({ description: 'It froze', renderer: { events: [] }, filePath: '/etc/passwd' });
       assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, { ...args[0] }]), [

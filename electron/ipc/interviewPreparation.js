@@ -793,6 +793,10 @@ export function validateTypedJobArgs(args) {
   if (!isInterviewHelperNodeId(args.nodeId) || typeof args.text !== 'string' || !args.text.trim() || args.text.length > MAX_TYPED_JOB_CHARS
     || (Object.hasOwn(args, 'runId') && !typedJobRunIdValid(args.runId))) throw new TypeError('Interview preparation requires a valid request.');
 }
+export function validateInterviewPrepareCancelArgs(args) {
+  strictKeys(args, ['nodeId', 'runId'], 'Interview preparation requires a valid request.');
+  if (!isInterviewHelperNodeId(args.nodeId) || typeof args.runId !== 'string' || !RUN_ID_RE.test(args.runId)) throw new TypeError('Interview preparation requires a valid request.');
+}
 export function validateTypedJobCancelArgs(args) {
   strictKeys(args, ['nodeId', 'runId'], 'Interview preparation requires a valid request.');
   if (!isInterviewHelperNodeId(args.nodeId) || !typedJobRunIdValid(args.runId)) throw new TypeError('Interview preparation requires a valid request.');
@@ -1645,9 +1649,30 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: true, answerCardCount: bank.cards.length, reused: true };
     } catch { return null; }
   };
-  registerHandler('build-interview-brief', async (_event, request, signal) => {
+  const prepareRuns = new Map();
+  registerHandler('build-interview-brief', async (_event, request, outer) => {
     validateInterviewPrepareArgs(request);
     const { reuseExisting = false, ...args } = request;
+    // The person's own Cancel, separate from the handler's signal (which ends every task of this session).
+    // Every Claude call of this Prepare takes the joined signal, so Cancel stops the one in flight.
+    const cancel = new AbortController();
+    const prepareRunKey = `${args.nodeId}:${args.manualAiRunId}`;
+    prepareRuns.set(prepareRunKey, cancel);
+    const signal = outer ? AbortSignal.any([outer, cancel.signal]) : cancel.signal;
+    try { return await runPrepare(args, reuseExisting, signal); } catch (error) {
+      // Cancel is an answer, not a failure. What earlier steps already saved stays saved.
+      if (cancel.signal.aborted && !outer?.aborted) return { cancelled: true };
+      throw error;
+    } finally { if (prepareRuns.get(prepareRunKey) === cancel) prepareRuns.delete(prepareRunKey); }
+  }, { validateArgs: validateInterviewPrepareArgs });
+  // Cancel one Prepare. A run that already ended is simply not there.
+  registerHandler('cancel-interview-brief', async (_event, args) => {
+    validateInterviewPrepareCancelArgs(args);
+    const run = prepareRuns.get(`${args.nodeId}:${args.runId}`);
+    run?.abort();
+    return { cancelled: Boolean(run) };
+  }, { validateArgs: validateInterviewPrepareCancelArgs });
+  async function runPrepare(args, reuseExisting, signal) {
     // Prepare writes Q&A only for a tab with no cards. When both tabs hold cards there is nothing
     // to write, so "Prepare again" uses the saved preparation of the same inputs, like a first Prepare.
     await bindPosting(args);
@@ -1757,7 +1782,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throw new Error('The interview brief could not be prepared safely.');
     }
     finally { standaloneClaudeActivity.remove(interviewActivityKey(args.manualAiRunId)); }
-  }, { validateArgs: validateInterviewPrepareArgs });
+  }
 }
 
 export function validateGroundedResearchText(value) {
