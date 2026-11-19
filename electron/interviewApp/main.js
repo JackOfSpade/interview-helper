@@ -70,6 +70,10 @@ let quitting = false;
 let sessionStore = null;
 
 /** A File menu command for the main window, which owns the list and shows the result. */
+// The menu bar's two faces: the app's own menu, and the short one shown while the call window is in front.
+let appMenu = null;
+let callMenu = null;
+
 function sendFileCommand(command) {
   const win = createMainWindow();
   const send = () => { try { win.webContents.send('interview-app:file-command', command); } catch { /* the window is going away */ } };
@@ -168,7 +172,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     app.on('browser-window-created', (_event, win) => textSize.adopt(win));
     registerTextSizeHandlers({ ipcMain, guarded, controller: textSize });
-    Menu.setApplicationMenu(Menu.buildFromTemplate([
+    appMenu = Menu.buildFromTemplate([
       { role: 'appMenu' },
       // Save and Load act on the main window, whichever window is in front.
       { label: 'File', submenu: [
@@ -179,7 +183,17 @@ if (!app.requestSingleInstanceLock()) {
       { role: 'editMenu' },
       { label: 'View', submenu: [...textSizeMenuItems(textSize), { type: 'separator' }, { role: 'togglefullscreen' }, { type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }] },
       { role: 'windowMenu' },
-    ]));
+    ]);
+    // What the menu bar shows while the call window is in front: a call has no interview list
+    // to save or load and no page to reload, so only what a call window uses is left.
+    callMenu = Menu.buildFromTemplate([
+      { role: 'appMenu' },
+      { label: 'Call', submenu: [{ role: 'close' }] },
+      { role: 'editMenu' },
+      { label: 'View', submenu: [...textSizeMenuItems(textSize), { type: 'separator' }, { role: 'togglefullscreen' }] },
+      { role: 'windowMenu' },
+    ]);
+    Menu.setApplicationMenu(appMenu);
     ipcMain.handle('interview-app:load-state', guarded(() => sessions.load()));
     ipcMain.handle('interview-app:save-state', guarded(state => sessions.save(state)));
     // The interview list as a file the person keeps. It holds the list only: career text, Q&A,
@@ -299,6 +313,10 @@ if (!app.requestSingleInstanceLock()) {
       practiceCallController = createPracticeCallController({
         BrowserWindow, ipcMain, appInstance: dataApp,
         openMicrophoneSettings: () => microphoneAccess.openSettings(),
+        callMenu: {
+          enter: () => { if (callMenu) Menu.setApplicationMenu(callMenu); },
+          leave: () => { if (appMenu) Menu.setApplicationMenu(appMenu); },
+        },
         isAuthorizedOwner: sender => { const owner = ownerOf(sender); return !!owner && !owner.isDestroyed() && (isMainWindow(owner) || owner === practiceCallController?.getWindow()); },
         preloadPath: path.join(__dirname, 'practiceCallPreload.js'),
         devServerUrl: DEV_SERVER_URL ? new URL('interview.html', DEV_SERVER_URL).toString() : null,

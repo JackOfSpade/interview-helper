@@ -10,5 +10,5 @@
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Hear your answers during interview calls. Audio is transcribed on this Mac and recorded locally for your feedback.</string>
 </dict></plist>

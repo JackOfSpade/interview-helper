@@ -220,13 +220,31 @@ nothing to resume. A hold from Pause & save on that run is released with it. Ste
 sealed brief or answer set stays on disk, and Q&A cards already written stay in
 their tabs.
 
+**The call stays in the fiction (2026-11-19).** From the ring to the hang-up
+nothing the candidate sees or hears says practice, AI, voice, transcription or
+this app: the ring screen reads "Incoming call", the window is titled with the
+caller's name (`callTitle` in `src/practice-call/callModel.js`), mid-call
+notices and errors are worded as connection problems, and the prepared answers
+panel is labelled "Notes". The interviewer's instructions tell it that the call
+is real, to answer "are you an AI?" in character, and to give no feedback or
+coaching. A brief with no team names none (no "the hiring team"). The screens
+before the ring and after the hang-up do not say practice either (they keep
+the disclosures: what is downloaded, that the voice is AI, that feedback uses
+AI, that camera video never leaves the Mac). While the call window is in front
+the menu bar shows a short call menu (`callMenu` in
+`electron/interviewApp/main.js`, passed to the call window; off in the unit
+suites); the app name in the menu bar cannot change per window. The pause
+notice is a translucent overlay in the middle of the window. New text shown or
+spoken during the call must keep to this; the render and prompt suites assert
+it.
+
 **Closing the practice call window (2026-11-19).** Closing the window ends the
 call: the three Claude CLI sessions are stopped (SIGTERM to each process group,
 SIGKILL after 250 ms), the reply in flight and its ElevenLabs voice socket are
 aborted, and the audio helper stops. Closing it without choosing how to leave
 saves the recording and transcript and writes no review, so no ElevenLabs
 transcription and no Claude review run with the window gone. A review already
-asked for ("leave with feedback") is finished even if the window is closed
+asked for ("Get feedback", chosen on the screen after the call) is finished even if the window is closed
 while it is being prepared: that is one transcription and one Claude call, and
 the replay shows it.
 

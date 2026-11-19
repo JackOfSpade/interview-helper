@@ -7,7 +7,7 @@ import { createPracticeCallController } from '../../electron/practiceCall/callWi
 const cases = [];
 const test = (name, run) => cases.push({ name: `practice call window: ${name}`, run });
 
-async function harness({ phase = 'ringing' } = {}) {
+async function harness({ phase = 'ringing', deps = {} } = {}) {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-window-'));
   const windows = [];
   class FakeWindow {
@@ -39,10 +39,15 @@ async function harness({ phase = 'ringing' } = {}) {
     async abandon() { calls.abandon += 1; return { phase: 'replay' }; },
     showReplay(callId) { calls.showReplay.push(callId); this.phase = 'replay'; return { phase: 'replay', callId }; },
     async hangUp(options) { calls.hangUp.push(options); return { phase: 'replay' }; },
+    forwarded: [],
+    decline() { this.forwarded.push('decline'); return { phase: this.phase = 'missed' }; },
+    callBack() { this.forwarded.push('callBack'); return { phase: this.phase = 'calling' }; },
+    cancelCallBack() { this.forwarded.push('cancelCallBack'); return { phase: this.phase = 'missed' }; },
+    async chooseFeedback(wants) { this.forwarded.push(`feedback:${wants}`); return { phase: 'replay' }; },
   };
   const controller = createPracticeCallController({
     BrowserWindow: FakeWindow, ipcMain, isAuthorizedOwner: () => true, userDataPath: tmp,
-    store: { readRecord: async callId => ({ callId, nodeId: 'n1' }) }, service,
+    store: { readRecord: async callId => ({ callId, nodeId: 'n1' }) }, service, ...deps,
   });
   return { windows, invoke, calls, service, controller };
 }
@@ -171,6 +176,67 @@ test('declining without feedback closes the window with the call', async () => {
   await invoke('practice-call-window:hang-up', { feedback: false });
   assert.deepEqual(calls.hangUp, [{ feedback: false }]);
   assert.equal(windows[0].destroyed, true);
+});
+
+test('declining keeps the window on the missed call, which can be returned or cancelled', async () => {
+  const { windows, invoke, calls, service } = await harness({ phase: 'ringing' });
+  await invoke('practice-call:start', { nodeId: 'n1' });
+  assert.equal((await invoke('practice-call-window:decline')).phase, 'missed');
+  assert.equal(windows[0].destroyed, false, 'the window stays');
+  assert.deepEqual(calls.hangUp, []);
+  // A missed call still holds the call: a second start is refused and only brings the window forward.
+  assert.equal((await invoke('practice-call:start', { nodeId: 'n1' })).error.code, 'already-running');
+  assert.equal((await invoke('practice-call-window:call-back')).phase, 'calling');
+  assert.equal((await invoke('practice-call:start', { nodeId: 'n1' })).error.code, 'already-running');
+  assert.equal((await invoke('practice-call-window:cancel-call-back')).phase, 'missed');
+  assert.deepEqual(service.forwarded, ['decline', 'callBack', 'cancelCallBack']);
+  // Once the caller has stopped waiting nothing is running, so a new call replaces the window.
+  service.getState = function getState() { return { phase: this.phase, missed: 'expired', callId: 'call-1' }; };
+  await invoke('practice-call:start', { nodeId: 'n1' });
+  assert.equal(windows.length, 2);
+  assert.equal(calls.start, 2);
+});
+
+test('leaving asks nothing in the call; the answer given afterwards decides whether the window stays', async () => {
+  const { windows, invoke, calls, service } = await harness({ phase: 'in-call' });
+  await invoke('practice-call:start', { nodeId: 'n1' });
+  await invoke('practice-call-window:leave');
+  assert.deepEqual(calls.hangUp, [{ feedback: 'ask' }]);
+  assert.equal(windows[0].destroyed, false);
+  await invoke('practice-call-window:choose-feedback', true);
+  assert.equal(windows[0].destroyed, false, 'the feedback opens in the same window');
+  await invoke('practice-call-window:choose-feedback', false);
+  assert.equal(windows[0].destroyed, true, 'without feedback there is nothing more to show');
+  assert.deepEqual(service.forwarded, ['feedback:true', 'feedback:false']);
+});
+
+test('the menu bar shows the call menu only while the call window is in front, and never unless the app passes one in', async () => {
+  const menu = [];
+  const callMenu = { enter: () => menu.push('call'), leave: () => menu.push('app') };
+  const live = await harness({ phase: 'ringing', deps: { callMenu } });
+  await live.invoke('practice-call:start', { nodeId: 'n1' });
+  const win = live.windows[0];
+  win.handlers.focus();
+  win.handlers.focus();
+  assert.deepEqual(menu, ['call'], 'focusing twice sets the menu once');
+  win.handlers.blur();
+  assert.deepEqual(menu, ['call', 'app']);
+  win.handlers.focus();
+  win.close();
+  assert.deepEqual(menu, ['call', 'app', 'call', 'app'], 'closing the window gives the app its menu back');
+  // A replay window is not a call: it keeps the app's menu.
+  await live.invoke('practice-call:open-replay', { callId: 'call-1', nodeId: 'n1' });
+  live.windows[1].handlers.focus();
+  assert.equal(menu.length, 4);
+  // Off by default, and a menu that throws never breaks the window.
+  const bare = await harness({ phase: 'ringing' });
+  await bare.invoke('practice-call:start', { nodeId: 'n1' });
+  bare.windows[0].handlers.focus();
+  bare.windows[0].handlers.blur();
+  const broken = await harness({ phase: 'ringing', deps: { callMenu: { enter: () => { throw new Error('no menu'); } } } });
+  await broken.invoke('practice-call:start', { nodeId: 'n1' });
+  broken.windows[0].handlers.focus();
+  broken.windows[0].close();
 });
 
 test('the pad handlers forward to the service', async () => {

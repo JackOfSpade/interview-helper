@@ -9,7 +9,7 @@ import { logNote, logWarn } from './logNote.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list' });
-const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', 'connecting', 'in-call', 'ended', 'analyzing', 'replay', 'error']);
+const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing', 'replay', 'error']);
 const CLASSIFIER_INSTRUCTIONS = 'You classify one candidate utterance. Reply with exactly one word: acknowledgement if it only acknowledges, agrees or fills a pause, or interruption if it starts a new thought, question or correction. No punctuation, no explanation. Every later message is one utterance to classify. Reply only READY now.';
 const USAGE_LIMIT_MESSAGE = 'Claude usage is limited right now; analysis may wait until the limit resets.';
 const MODELS = Object.freeze(['smartTurn', 'tone']);
@@ -27,6 +27,14 @@ const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio'
 // How long after Ready the call rings: long enough to feel like someone dialling in, short enough not to drag.
 const RING_DELAY_MIN_MS = 3000;
 const RING_DELAY_MAX_MS = 7000;
+// An unanswered ring gives up after this long, as a caller would, and becomes a missed call.
+const RING_TIMEOUT_MS = 30000;
+// A missed call can be returned for this long. The microphone, the recording and the three
+// warm sessions stay up meanwhile, so the wait is bounded; after it the interviewer is gone.
+const MISSED_HOLD_MS = 10 * 60 * 1000;
+// How long the interviewer takes to pick up a returned call.
+const CALLBACK_PICKUP_MIN_MS = 3500;
+const CALLBACK_PICKUP_MAX_MS = 8000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
@@ -169,7 +177,7 @@ function voiceView(voice) {
 function teamFor(brief) {
   const role = brief?.role ?? {};
   const named = String(role.team ?? role.department ?? '').trim();
-  return named || 'the hiring team';
+  return named;
 }
 /** Tough only when the request or the brief asks for it; otherwise null, and the interviewer picks one to fit its voice. */
 function temperamentFor({ request, brief } = {}) {
@@ -229,18 +237,18 @@ function freshState() {
   return {
     phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
-    interviewerLeft: false, feedbackRequested: true, participants: [], speakingId: null, overSpeakingId: null,
+    interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
   };
 }
 const ENGINE_NOTICES = Object.freeze({
-  'voice-open-failed': 'The interviewer voice could not start. Their next reply may be delayed.',
-  'voice-failed': 'The interviewer voice dropped out. Their next reply may be delayed.',
-  'playback-stalled': 'The interviewer audio stalled. Their next reply may be delayed.',
+  'voice-open-failed': 'Your connection is unstable. They may take a moment to respond.',
+  'voice-failed': 'Your connection is unstable. They may take a moment to respond.',
+  'playback-stalled': 'Poor connection. Audio may be choppy.',
 });
 const wordCountOf = text => String(text ?? '').trim().split(/\s+/u).filter(Boolean).length;
 function errorState(code, message) {
-  return { code, message: typeof message === 'string' && message ? message : 'The practice call could not continue.' };
+  return { code, message: typeof message === 'string' && message ? message : 'The call could not continue.' };
 }
 
 /**
@@ -419,7 +427,7 @@ export function createPracticeCallService(deps = {}) {
     return snapshot();
   };
   const alreadyRunning = () => ({
-    ...snapshot(), phase: 'error', error: { code: 'already-running', message: 'A practice call is already running.' },
+    ...snapshot(), phase: 'error', error: { code: 'already-running', message: 'A call is already running.' },
   });
 
   async function resolve(name) {
@@ -579,7 +587,7 @@ export function createPracticeCallService(deps = {}) {
       if (error?.name === 'AbortError' || call !== self || self.finished) return snapshot();
       // The cause (an HTTP status, a failed check) is for the log; the window says what to do.
       return fail('model-download-failed', {
-        userMessage: 'The practice call models could not be downloaded. Check your internet connection and start the call again; the download continues with the files still missing.',
+        userMessage: 'The call files could not be downloaded. Check your internet connection and start the call again; the download continues with the files still missing.',
       }, error);
     }
     if (call !== self || self.finished) return snapshot();
@@ -1231,7 +1239,7 @@ export function createPracticeCallService(deps = {}) {
     await createSessions(self);
     if (call !== self || self.finished) { await closeWarmSessions(self); return snapshot(); }
     self.timings.precheckMs = Math.round(clock.now() - self.startedAt);
-    if (deps.readyGate === false) { setPhase('ringing'); return snapshot(); }
+    if (deps.readyGate === false) { ring(self); return snapshot(); }
     // Setup can take minutes and the candidate may have walked away: nothing rings until they say they are ready.
     state.setup = { step: 'ready', attempt: 1 };
     publish();
@@ -1248,8 +1256,73 @@ export function createPracticeCallService(deps = {}) {
     const delayMs = Math.round(RING_DELAY_MIN_MS + random() * (RING_DELAY_MAX_MS - RING_DELAY_MIN_MS));
     clock.setTimeout(() => {
       if (call !== self || self.finished || state.phase !== 'precheck' || !state.setup?.calling) return;
-      setPhase('ringing');
+      ring(self);
     }, delayMs);
+    return snapshot();
+  }
+
+  const stopTimer = (self, name) => {
+    if (self[name] !== undefined && self[name] !== null) clock.clearTimeout?.(self[name]);
+    self[name] = null;
+  };
+  /** The call rings. Nobody rings for ever: an unanswered ring becomes a missed call. */
+  function ring(self) {
+    setPhase('ringing');
+    stopTimer(self, 'ringTimer');
+    self.ringTimer = clock.setTimeout(() => {
+      self.ringTimer = null;
+      if (call === self && !self.finished && state.phase === 'ringing') missCall('unanswered');
+    }, RING_TIMEOUT_MS);
+  }
+  /** Keeps the interviewer reachable for a while after a missed call, then lets them go. */
+  function holdMissed(self) {
+    stopTimer(self, 'holdTimer');
+    self.holdTimer = clock.setTimeout(() => {
+      self.holdTimer = null;
+      if (call !== self || self.finished || state.phase !== 'missed') return;
+      // Counts as a call being finished, so a new call cannot start until everything is let go.
+      self.finished = true;
+      finishing = true;
+      const task = abandonCall(self, null, { stay: true }).catch(() => {}).then(() => snapshot());
+      finishTask = task;
+      task.finally(() => { finishing = false; if (finishTask === task) finishTask = null; });
+    }, MISSED_HOLD_MS);
+  }
+  /**
+   * The ring was declined ('declined') or rang out ('unanswered'). Nothing is torn down: the
+   * window shows the missed call and the candidate can call back.
+   */
+  function missCall(how) {
+    const self = call;
+    if (!self || self.finished || self.engine || state.phase !== 'ringing') return snapshot();
+    stopTimer(self, 'ringTimer');
+    self.missedCall = { how, at: clock.now() };
+    state.missed = how;
+    holdMissed(self);
+    setPhase('missed');
+    return snapshot();
+  }
+  /** The candidate returns the missed call: it rings on the interviewer's side for a few seconds, then they pick up. */
+  function callBack() {
+    const self = call;
+    if (!self || self.finished || self.engine || state.phase !== 'missed' || !self.missedCall) return snapshot();
+    stopTimer(self, 'holdTimer');
+    setPhase('calling');
+    const random = deps.random ?? Math.random;
+    const delayMs = Math.round(CALLBACK_PICKUP_MIN_MS + random() * (CALLBACK_PICKUP_MAX_MS - CALLBACK_PICKUP_MIN_MS));
+    self.pickupTimer = clock.setTimeout(() => {
+      self.pickupTimer = null;
+      if (call === self && !self.finished && state.phase === 'calling') connectCall().catch(() => {});
+    }, delayMs);
+    return snapshot();
+  }
+  /** The candidate hung up before the interviewer picked up: back to the missed call. */
+  function cancelCallBack() {
+    const self = call;
+    if (!self || self.finished || state.phase !== 'calling') return snapshot();
+    stopTimer(self, 'pickupTimer');
+    holdMissed(self);
+    setPhase('missed');
     return snapshot();
   }
 
@@ -1487,7 +1560,9 @@ export function createPracticeCallService(deps = {}) {
     if (event.type === 'ended') {
       // The interviewer hanging up leaves the candidate in the call window: the
       // call is only finished, and feedback only generated, when they choose to.
-      if (event.reason === 'interviewer' && call && !call.finished && call.inCall) {
+      // A reply that failed twice is the interviewer's side dropping out: the same thing on screen, with its own wording.
+      if ((event.reason === 'interviewer' || event.reason === 'session-error') && call && !call.finished && call.inCall) {
+        if (event.reason === 'session-error') { call.connectionLost = true; state.connectionLost = true; }
         call.interviewerLeft = true;
         call.interviewerPlaying = false;
         cancelPendingShare(call);
@@ -1511,9 +1586,10 @@ export function createPracticeCallService(deps = {}) {
   }
 
   /** R8: a call that never reached 'in-call' is torn down without a record, mix or analysis. */
-  async function abandonCall(self, failure = null) {
+  async function abandonCall(self, failure = null, { stay = false } = {}) {
     stopElapsedTimer();
     clearJoinTimers(self);
+    for (const name of ['ringTimer', 'holdTimer', 'pickupTimer']) stopTimer(self, name);
     try { self.engine?.hangUp?.(); } catch { /* engine already stopping */ }
     try { await self.helper?.stop?.(); } catch { /* audio owner already stopped */ }
     closeEar(self);
@@ -1531,6 +1607,14 @@ export function createPracticeCallService(deps = {}) {
       setPhase('error');
       return snapshot();
     }
+    if (stay) {
+      // A missed call nobody returned: the interviewer is gone, and the window keeps saying so.
+      if (call !== self) return snapshot();
+      call = null;
+      state.missed = 'expired';
+      setPhase('missed');
+      return snapshot();
+    }
     setPhase('replay');
     const replay = await getReplay(self.callId).catch(() => null);
     if (call === self) call = null;
@@ -1538,7 +1622,57 @@ export function createPracticeCallService(deps = {}) {
     return snapshot();
   }
 
+  /** The line opens: the engine starts and the interviewer speaks first. Reached by answering the ring or by a returned call being picked up. */
+  async function connectCall() {
+    if (!call || call.engine || !['ringing', 'calling', 'connecting'].includes(state.phase)) return snapshot();
+    const self = call;
+    for (const name of ['ringTimer', 'holdTimer', 'pickupTimer']) stopTimer(self, name);
+    setPhase('connecting');
+    try {
+      const engineFactory = await resolve('engineFactory');
+      if (call !== self || self.finished) return snapshot();
+      const panel = self.panel || [];
+      // Always a panel voice, a solo call included: only it can put real silence between two segments (the share setup).
+      // With the lead alone it adds no speakers, so the engine neither sees a panel nor reports speaker changes.
+      const panelVoiceFactory = await resolve('panelVoiceFactory');
+      if (call !== self || self.finished) return snapshot();
+      const voice = panelVoiceFactory({ factories: { A: self.voice, ...Object.fromEntries(panel.map(entry => [entry.id, entry.factory])) }, leadId: 'A' });
+      self.engine = engineFactory({
+        clock, sessions: self.sessions, restartSession: self.restartSession, audio: self.audioMirror,
+        voice, ear: self.ear, onEvent: onEngineEvent, newId,
+        prepared: self.prepared ?? {},
+        // A returned call: the interviewer is told the first ring was missed, and how long ago.
+        ...(self.missedCall ? { callback: { how: self.missedCall.how, agoMs: Math.max(0, clock.now() - self.missedCall.at) } } : {}),
+        ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, present: entry.joined, joined: entry.joined }))] } } : {}),
+        ...(deps.thresholds ? { thresholds: deps.thresholds } : {}),
+      });
+      // The call clock starts when the call is answered; the setup time stays in timings.precheckMs.
+      try {
+        deps.logger?.info?.(`[PracticeCall] rooms ${JSON.stringify([{ id: 'A', amount: self.persona.roomAmount ?? null, room: self.persona.room ?? null }, ...panel.map(entry => ({ id: entry.id, amount: entry.roomAmount ?? null, room: entry.room ?? null }))])}`);
+      } catch { /* logging is best effort */ }
+      const answeredAt = clock.now();
+      self.startedAt = answeredAt;
+      // How far into the recording the answer falls, read off the helper's own clock. Counting
+      // from the helper's launch instead put the lead about 2.5 s too long (measured in the
+      // built app), so that is only the fallback before any helper time has arrived.
+      self.recordingLeadMs = self.helperClock
+        ? Math.max(0, Math.round(self.helperClock.atMs + (answeredAt - self.helperClock.at)))
+        : Math.max(0, Math.round(answeredAt - (self.helperStartedAt ?? answeredAt)));
+      state.elapsedMs = 0;
+      self.engine.start();
+      self.inCall = true;
+      armJoinTimers(self);
+      setPhase('in-call');
+      // R11: the elapsed clock is published once a second while the call runs.
+      startElapsedTimer();
+    } catch (error) { fail('engine-failed', { userMessage: 'Couldn’t join the call. Close this window and try again.' }, error); }
+    return snapshot();
+  }
+
   let finishTask = null;
+  // Set while a finished call waits for the candidate to say whether they want feedback.
+  let settleFeedback = null;
+  const chooseFeedback = wants => { const settle = settleFeedback; settleFeedback = null; if (settle) settle(!!wants); };
   function finishCall(requestedReason = 'candidate', options = {}) {
     if (!call || call.finished) return Promise.resolve(snapshot());
     const task = runFinishCall(requestedReason, options);
@@ -1547,11 +1681,15 @@ export function createPracticeCallService(deps = {}) {
     task.then(forget, forget);
     return task;
   }
-  async function runFinishCall(requestedReason = 'candidate', { analyze: wantsAnalysis = true } = {}) {
+  async function runFinishCall(requestedReason = 'candidate', { analyze = true } = {}) {
     if (!call || call.finished) return snapshot();
     const self = call;
-    const reason = self.interviewerLeft ? 'interviewer' : requestedReason;
-    state.feedbackRequested = !!wantsAnalysis;
+    // A call the interviewer's side dropped out of keeps that as its reason, so the review does not fault the candidate for it.
+    const reason = self.interviewerLeft ? (self.connectionLost ? 'session-error' : 'interviewer') : requestedReason;
+    // 'ask' leaves the choice to the candidate, on the screen after the call.
+    const asks = analyze === 'ask' && self.inCall;
+    let wantsAnalysis = asks ? true : !!analyze;
+    state.feedbackRequested = wantsAnalysis;
     // R7: everything below reads `self`, never the shared `call` handle.
     self.finished = true;
     finishing = true;
@@ -1564,7 +1702,7 @@ export function createPracticeCallService(deps = {}) {
       if (!self.inCall) {
         const quiet = reason === 'candidate' || reason === 'window-closed';
         const code = reason === 'helper-error' ? (typeof self.helperError?.code === 'string' && self.helperError.code ? self.helperError.code : 'capture-failed') : 'call-ended';
-        const message = reason === 'helper-error' ? practiceAudioMessage(code) : 'The practice call ended before it started.';
+        const message = reason === 'helper-error' ? practiceAudioMessage(code) : 'The call ended before it started.';
         return await abandonCall(self, quiet ? null : errorState(code, message));
       }
       const engineState = self.engine?.state?.() || { transcript: [], elapsedMs: onScreenMs(self) };
@@ -1638,10 +1776,22 @@ export function createPracticeCallService(deps = {}) {
         pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
         toneSamples: onCallClock(self.toneSamples.slice()), candidateProsody: onCallClock(candidateProsody), voiceBaseline, recordingLeadMs: leadMs - trimmedMs, thresholds: deps.thresholds ?? null, reason,
-        ...(wantsAnalysis ? {} : { feedbackSkipped: true }),
+        ...(self.missedCall ? { returnedCall: self.missedCall.how } : {}),
+        // Until the candidate chooses, the record reads as a call left without feedback: that is what it is if the window closes now.
+        ...(wantsAnalysis && !asks ? {} : { feedbackSkipped: true }),
       };
       self.record = record;
       await store.writeRecord(self.callId, record);
+      // A call with no answer from the candidate has nothing to review, so there is nothing to ask.
+      const nothingSaid = !(engineState.transcript || []).some(entry => entry?.speaker === 'candidate' && !entry.acknowledgement);
+      if (asks && !nothingSaid) {
+        state.feedbackChoice = 'pending';
+        publish();
+        wantsAnalysis = await new Promise(resolveChoice => { settleFeedback = resolveChoice; });
+        state.feedbackChoice = null;
+        state.feedbackRequested = wantsAnalysis;
+      }
+      if (asks && wantsAnalysis) { delete record.feedbackSkipped; await store.writeRecord(self.callId, record); }
       // What was asked and answered feeds the next call's choice, whether or not feedback was requested.
       // It costs no AI call and a failure here never fails the hang-up.
       if (answered.length) {
@@ -1753,7 +1903,7 @@ export function createPracticeCallService(deps = {}) {
           }
         } catch (error) {
           warn(`[PracticeCall] practice history not updated: ${error?.message || error}`);
-          emitEvent({ type: 'feedback-error', message: 'The practice history could not be updated.' });
+          emitEvent({ type: 'feedback-error', message: 'Your call history could not be updated.' });
         }
       }
       }
@@ -1865,54 +2015,32 @@ export function createPracticeCallService(deps = {}) {
       return downloadModels();
     },
     ready,
-    answer: async () => {
-      if (!call || call.engine || (state.phase !== 'ringing' && state.phase !== 'connecting')) return snapshot();
-      const self = call;
-      setPhase('connecting');
-      try {
-        const engineFactory = await resolve('engineFactory');
-        if (call !== self || self.finished) return snapshot();
-        const panel = self.panel || [];
-        // Always a panel voice, a solo call included: only it can put real silence between two segments (the share setup).
-        // With the lead alone it adds no speakers, so the engine neither sees a panel nor reports speaker changes.
-        const panelVoiceFactory = await resolve('panelVoiceFactory');
-        if (call !== self || self.finished) return snapshot();
-        const voice = panelVoiceFactory({ factories: { A: self.voice, ...Object.fromEntries(panel.map(entry => [entry.id, entry.factory])) }, leadId: 'A' });
-        self.engine = engineFactory({
-          clock, sessions: self.sessions, restartSession: self.restartSession, audio: self.audioMirror,
-          voice, ear: self.ear, onEvent: onEngineEvent, newId,
-          prepared: self.prepared ?? {},
-          ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, present: entry.joined, joined: entry.joined }))] } } : {}),
-          ...(deps.thresholds ? { thresholds: deps.thresholds } : {}),
-        });
-        // The call clock starts when the call is answered; the setup time stays in timings.precheckMs.
-        try {
-          deps.logger?.info?.(`[PracticeCall] rooms ${JSON.stringify([{ id: 'A', amount: self.persona.roomAmount ?? null, room: self.persona.room ?? null }, ...panel.map(entry => ({ id: entry.id, amount: entry.roomAmount ?? null, room: entry.room ?? null }))])}`);
-        } catch { /* logging is best effort */ }
-        const answeredAt = clock.now();
-        self.startedAt = answeredAt;
-        // How far into the recording the answer falls, read off the helper's own clock. Counting
-        // from the helper's launch instead put the lead about 2.5 s too long (measured in the
-        // built app), so that is only the fallback before any helper time has arrived.
-        self.recordingLeadMs = self.helperClock
-          ? Math.max(0, Math.round(self.helperClock.atMs + (answeredAt - self.helperClock.at)))
-          : Math.max(0, Math.round(answeredAt - (self.helperStartedAt ?? answeredAt)));
-        state.elapsedMs = 0;
-        self.engine.start();
-        self.inCall = true;
-        armJoinTimers(self);
-        setPhase('in-call');
-        // R11: the elapsed clock is published once a second while the call runs.
-        startElapsedTimer();
-      } catch (error) { fail('engine-failed', error); }
-      return snapshot();
+    answer: async () => (state.phase === 'ringing' || state.phase === 'connecting' ? connectCall() : snapshot()),
+    decline: () => missCall('declined'),
+    callBack,
+    cancelCallBack,
+    // The candidate's answer to "feedback on this call?", asked after the call. Resolves when the call is fully wrapped up.
+    chooseFeedback: async wants => {
+      chooseFeedback(wants === true);
+      return finishTask ? finishTask.then(() => snapshot(), () => snapshot()) : snapshot();
     },
     // A call already being finished (the window was closed, the app is quitting) is waited for, so
     // whoever asks again gets the state after the recording and record are saved.
-    hangUp: async options => (finishTask ? finishTask.then(() => snapshot(), () => snapshot()) : finishCall('candidate', { analyze: options?.feedback !== false })),
+    // feedback: true or false decides now; 'ask' saves the call and asks on the screen after it.
+    hangUp: async options => {
+      if (finishTask) {
+        // Asked to end without feedback (the app is quitting) while the choice is still open: that is the choice.
+        if (options?.feedback === false) chooseFeedback(false);
+        return finishTask.then(() => snapshot(), () => snapshot());
+      }
+      return finishCall('candidate', { analyze: options?.feedback === 'ask' ? 'ask' : options?.feedback !== false });
+    },
     // The window was closed without choosing how to leave. Nobody is there to read a review, so none
     // is written: the recording and transcript are saved and nothing more is spent on transcription or Claude.
-    abandon: async () => (call && !call.finished ? finishCall('window-closed', { analyze: false }) : snapshot()),
+    abandon: async () => {
+      chooseFeedback(false);
+      return call && !call.finished ? finishCall('window-closed', { analyze: false }) : snapshot();
+    },
     setMuted: muted => {
       state.muted = !!muted;
       try { call?.audioMirror?.mute(!!muted); } catch { /* mute is best effort */ }

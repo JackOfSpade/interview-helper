@@ -250,9 +250,9 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const shownPad = padSnapshotAt(replay?.pad, positionMs);
   const hasShare = (Array.isArray(replay?.screens) && replay.screens.length > 0) || (Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0);
   // The review leads: it is what the call window turns into once processing is done.
-  return <main className="min-h-screen bg-[#202124] p-4 text-violet-50" aria-label="Practice call replay">
+  return <main className="min-h-screen bg-[#202124] p-4 text-violet-50" aria-label="Call replay">
     <header className="pc-rise flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
-      <h1 className="text-lg font-normal text-white">{hasFeedback ? 'Your call feedback' : 'Practice call replay'}</h1>
+      <h1 className="text-lg font-normal text-white">{hasFeedback ? 'Your call feedback' : 'Call replay'}</h1>
       <div className="flex items-center gap-1">
         <button type="button" aria-label={playing ? 'Pause recording' : 'Play recording'} onClick={togglePlay} disabled={!audioUrl}
           className="flex items-center gap-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-violet-100 hover:bg-white/5 disabled:opacity-40">

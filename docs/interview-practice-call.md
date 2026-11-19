@@ -273,6 +273,42 @@ by itself. When setup finishes the service stays in `precheck` with
 (`ready`) clears the screen to "Waiting for call…" and the call rings 3 to 7
 seconds later. `readyGate: false` (the unit suites) rings at once.
 
+**Missed call and call back (2026-11-19).** The ring is the "Meeting app" chime
+(`startRingtone` in `src/practice-call/ringtone.js`). A ring that is declined
+(`decline`) or not answered within 30 seconds (`RING_TIMEOUT_MS`) does not end
+anything: the service moves to phase `missed` with `missed: 'declined'` or
+`'unanswered'`, and the window shows the caller with Call back and Close. The
+microphone, the recording and the three warm sessions stay up. Call back
+(`callBack`) moves to phase `calling` (outgoing tone, `startRingback`); the
+interviewer picks up 3.5 to 8 seconds later and the call connects as usual.
+Hanging up before that (`cancelCallBack`) returns to `missed`. The engine gets
+`callback: { how, agoMs }` and the first message becomes `[call connected: the
+candidate is calling you back. You called them and it rang out with no answer
+about 3 minutes ago.]`; the OPENING section tells the interviewer to thank them
+for calling back, not to dwell on it, and then open as usual. The saved record
+carries `returnedCall`. A missed call nobody returns within 10 minutes
+(`MISSED_HOLD_MS`) is let go: everything is torn down, no record is kept, and
+the window stays on the missed call with `missed: 'expired'` and no Call back.
+Closing the window on a missed call abandons it quietly. Unit-tested only: not
+yet tried in the built app.
+
+**A failed reply reads as a dropped connection (2026-11-19).** When the
+interviewer's reply fails twice (engine end reason `session-error`) the call
+screen stays up, as it does when the interviewer hangs up, with "<name> lost
+their connection" (`state.connectionLost`). The candidate leaves when they
+choose, and the record keeps `reason: 'session-error'`, so the review still
+treats it as a technical ending.
+
+**Feedback is chosen after the call (2026-11-19).** The red button asks only
+"Leave the call?" (and nothing at all once the interviewer has gone). The
+window calls `leave`, which is `hangUp({ feedback: 'ask' })`: the call is saved
+as one left without feedback, the service waits in phase `ended` with
+`feedbackChoice: 'pending'`, and the ended screen asks "Want feedback on this
+call?". `chooseFeedback(true)` runs the transcription and review;
+`chooseFeedback(false)`, closing the window or quitting the app keeps the
+recording and transcript only. A call in which the candidate said nothing is
+not asked. `hangUp({ feedback: true | false })` still decides at once.
+
 **Time and silence.** Every message carries the elapsed time. Silence is
 reported as `[candidate silent 10s]`.
 

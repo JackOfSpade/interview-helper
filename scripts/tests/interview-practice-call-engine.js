@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
+import { connectedMarker, createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
 import { createReplyStreamParser } from '../../electron/interviewPracticeCallPrompt.js';
 
 // Synthetic data only: every name, sentence and word below is invented for the tests.
@@ -61,7 +61,7 @@ export const HELPER_OFFSET = 5000;
 
 const bare = entry => { const rest = { ...entry }; delete rest.startMs; delete rest.endMs; return rest; };
 
-export function makeRig({ thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared } = {}) {
+export function makeRig({ thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback } = {}) {
   const clock = fakeClock();
   const events = [];
   const ops = [];
@@ -122,6 +122,7 @@ export function makeRig({ thresholds, restartFails = false, ear = null, panel, s
   const engine = createPracticeCallEngine({
     clock, sessions: { ...sessions }, restartSession, audio, voice, ear, thresholds: { speculateMs: 600, ...thresholds }, ...(panel ? { panel } : {}), ...(createParser ? { createParser } : {}), ...(formatTurn ? { formatTurn } : {}), ...(prepared ? { prepared } : {}), // the rig pins the 600 ms speculation point its timings assume; defaults are tested separately
     onEvent: event => events.push(event), newId: () => `utt${++counter}`,
+    ...(callback ? { callback } : {}),
   });
   // The helper's clock is not the engine clock: helper atMs = clock ms - HELPER_OFFSET. Callers pass clock times.
   const helper = {
@@ -205,6 +206,20 @@ test('start sends only the connect message to main and speaks its reply without 
   rig.h.playback('utt1', 'started');
   assert.equal(rig.engine.state().phase, 'playing');
   assert.deepEqual(rig.engine.state().transcript.map(bare), [{ speaker: 'interviewer', text: 'Hello, welcome.' }]);
+});
+
+test('a returned call tells the interviewer the first ring was missed, inside the connect marker', async () => {
+  assert.equal(connectedMarker(null), '[call connected]');
+  assert.equal(connectedMarker({ how: 'nonsense', agoMs: 5 }), '[call connected]', 'an unknown reason is a plain call');
+  assert.equal(connectedMarker({ how: 'unanswered', agoMs: 20_000 }), '[call connected: the candidate is calling you back. You called them and it rang out with no answer a moment ago.]');
+  assert.equal(connectedMarker({ how: 'declined', agoMs: 60_000 }), '[call connected: the candidate is calling you back. You called them and they declined the call about 1 minute ago.]');
+  assert.equal(connectedMarker({ how: 'unanswered', agoMs: 190_000 }).includes('about 3 minutes ago'), true);
+  const rig = makeRig({ callback: { how: 'unanswered', agoMs: 190_000 } });
+  rig.engine.start();
+  await flush();
+  assert.equal(rig.sessions.main.calls.length, 1);
+  assert.equal(rig.sessions.main.calls[0].message, '[elapsed 00:00] [call connected: the candidate is calling you back. You called them and it rang out with no answer about 3 minutes ago.]');
+  assert.equal(rig.sessions.opener.calls.length, 0, 'the greeting still needs no opener');
 });
 
 test('speculation runs opener and main in parallel and only plays at the commit threshold', async () => {

@@ -24,6 +24,8 @@ async function loadServerBundle() {
     DownloadingScreen: 'DownloadingScreen.jsx',
     PrecheckScreen: 'PrecheckScreen.jsx',
     IncomingCall: 'IncomingCall.jsx',
+    MissedCall: 'MissedCall.jsx',
+    OutgoingCall: 'OutgoingCall.jsx',
     ConnectingScreen: 'ConnectingScreen.jsx',
     InCall: 'InCall.jsx',
     ChatPanel: 'ChatPanel.jsx',
@@ -306,7 +308,7 @@ export default [
       try {
         const { React, renderToStaticMarkup, ConsentScreen } = bundle.module;
         const markup = renderToStaticMarkup(React.createElement(ConsentScreen, { onAgree: () => {}, busy: false }));
-        for (const fragment of ['aria-label="Model downloads"', '32 MB', '610 MB', 'Agree and download', 'Practice call']) {
+        for (const fragment of ['aria-label="Model downloads"', '32 MB', '610 MB', 'Agree and download', 'Set up your call', 'AI voice']) {
           assert(markup.includes(fragment), `consent screen is missing ${fragment}`);
         }
         const busy = renderToStaticMarkup(React.createElement(ConsentScreen, { onAgree: () => {}, busy: true }));
@@ -321,7 +323,7 @@ export default [
       try {
         const { React, renderToStaticMarkup, DownloadingScreen, PrecheckScreen } = bundle.module;
         const downloading = renderToStaticMarkup(React.createElement(DownloadingScreen, { download: { receivedBytes: 50 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 } }));
-        for (const fragment of ['role="progressbar"', 'aria-valuenow="50"', '50%', 'Downloading practice models']) {
+        for (const fragment of ['role="progressbar"', 'aria-valuenow="50"', '50%', 'Downloading call files']) {
           assert(downloading.includes(fragment), `downloading screen is missing ${fragment}`);
         }
         const precheck = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0.42, usageWarning: 'Use real examples only.', persona: PERSONA, setup: { step: 'plan', attempt: 2 } }));
@@ -330,7 +332,7 @@ export default [
         assert(/data-status="pending"[^>]*>(?:(?!<\/li>).)*Turning on your microphone/.test(precheck), 'a later setup step is still pending');
         assert(precheck.includes('not on yet'), 'the meter says the microphone is not on while the plan is written');
         assert(!/say something/i.test(precheck), 'the setup screen must not ask the candidate to speak: nothing waits on the microphone');
-        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
+        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'video stays on this Mac and is never recorded or sent', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
           assert(precheck.includes(fragment), `precheck screen is missing ${fragment}`);
         }
         const quiet = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, usageWarning: null, persona: PERSONA, setup: { step: 'plan', attempt: 1 } }));
@@ -339,13 +341,13 @@ export default [
     },
   },
   {
-    name: 'practice call render: ringing shows the persona with answer and decline, and the ringtone is two Web Audio tones that stop',
+    name: 'practice call render: ringing shows the persona with answer and decline, and the ringtone is a Web Audio chime that stops',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, IncomingCall, ringtone } = bundle.module;
         const markup = renderToStaticMarkup(React.createElement(IncomingCall, { persona: PERSONA, onAnswer: () => {}, onDecline: () => {} }));
-        for (const fragment of ['aria-label="Incoming practice call"', 'Dana Whitfield', 'Hiring manager · Growth', 'aria-label="Answer call"', 'aria-label="Decline call"']) {
+        for (const fragment of ['aria-label="Incoming call"', '>Incoming call<', 'Dana Whitfield', 'Hiring manager · Growth', 'aria-label="Answer call"', 'aria-label="Decline call"']) {
           assert(markup.includes(fragment), `incoming call screen is missing ${fragment}`);
         }
         const created = [];
@@ -362,8 +364,16 @@ export default [
           close() { context.closed = true; }
         }
         const stop = ringtone.startRingtone({ AudioContext: FakeAudioContext });
-        assert(created.length === 2, `the ring must synthesise two tones, got ${created.length}`);
-        assert(JSON.stringify(created.map(oscillator => oscillator.frequencies[0])) === '[440,480]', 'the ring must alternate two distinct tones');
+        // Two passes of four notes, each note with two overtones.
+        assert(created.length === 24, `the ring must synthesise the chime twice, got ${created.length} tones`);
+        const notes = created.filter((_, index) => index % 3 === 0).map(oscillator => oscillator.frequencies[0]);
+        assert(JSON.stringify(notes) === JSON.stringify([...ringtone.RING_NOTES, ...ringtone.RING_NOTES]), 'the ring is the rising four-note chime, played twice');
+        assert(notes.slice(0, 4).every((hertz, index) => index === 0 || hertz > notes[index - 1]), 'the chime rises');
+        const before = created.length;
+        const stopRingback = ringtone.startRingback({ AudioContext: FakeAudioContext });
+        assert(created.length === before + 4 && created.slice(before).every(oscillator => [440, 480].includes(oscillator.frequencies[0])), 'the outgoing tone is two soft low notes');
+        stopRingback();
+        context.closed = false;
         assert(context.closed === false, 'the ring keeps playing until it is stopped');
         stop();
         assert(context.closed === true, 'stopping the ring must close the audio context');
@@ -388,7 +398,7 @@ export default [
       try {
         const { React, renderToStaticMarkup, ConnectingScreen, ErrorScreen } = bundle.module;
         const connecting = renderToStaticMarkup(React.createElement(ConnectingScreen, { persona: PERSONA }));
-        for (const fragment of ['aria-label="Connecting practice call"', 'Connecting to Dana Whitfield', 'role="status"']) {
+        for (const fragment of ['aria-label="Connecting call"', 'Connecting to Dana Whitfield', 'role="status"']) {
           assert(connecting.includes(fragment), `connecting screen is missing ${fragment}`);
         }
         const failed = renderToStaticMarkup(React.createElement(ErrorScreen, { error: { code: 'mic-denied', message: 'The microphone is not available.' }, onClose: () => {} }));
@@ -411,9 +421,9 @@ export default [
         const { React, renderToStaticMarkup, InCall } = bundle.module;
         const markup = renderToStaticMarkup(React.createElement(InCall, { state: IN_CALL_STATE, api: { setMuted: () => {}, hangUp: () => {}, getPreparedCards: async () => [], sendChat: () => {}, setTyping: () => {} } }));
         for (const fragment of [
-          'aria-label="Practice call in progress"', 'aria-label="Interviewer"', 'data-speaking="true"', '>D<',
+          'aria-label="Call in progress"', 'aria-label="Dana Whitfield"', 'data-speaking="true"', '>D<',
           'role="timer"', '1:12', 'aria-label="Mute microphone"', 'aria-pressed="false"',
-          'aria-label="Captions"', 'aria-label="Prepared answer cards"', 'aria-label="Chat"', 'aria-label="Hang up"',
+          'aria-label="Captions"', 'aria-label="Notes"', 'aria-label="Chat"', 'aria-label="Hang up"',
           'aria-label="Your camera"', 'data-camera="off"', 'aria-label="Turn on camera"', 'Camera off',
         ]) assert(markup.includes(fragment), `in-call view is missing ${fragment}`);
         for (const hidden of ['aria-label="Live captions"', 'aria-label="Call chat"', '<video', 'I led the onboarding rewrite.']) {
@@ -434,7 +444,7 @@ export default [
         }
         assert(!markup.includes('Interviewer is typing') && !markup.includes('chat-typing'), 'the candidate typing must not be shown as the interviewer typing');
         const left = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], disabled: true, onSend: () => {}, onTyping: () => {} }));
-        assert(left.includes('disabled=""') && left.includes('The interviewer left the call'), 'the chat box is disabled once the interviewer left');
+        assert(left.includes('disabled=""') && left.includes('No one else is in the call.'), 'the chat box is disabled once the interviewer left');
       } finally { await bundle.dispose(); }
     },
   },
@@ -449,7 +459,7 @@ export default [
         const area = on.match(/<textarea[^>]*>/)[0];
         assert(!area.includes('disabled=""'), 'the textarea stays editable while paused');
         assert(/<button[^>]*aria-label="Send chat message"[^>]*disabled=""/.test(on) || /<button[^>]*disabled=""[^>]*aria-label="Send chat message"/.test(on), 'send is disabled while paused');
-        assert(on.includes('Paused. Press ⌘P to resume and send.') && on.includes('kept'));
+        assert(on.includes('kept') && !on.includes('Paused'), 'the draft is kept; the pause notice is the overlay on the call screen, not a line in the panel');
         const off = chat(false);
         assert(!off.includes('Press ⌘P') && !/<button[^>]*aria-label="Send chat message"[^>]*disabled=""/.test(off));
         const padOn = renderToStaticMarkup(React.createElement(CodingPad, { initialText: 'x', paused: true, onChange: () => {}, onTyping: () => {} }));
@@ -476,8 +486,28 @@ export default [
         assert(analysing.includes('data-stage="recording" data-status="active"'), 'an unreported stage reads as the first step in progress');
         assert(!analysing.includes('data-status="done"'), 'no step is shown finished before the service reports progress');
         const ended = renderToStaticMarkup(React.createElement(EndedScreen, { state: { phase: 'ended', elapsedMs: 5_000 } }));
-        for (const fragment of ['aria-label="Call ended"', 'being analysed', '0:05']) {
+        for (const fragment of ['aria-label="Call ended"', 'The recording is being saved.', '0:05', 'You left the call']) {
           assert(ended.includes(fragment), `ended screen is missing ${fragment}`);
+        }
+        const choosing = renderToStaticMarkup(React.createElement(EndedScreen, { state: { phase: 'ended', feedbackChoice: 'pending', interviewerLeft: true, elapsedMs: 5_000 } }));
+        for (const fragment of ['aria-label="Feedback choice"', 'Want feedback on this call?', 'Get feedback', 'Skip feedback', '>Call ended<']) {
+          assert(choosing.includes(fragment), `the feedback choice is missing ${fragment}`);
+        }
+        assert(!choosing.includes('aria-label="Processing steps"') && !choosing.includes('You left the call'), 'while choosing, no processing steps are shown, and a call the interviewer ended does not say the candidate left');
+        // No screen of the call window calls it practice, before or after the call.
+        const { ConsentScreen, DownloadingScreen, PrecheckScreen, MissedCall, OutgoingCall, ErrorScreen } = bundle.module;
+        const screens = {
+          consent: React.createElement(ConsentScreen, { onAgree: () => {}, busy: false }),
+          downloading: React.createElement(DownloadingScreen, { download: { receivedBytes: 1, totalBytes: 2 } }),
+          precheck: React.createElement(PrecheckScreen, { level: 0, persona: PERSONA, setup: { step: 'ready', attempt: 1 } }),
+          missed: React.createElement(MissedCall, { persona: PERSONA, missed: 'unanswered' }),
+          calling: React.createElement(OutgoingCall, { persona: PERSONA }),
+          ended: React.createElement(EndedScreen, { state: { phase: 'ended', elapsedMs: 1, persona: PERSONA } }),
+          analysing: React.createElement(EndedScreen, { state: { phase: 'analyzing', analysisStage: 'saving', elapsedMs: 1, persona: PERSONA } }),
+          error: React.createElement(ErrorScreen, { error: null }),
+        };
+        for (const [name, element] of Object.entries(screens)) {
+          assert(!/practice/iu.test(renderToStaticMarkup(element).replace(/<[^>]*>/gu, ' ')), `the ${name} screen must not say practice`);
         }
       } finally { await bundle.dispose(); }
     },
@@ -490,7 +520,7 @@ export default [
         const { React, renderToStaticMarkup, Replay } = bundle.module;
         const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: { deleteRecording: async () => {} }, initialPositionMs: 140_000 }));
         for (const fragment of [
-          'aria-label="Practice call replay"', '<audio', 'src="file:///tmp/practice-calls/call-dana-1.wav"', 'aria-label="Call recording"',
+          'aria-label="Call replay"', '<audio', 'src="file:///tmp/practice-calls/call-dana-1.wav"', 'aria-label="Call recording"',
           'aria-label="Play recording"', 'role="slider"', 'aria-valuemax="600000"', 'aria-valuenow="140000"', 'aria-valuetext="2:20 of 10:00, Onboarding story"',
           'data-chapter="0"', 'data-chapter="1"', 'data-chapter="2"', 'style="left:20%;width:calc(50% - 2px);transform:scaleY(0.6)"',
           ...MARKERS_BY_KIND,
@@ -556,6 +586,12 @@ export default [
             agreeModelDownload: async () => { invoked.push('agree'); },
             ready: async () => { invoked.push('ready'); },
             hangUp: async options => { hangUps.push(options); },
+            leave: async () => { invoked.push('leave'); },
+            decline: async () => { invoked.push('decline'); },
+            callBack: async () => { invoked.push('callBack'); },
+            cancelCallBack: async () => { invoked.push('cancelCallBack'); },
+            chooseFeedback: async wants => { invoked.push(`feedback:${wants}`); },
+            close: async () => { invoked.push('close'); },
             getReplay: async () => REPLAY,
           };
           const root = bundle.module.createRoot(window.document.getElementById('root'));
@@ -564,7 +600,7 @@ export default [
           const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
           try {
             await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
-            assert(byLabel('Practice call setup'), 'the consent phase renders once getState resolves');
+            assert(byLabel('Call setup'), 'the consent phase renders once getState resolves');
             await act(() => [...window.document.querySelectorAll('button')].find(node => node.textContent === 'Agree and download').click());
             assert(invoked.includes('agree'), 'agreeing must call agreeModelDownload');
             await push({ phase: 'downloading', modelDownload: { receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 } });
@@ -582,23 +618,63 @@ export default [
             assert(byLabel('Waiting for call')?.textContent.startsWith('Waiting for call'), 'after Ready only the wait is shown');
             assert(!byLabel('Setup progress') && !window.document.querySelector('button'), 'the setup card is gone while waiting');
             await push({ phase: 'ringing', persona: PERSONA });
+            assert(window.document.title === 'Incoming call', `the ringing window is titled as a call, got ${window.document.title}`);
+            assert(!/practice/iu.test(window.document.body.textContent), 'the ring screen never says practice');
             assert(byLabel('Answer call') && byLabel('Decline call'), 'ringing must offer Answer and Decline');
+            // Declining, or letting it ring out, leaves a missed call that can be returned.
+            await act(() => byLabel('Decline call').click());
+            assert(invoked.includes('decline') && hangUps.length === 0, 'declining must not hang up: the window stays');
+            await push({ phase: 'missed', missed: 'declined', persona: PERSONA });
+            assert(byLabel('Call declined')?.textContent.includes('Dana Whitfield') && window.document.title === 'Missed call', 'a declined ring stays on screen as a missed call');
+            await push({ phase: 'missed', missed: 'unanswered', persona: PERSONA });
+            assert(byLabel('Missed call')?.textContent.includes('Dana tried to reach you.'), 'a ring that rang out is a missed call');
+            assert(!/practice/iu.test(window.document.body.textContent), 'the missed call screen never says practice');
+            await act(() => byLabel('Call back').click());
+            assert(invoked.includes('callBack'), 'Call back returns the call');
+            await push({ phase: 'calling', persona: PERSONA });
+            assert(byLabel('Calling')?.textContent.includes('Dana Whitfield') && window.document.title === 'Calling Dana Whitfield', 'the returned call rings out to the caller');
+            await act(() => byLabel('End call').click());
+            assert(invoked.includes('cancelCallBack'), 'ending the outgoing call cancels it');
+            await push({ phase: 'missed', missed: 'expired', persona: PERSONA });
+            assert(!byLabel('Call back') && byLabel('Missed call')?.textContent.includes('Dana is no longer available.'), 'a call nobody returned in time can no longer be returned');
+            await act(() => byLabel('Close').click());
+            assert(invoked.includes('close'), 'Close closes the window');
+            await push({ phase: 'connecting', persona: PERSONA });
+            assert(byLabel('Connecting call'), 'a picked-up call connects');
             await push({ phase: 'in-call', persona: PERSONA, elapsedMs: 65_000, speaking: 'interviewer' });
+            assert(window.document.title === 'Dana Whitfield', `the call window is titled with the caller, got ${window.document.title}`);
+            assert(!/practice|\bAI\b/iu.test(window.document.body.textContent), 'the call screen never says practice or AI');
             assert(byLabel('Hang up') && byLabel('Mute microphone') && byLabel('Captions'), 'in-call must expose the control bar');
             assert(byLabel('Call timer')?.textContent === '1:05', 'the in-call timer must follow elapsedMs');
             // The interviewer leaving keeps the call screen up; the red button asks how to leave.
             await push({ interviewerLeft: true, speaking: null });
-            assert(byLabel('Interviewer left')?.textContent.includes('Dana Whitfield left the call'), 'the call screen must say the interviewer left');
+            assert(byLabel('Dana Whitfield left')?.textContent.includes('Dana Whitfield left the call'), 'the call screen must say the interviewer left');
             assert(byLabel('Hang up') && !byLabel('Leave the call'), 'the call stays up with no dialog until Hang up is pressed');
+            // A dropped connection reads as one, not as a goodbye.
+            await push({ connectionLost: true });
+            assert(byLabel('Dana Whitfield left')?.textContent.includes('Dana Whitfield lost their connection'), 'a dropped interviewer is shown as a lost connection');
+            // Mid-interview the red button asks first, and the dialog says nothing about feedback or AI.
+            await push({ interviewerLeft: false, connectionLost: false });
             await act(() => byLabel('Hang up').click());
-            assert(hangUps.length === 0, 'pressing Hang up alone must not end the call');
+            assert(!invoked.includes('leave'), 'pressing Hang up mid-interview must not end the call by itself');
             const choices = [...byLabel('Leave the call').querySelectorAll('button')].map(node => node.textContent);
-            assert(choices.join('|') === 'Leave and generate feedback|Leave without feedback|Stay on the call', `unexpected leave choices: ${choices.join('|')}`);
+            assert(choices.join('|') === 'Leave call|Stay on the call', `unexpected leave choices: ${choices.join('|')}`);
+            assert(!/feedback|\bAI\b|practice/iu.test(byLabel('Leave the call').textContent), 'the leave dialog stays inside the call');
             await act(() => [...byLabel('Leave the call').querySelectorAll('button')].find(node => node.textContent === 'Stay on the call').click());
             assert(!byLabel('Leave the call') && byLabel('Hang up'), 'staying closes the dialog and keeps the call');
+            // Once the interviewer has gone there is nothing to confirm: the red button leaves.
+            await push({ interviewerLeft: true });
             await act(() => byLabel('Hang up').click());
-            await act(() => [...byLabel('Leave the call').querySelectorAll('button')].find(node => node.textContent === 'Leave without feedback').click());
-            assert(hangUps.length === 1 && hangUps[0]?.feedback === false, 'leaving without feedback must pass feedback: false');
+            assert(invoked.filter(name => name === 'leave').length === 1 && hangUps.length === 0 && !byLabel('Leave the call'), 'leaving ends the call without choosing about feedback');
+            // The choice about feedback comes after the call.
+            await push({ phase: 'ended', feedbackChoice: null, feedbackRequested: true });
+            assert(!byLabel('Feedback choice'), 'nothing is asked while the call is still being saved');
+            await push({ phase: 'ended', feedbackChoice: 'pending' });
+            const asked = byLabel('Feedback choice');
+            assert(asked?.textContent.includes('uses AI to transcribe and review the recording'), 'the screen after the call says what feedback costs');
+            await act(() => [...asked.querySelectorAll('button')].find(node => node.textContent === 'Skip feedback').click());
+            await act(() => [...byLabel('Feedback choice').querySelectorAll('button')].find(node => node.textContent === 'Get feedback').click());
+            assert(invoked.includes('feedback:false') && invoked.includes('feedback:true'), 'both answers reach the service');
             await push({ phase: 'replay' });
             assert(byLabel('Replay position')?.getAttribute('aria-valuemax') === '600000', 'replay must render the loaded replay payload');
           } finally { await act(() => root.unmount()); }
@@ -747,7 +823,7 @@ export default [
     },
   },
   {
-    name: 'practice call render: Decline hangs up without feedback and a replay window shows the replay whatever the call state says',
+    name: 'practice call render: Decline keeps the window and a replay window shows the replay whatever the call state says',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
       const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
@@ -773,7 +849,7 @@ export default [
                 assert(byLabel('Replay position') && replayLoads >= 1, 'a replay window loads and shows the replay instead of the precheck screen');
               } else {
                 await act(() => byLabel('Decline call').click());
-                assert(hangUps.length === 1 && hangUps[0]?.feedback === false, 'declining must pass feedback: false so the window closes');
+                assert(hangUps.length === 0, 'declining never hangs up: the missed call stays on screen');
               }
             } finally { await act(() => root.unmount()); }
           });
@@ -1177,9 +1253,12 @@ export default [
         const { React, renderToStaticMarkup, InCall } = bundle.module;
         const api = { setMuted: () => {}, hangUp: () => {}, getPreparedCards: async () => [], sendChat: () => {}, setTyping: () => {}, setPaused: () => {} };
         const running = renderToStaticMarkup(React.createElement(InCall, { state: IN_CALL_STATE, api }));
-        assert(!running.includes('Paused'), 'no pill while running');
+        assert(!/paused/iu.test(running), 'no pause notice while running');
         const paused = renderToStaticMarkup(React.createElement(InCall, { state: { ...IN_CALL_STATE, paused: true }, api }));
-        assert(paused.includes('Paused \u00b7 press P to resume'), 'the pill names the key');
+        const overlay = paused.match(/<p[^>]*data-paused="true"[^>]*>.*?<\/p>/u)?.[0] || '';
+        assert(overlay.includes('PAUSED') && overlay.includes('Press P to resume (⌘P while typing)'), 'the overlay names the key');
+        assert(overlay.includes('fixed') && overlay.includes('pointer-events-none') && overlay.includes('role="status"'), 'the overlay floats over the window and takes no clicks or layout room');
+        assert(!/paused/iu.test(paused.match(/<footer.*?<\/footer>/su)?.[0] ?? 'paused'), 'nothing about the pause sits in the footer');
         assert(paused.includes('1:12'), 'the timer shows the frozen published time');
       } finally { await bundle.dispose(); }
     },

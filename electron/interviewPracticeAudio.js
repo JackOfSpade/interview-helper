@@ -5,11 +5,11 @@ export const PRACTICE_AUDIO_MESSAGES = Object.freeze({
   'permission-denied': 'The call needs your microphone. Start the call again and choose Allow when macOS asks, or open Microphone settings and switch on Interview Helper.',
   'unsupported-locale': 'English on-device speech recognition is unavailable on this Mac, so the call can’t continue.',
   'speech-assets': 'English on-device speech assets could not be prepared. Check your connection, then retry the call.',
-  'unsupported-platform': 'Practice calls require Apple Silicon and macOS 26 or later.',
-  'helper-unavailable': 'The practice audio helper is unavailable. Install an updated application build to start a call.',
-  'capture-failed': 'Microphone capture stopped, so the call can’t continue. Check your microphone, then retry.',
-  'recognition-failed': 'On-device transcription stopped, so the call can’t continue. Retry the call.',
-  'playback-failed': 'The interviewer’s voice could not be played. Check your sound output, then retry the call.',
+  'unsupported-platform': 'Calls require Apple Silicon and macOS 26 or later.',
+  'helper-unavailable': 'The call audio helper is unavailable. Install an updated application build to start a call.',
+  'capture-failed': 'Your microphone stopped working, so the call can’t continue. Check your microphone, then retry.',
+  'recognition-failed': 'Your audio stopped coming through, so the call can’t continue. Retry the call.',
+  'playback-failed': 'The call audio could not be played. Check your sound output, then retry the call.',
   'recording-failed': 'The call recording could not be saved, so the call can’t continue. Retry the call.',
 });
 

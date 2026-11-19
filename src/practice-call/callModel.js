@@ -1,7 +1,7 @@
 // Pure view-model helpers for the practice-call window. They live in a plain
 // .js module so the screen modules only export components (react-refresh).
 
-export const MISSING_PRELOAD = Object.freeze({ phase: 'error', error: { code: 'preload-missing', message: 'The practice call window could not reach its main process. Close it and start the call again from the hub.' } });
+export const MISSING_PRELOAD = Object.freeze({ phase: 'error', error: { code: 'preload-missing', message: 'The call window could not reach the app. Close it and start the call again from the hub.' } });
 
 // The replay state shown when the saved call cannot be read; a fresh object each time.
 export const replayLoadFailed = () => ({ audioUrl: null, durationMs: 0, transcript: [], chapters: [], feedback: null, analysis: { status: 'failed', error: 'The replay could not be loaded.' } });
@@ -55,7 +55,7 @@ export const ANALYSIS_STAGES = Object.freeze([
   { key: 'transcribing', label: 'Transcribing your answers' },
   { key: 'metrics', label: 'Measuring pace, pauses and tone' },
   { key: 'review', label: 'Writing the feedback' },
-  { key: 'saving', label: 'Saving to your practice history' },
+  { key: 'saving', label: 'Saving to your call history' },
 ]);
 
 // An unknown or missing stage reads as the first step, never as a finished one.
@@ -118,3 +118,23 @@ export const elapsedLabel = ms => {
   const seconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
 };
+
+/** The window title while the call is live; null leaves the app's own title in place. */
+export function callTitle(phase, callerName) {
+  if (phase === 'ringing') return 'Incoming call';
+  if (phase === 'missed') return 'Missed call';
+  if (phase === 'calling') return callerName ? `Calling ${callerName}` : 'Calling';
+  if (phase === 'connecting' || phase === 'in-call') return callerName || 'Call';
+  return null;
+}
+
+/**
+ * What the missed-call screen says. `missed` is how the ring ended ('declined' or 'unanswered'),
+ * or 'expired' once the caller has stopped waiting for the call to be returned.
+ */
+export function missedCallView(missed, firstName) {
+  const who = firstName || 'They';
+  if (missed === 'expired') return { label: 'Missed call', detail: `${who} ${firstName ? 'is' : 'are'} no longer available.`, canCallBack: false };
+  if (missed === 'declined') return { label: 'Call declined', detail: `${who} tried to reach you.`, canCallBack: true };
+  return { label: 'Missed call', detail: `${who} tried to reach you.`, canCallBack: true };
+}

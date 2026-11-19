@@ -115,12 +115,32 @@ function sentenceAt(reply, positionMs) {
   return reply.parts[reply.parts.length - 1];
 }
 
+/** "just now", "about 3 minutes ago": how long ago the missed ring was, the way a person would put it. */
+function agoWords(agoMs) {
+  const seconds = Math.max(0, Number(agoMs) || 0) / 1000;
+  if (seconds < 45) return 'a moment ago';
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `about ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+}
+
+/**
+ * The first message of the call. A plain call is [call connected]; a returned call says so inside
+ * the same marker, with what happened to the first ring and how long ago.
+ */
+export function connectedMarker(callback) {
+  const how = callback?.how;
+  if (how !== 'declined' && how !== 'unanswered') return '[call connected]';
+  const earlier = how === 'declined' ? 'You called them and they declined the call' : 'You called them and it rang out with no answer';
+  return `[call connected: the candidate is calling you back. ${earlier} ${agoWords(callback.agoMs)}.]`;
+}
+
 export function createPracticeCallEngine({
   clock, sessions, restartSession, audio, voice, ear = null,
   thresholds = DEFAULT_CALL_THRESHOLDS, onEvent = () => {}, newId, panel = null,
   formatTurn = formatTurnMessage, // seam for tests: they assert on the options passed
   createParser = createReplyStreamParser, // seam for tests; the main reply is the only stream that carries asked tags
   prepared = {}, // { [ref]: { parts: [{ title, content }] } }: screens written before the call, shown by reference
+  callback = null, // { how: 'declined' | 'unanswered', agoMs }: the candidate is returning a call they missed
 }) {
   const th = { ...DEFAULT_CALL_THRESHOLDS, ...thresholds };
   const live = { opener: sessions.opener, main: sessions.main, classifier: sessions.classifier };
@@ -406,7 +426,7 @@ export function createPracticeCallEngine({
     const presence = presenceNow();
     const absentHandover = greeting ? [] : handoverNames();
     const unknownSpeaker = !greeting && unknownPending;
-    if (greeting) reply.messages = { main: `${prefix}[elapsed 00:00] [call connected]${presence ? ` ${presenceNote(presence)}` : ''}` };
+    if (greeting) reply.messages = { main: `${prefix}[elapsed 00:00] ${connectedMarker(callback)}${presence ? ` ${presenceNote(presence)}` : ''}` };
     else {
       const base = {
         elapsedMs: elapsed(), candidateText: text, channel, silenceMs, acknowledgements: pendingAcks.slice(),

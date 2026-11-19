@@ -3,12 +3,12 @@ import { ShieldCheck } from 'lucide-react';
 import { MODEL_SIZES } from './callModel.js';
 
 export default function ConsentScreen({ onAgree, busy }) {
-  return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Practice call setup">
+  return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Call setup">
     <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#2d2e30] p-4">
-      <h1 className="text-base font-semibold text-violet-100">Practice call</h1>
-      <p className="text-[12px] text-white/70">An AI interviewer calls you in this window. It hears you through the microphone on this Mac, answers in a voice you can play back, and analyses the call afterwards.</p>
+      <h1 className="text-base font-semibold text-violet-100">Set up your call</h1>
+      <p className="text-[12px] text-white/70">Your interviewer calls you in this window. They hear you through the microphone on this Mac and answer in an AI voice; the call is recorded so you can play it back, and it can be analysed afterwards.</p>
       <div className="rounded-lg border border-white/10 bg-black/20 p-2">
-        <p className="text-[10px] font-semibold uppercase text-white/45">Models downloaded once</p>
+        <p className="text-[10px] font-semibold uppercase text-white/45">Downloaded once</p>
         <ul className="mt-1 space-y-1" aria-label="Model downloads">
           {MODEL_SIZES.map(model => <li key={model.name} className="flex items-baseline justify-between gap-2 text-[11px] text-white/75"><span>{model.name}</span><span className="text-white/50">{model.size}</span></li>)}
         </ul>

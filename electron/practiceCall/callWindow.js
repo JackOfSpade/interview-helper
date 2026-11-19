@@ -9,12 +9,14 @@ import { createReplayHandler } from './replayProtocol.js';
 const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
-  'get-state', 'agree-model-download', 'ready', 'answer', 'hang-up', 'set-muted', 'send-chat',
+  'get-state', 'agree-model-download', 'ready', 'answer', 'decline', 'call-back', 'cancel-call-back', 'hang-up', 'leave', 'choose-feedback', 'set-muted', 'send-chat',
   'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
 ]);
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
-const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'connecting', 'in-call', 'ended', 'analyzing']);
+const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing']);
+// A missed call nobody returned in time has let go of everything: the window only still says so.
+const isRunning = state => RUNNING_PHASES.has(state?.phase) && !(state.phase === 'missed' && state.missed === 'expired');
 // Phases a starting call passes through before it rings; the window opens at the first of them.
 const SETUP_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing']);
 
@@ -74,9 +76,15 @@ export function createPracticeCallController(deps = {}) {
   // and the phase is not a running one, so this flag is what tells open-replay a call is on its way.
   let starting = false;
   const windowAlive = () => !!win && !win.isDestroyed?.();
+  let callMenuShown = false;
+  const showCallMenu = shown => {
+    if (callMenuShown === shown) return;
+    callMenuShown = shown;
+    try { (shown ? deps.callMenu?.enter : deps.callMenu?.leave)?.(); } catch { /* the menu is cosmetic */ }
+  };
   const alreadyRunning = () => ({
     ...(service.getState?.() ?? {}), phase: 'error',
-    error: { code: 'already-running', message: 'A practice call is already running.' },
+    error: { code: 'already-running', message: 'A call is already running.' },
   });
   const send = (channel, payload) => { if (windowAlive()) { try { win.webContents.send(channel, payload); } catch { /* window is going away */ } } };
   service.onState?.(state => send(`${WINDOW_PREFIX}state`, state));
@@ -120,7 +128,12 @@ export function createPracticeCallController(deps = {}) {
       send(`${WINDOW_PREFIX}leave-requested`, null);
       try { created.show(); created.focus(); } catch { /* window is going away */ }
     });
+    // The menu bar follows the call window: a short call menu while it is in front, the app's own menu otherwise.
+    // Off unless the app passes callMenu in, so a unit suite never touches the real menu.
+    created.on?.('focus', () => { if (win === created && winMode === 'call') showCallMenu(true); });
+    created.on?.('blur', () => { if (win === created) showCallMenu(false); });
     created.on?.('closed', () => {
+      if (win === created) showCallMenu(false);
       if (win !== created) return;
       const mode = winMode;
       win = null;
@@ -147,6 +160,18 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'agree-model-download']() { return service.agreeModelDownload(); },
     async [WINDOW_PREFIX + 'ready']() { return service.ready(); },
     async [WINDOW_PREFIX + 'answer']() { return service.answer(); },
+    // Declining keeps the window: it shows the missed call, which can be returned.
+    async [WINDOW_PREFIX + 'decline']() { return service.decline(); },
+    async [WINDOW_PREFIX + 'call-back']() { return service.callBack(); },
+    async [WINDOW_PREFIX + 'cancel-call-back']() { return service.cancelCallBack(); },
+    // Leaving the call only ends it; whether to write feedback is asked on the screen that follows.
+    async [WINDOW_PREFIX + 'leave']() { return service.hangUp({ feedback: 'ask' }); },
+    async [WINDOW_PREFIX + 'choose-feedback'](wants) {
+      const state = await service.chooseFeedback(wants === true);
+      // Without feedback there is nothing more to show, so the window goes once the call is saved.
+      if (wants !== true && windowAlive()) win.close();
+      return state;
+    },
     async [WINDOW_PREFIX + 'hang-up'](options) {
       const feedback = options?.feedback !== false;
       const state = await service.hangUp({ feedback });
@@ -170,7 +195,7 @@ export function createPracticeCallController(deps = {}) {
     ipcMain.handle('practice-call:start', guardCanvas(async args => {
       // A window whose call is still going wins with the already-running state. A replay window,
       // or an old call window that has already failed or finished, is replaced by a fresh one.
-      if (windowAlive() && winMode === 'call' && RUNNING_PHASES.has(service.getState?.()?.phase)) {
+      if (windowAlive() && winMode === 'call' && isRunning(service.getState?.())) {
         try { win.show(); win.focus(); } catch { /* window is going away */ }
         return alreadyRunning();
       }
@@ -200,7 +225,7 @@ export function createPracticeCallController(deps = {}) {
       if (!record || record.nodeId !== args.nodeId) throw new Error('That practice call is not available.');
       if (starting) return { success: false, error: 'Finish the call in progress before opening a replay.' };
       // A call in progress keeps its window; opening a replay there would take it over.
-      if (windowAlive() && winMode === 'call' && RUNNING_PHASES.has(service.getState?.()?.phase)) {
+      if (windowAlive() && winMode === 'call' && isRunning(service.getState?.())) {
         try { win.show(); win.focus(); } catch { /* window is going away */ }
         return { success: false, error: 'Finish the call in progress before opening a replay.' };
       }
@@ -224,7 +249,7 @@ export function createPracticeCallController(deps = {}) {
    */
   async function shutdown({ timeoutMs = 10000 } = {}) {
     try {
-      if (RUNNING_PHASES.has(service.getState?.()?.phase) && typeof service.hangUp === 'function') {
+      if (isRunning(service.getState?.()) && typeof service.hangUp === 'function') {
         let timer = null;
         const waited = new Promise(resolveWaited => { timer = setTimeout(resolveWaited, timeoutMs); });
         await Promise.race([Promise.resolve(service.hangUp({ feedback: false })).catch(() => {}), waited]);

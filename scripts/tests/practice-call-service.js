@@ -313,6 +313,183 @@ test('hang-up from every phase is safe', async () => {
   }
 });
 
+/** A service whose timers a test fires by hand: `timers` lists every live timeout with its delay. */
+async function timedCall(overrides = {}) {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-missed-'));
+  const harness = makeDeps({ tmp, modelReady: true });
+  const timers = [];
+  let now = 1000;
+  let id = 0;
+  const clock = {
+    now: () => now,
+    setTimeout: (fn, ms) => { id += 1; timers.push({ id, fn, ms }); return id; },
+    clearTimeout: handle => { const at = timers.findIndex(timer => timer.id === handle); if (at >= 0) timers.splice(at, 1); },
+  };
+  const engineOptions = [];
+  const engineFactory = harness.deps.engineFactory;
+  const service = createPracticeCallService({
+    ...harness.deps, clock, random: () => 0.5,
+    engineFactory: options => { engineOptions.push(options); return engineFactory(options); },
+    ...overrides,
+  });
+  const fire = ms => { const at = timers.findIndex(timer => timer.ms === ms); assert(at >= 0, `no ${ms} ms timer among ${timers.map(timer => timer.ms)}`); timers.splice(at, 1)[0].fn(); };
+  return { ...harness, service, timers, fire, engineOptions, advance: ms => { now += ms; } };
+}
+const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+
+test('a ring nobody answers becomes a missed call after 30 s, and calling back opens the call with that context', async () => {
+  const live = await timedCall();
+  assert.equal((await live.service.start(ARGS)).phase, 'ringing');
+  live.fire(30000);
+  let state = live.service.getState();
+  assert.equal(state.phase, 'missed');
+  assert.equal(state.missed, 'unanswered');
+  assert.equal(live.events.includes('stop'), false, 'nothing is torn down: the microphone and sessions wait for the call back');
+  assert.equal((await live.service.answer()).phase, 'missed', 'a missed call cannot be answered, only returned');
+  live.advance(120000);
+  assert.equal(live.service.callBack().phase, 'calling');
+  assert.equal(live.timers.some(timer => timer.ms === 10 * 60 * 1000), false, 'the wait for a call back stops once it is returned');
+  live.fire(5750); // the interviewer picks up half-way through the 3.5 to 8 s window
+  await settle();
+  state = live.service.getState();
+  assert.equal(state.phase, 'in-call');
+  assert.deepEqual(live.engineOptions[0].callback, { how: 'unanswered', agoMs: 120000 }, 'the interviewer is told the ring was missed and how long ago');
+  assert.equal((await live.service.hangUp()).phase, 'replay');
+  assert.equal((await live.deps.store.readRecord('call-1')).returnedCall, 'unanswered', 'the saved call says it was a returned call');
+});
+
+test('declining keeps the call; the outgoing ring can be cancelled; a plain answer carries no call-back note', async () => {
+  const live = await timedCall();
+  await live.service.start(ARGS);
+  assert.equal(live.service.callBack().phase, 'ringing', 'there is nothing to call back while it still rings');
+  let state = live.service.decline();
+  assert.equal(state.phase, 'missed');
+  assert.equal(state.missed, 'declined');
+  assert.equal(live.timers.some(timer => timer.ms === 30000), false, 'the ring timeout is cancelled with the ring');
+  assert.equal(live.service.decline().phase, 'missed', 'a second decline changes nothing');
+  assert.equal(live.service.callBack().phase, 'calling');
+  assert.equal(live.service.cancelCallBack().phase, 'missed', 'hanging up before they pick up goes back to the missed call');
+  assert.equal(live.timers.some(timer => timer.ms === 5750), false, 'nobody picks up a cancelled call');
+  assert.equal(live.timers.filter(timer => timer.ms === 10 * 60 * 1000).length, 1, 'and the caller waits again');
+  live.service.callBack();
+  live.fire(5750);
+  await settle();
+  assert.equal(live.service.getState().phase, 'in-call');
+  assert.equal(live.engineOptions[0].callback.how, 'declined');
+  await live.service.hangUp();
+
+  const plain = await timedCall();
+  await plain.service.start(ARGS);
+  assert.equal((await plain.service.answer()).phase, 'in-call');
+  assert.equal('callback' in plain.engineOptions[0], false);
+  assert.equal(plain.timers.some(timer => timer.ms === 30000), false, 'answering stops the ring timeout');
+  await plain.service.hangUp();
+  assert.equal('returnedCall' in (await plain.deps.store.readRecord('call-1')), false);
+});
+
+test('a missed call nobody returns in ten minutes lets everything go and can no longer be returned', async () => {
+  const live = await timedCall();
+  await live.service.start(ARGS);
+  live.service.decline();
+  live.fire(10 * 60 * 1000);
+  assert.equal((await live.service.start(ARGS)).error?.code, 'already-running', 'no new call starts while the old one is still being let go');
+  await settle();
+  const state = live.service.getState();
+  assert.equal(state.phase, 'missed', 'the window keeps showing the missed call');
+  assert.equal(state.missed, 'expired');
+  assert.equal(live.events.includes('stop'), true, 'the microphone is released');
+  assert.equal(live.service.callBack().phase, 'missed', 'the interviewer is gone');
+  assert.equal(await live.deps.store.readRecord('call-1'), null, 'a call that never happened leaves no record');
+  // Nothing is running any more, so a new call can start.
+  assert.equal((await live.service.start(ARGS)).phase, 'ringing');
+  assert.equal(live.service.getState().missed, null);
+  await live.service.hangUp();
+});
+
+test('closing the window on a missed call abandons it quietly', async () => {
+  const live = await timedCall();
+  await live.service.start(ARGS);
+  live.service.decline();
+  assert.equal((await live.service.abandon()).phase, 'replay');
+  assert.equal(live.timers.length, 0, 'no timer outlives the call');
+  assert.equal(await live.deps.store.readRecord('call-1'), null);
+});
+
+test('an interviewer whose replies fail twice drops out like a lost connection: the call screen stays and the record says why', async () => {
+  const live = await liveCall();
+  await live.service.start(ARGS);
+  await live.service.answer();
+  live.engine()({ type: 'ended', reason: 'session-error' });
+  await settle();
+  const state = live.service.getState();
+  assert.equal(state.phase, 'in-call', 'the candidate is not thrown onto the ended screen');
+  assert.equal(state.interviewerLeft, true);
+  assert.equal(state.connectionLost, true);
+  assert.equal((await live.service.hangUp()).phase, 'replay');
+  assert.equal((await live.deps.store.readRecord('call-1')).reason, 'session-error', 'the review still treats it as a technical ending');
+  // A normal goodbye is not a lost connection, and a new call starts clean.
+  const next = await liveCall();
+  await next.service.start(ARGS);
+  await next.service.answer();
+  next.engine()({ type: 'ended', reason: 'interviewer' });
+  await settle();
+  assert.equal(next.service.getState().connectionLost, false);
+  await next.service.hangUp();
+});
+
+test('leaving asks about feedback after the call is saved, and each answer does what it says', async () => {
+  const analysed = [];
+  const yes = await liveCall({ deps: { analyze: async () => { analysed.push('yes'); return { status: 'ready', chapters: [], feedback: { summary: 'ok' } }; } } });
+  await yes.service.start(ARGS);
+  await yes.service.answer();
+  const leaving = yes.service.hangUp({ feedback: 'ask' });
+  await settle();
+  let state = yes.service.getState();
+  assert.equal(state.phase, 'ended');
+  assert.equal(state.feedbackChoice, 'pending');
+  assert.equal((await yes.deps.store.readRecord('call-1')).feedbackSkipped, true, 'until the candidate answers, the saved call is one left without feedback');
+  assert.deepEqual(analysed, [], 'nothing is spent before the answer');
+  state = await yes.service.chooseFeedback(true);
+  assert.equal((await leaving).phase, 'replay');
+  assert.equal(state.phase, 'replay');
+  assert.equal(state.feedbackChoice, null);
+  assert.deepEqual(analysed, ['yes']);
+  assert.equal('feedbackSkipped' in (await yes.deps.store.readRecord('call-1')), false);
+  assert.equal((await yes.deps.store.readAnalysis('call-1')).status, 'ready');
+
+  const no = await liveCall({ deps: { analyze: async () => { analysed.push('no'); return { status: 'ready', chapters: [] }; } } });
+  await no.service.start(ARGS);
+  await no.service.answer();
+  no.service.hangUp({ feedback: 'ask' });
+  await settle();
+  state = await no.service.chooseFeedback(false);
+  assert.equal(state.phase, 'replay');
+  assert.equal(state.feedbackRequested, false);
+  assert.equal(analysed.includes('no'), false, 'skipping spends nothing on transcription or the review');
+  assert.equal((await no.deps.store.readRecord('call-1')).feedbackSkipped, true);
+  assert.equal(await no.deps.store.readAnalysis('call-1'), null);
+
+  // Closing the window, or quitting, while the question is open is a "no".
+  for (const close of [service => service.abandon(), service => service.hangUp({ feedback: false })]) {
+    const closed = await liveCall({ deps: { analyze: async () => { analysed.push('closed'); return { status: 'ready', chapters: [] }; } } });
+    await closed.service.start(ARGS);
+    await closed.service.answer();
+    const task = closed.service.hangUp({ feedback: 'ask' });
+    await settle();
+    assert.equal(closed.service.getState().feedbackChoice, 'pending');
+    await close(closed.service);
+    assert.equal((await task).phase, 'replay');
+    assert.equal((await closed.deps.store.readRecord('call-1')).feedbackSkipped, true);
+  }
+  assert.equal(analysed.includes('closed'), false);
+
+  // A call in which the candidate said nothing has nothing to review, so nothing is asked.
+  const silent = await liveCall({ deps: { engineFactory: options => ({ start() { options.onEvent({ type: 'phase', phase: 'listening' }); }, hangUp() {}, helperEvent() {}, state: () => ({ transcript: [], elapsedMs: 100 }), typed() {} }) } });
+  await silent.service.start(ARGS);
+  await silent.service.answer();
+  assert.equal((await silent.service.hangUp({ feedback: 'ask' })).phase, 'replay');
+});
+
 test('engine ended and helper error end the call', async () => {
   const endedTmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-ended-'));
   const ended = makeDeps({ tmp: endedTmp, modelReady: true });
@@ -611,7 +788,7 @@ test('the lead\'s temperament comes from the plan unless the request or the brie
   assert.equal(chosen.starts.find(item => item.kind === 'main').instructions, 'main:tough:Dominant, Firm');
   assert.equal(chosen.starts.find(item => item.kind === 'opener').instructions, 'opener:tough');
   assert.equal(chosen.state.persona.role, 'Hiring Manager');
-  assert.equal(chosen.state.persona.team, 'the hiring team');
+  assert.equal(chosen.state.persona.team, '', 'a brief with no team names none');
   assert.equal(chosen.built.deps.planCall.calls[0].voices[0].description.includes('Dominant, Firm'), true, 'the planner is told how the voice sounds');
 
   const warm = await run({ planned: 'warm' });

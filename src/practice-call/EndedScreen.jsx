@@ -8,9 +8,11 @@ export const ANALYSING_MESSAGE = 'Analysing the recording. Your feedback opens i
 
 // Shown from hang-up until the review is written: the call UI is gone and the
 // steps of the post-call processing tick off in place.
-export default function EndedScreen({ state }) {
+export default function EndedScreen({ state, onChooseFeedback }) {
   // Leaving without feedback only saves the recording: one step, no review.
   const skipped = state?.feedbackRequested === false;
+  // The call is saved and the candidate has not yet said whether they want feedback on it.
+  const choosing = state?.feedbackChoice === 'pending' && state?.phase === 'ended';
   const analysing = state?.phase === 'analyzing' && !skipped;
   const stages = skipped ? ANALYSIS_STAGES.slice(0, 1) : ANALYSIS_STAGES;
   const title = analysing ? 'Analysing the call' : 'Call ended';
@@ -20,10 +22,20 @@ export default function EndedScreen({ state }) {
       <div className="flex items-center gap-4">
         <Avatar person={state?.persona} className="h-14 w-14 text-xl"><span className="pc-ring absolute inset-0 rounded-full" /></Avatar>
         <div className="min-w-0">
-          <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : 'You left the call'}</h1>
+          <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : state?.interviewerLeft ? 'Call ended' : 'You left the call'}</h1>
           <p className="text-sm text-[#9aa0a6]">Call length {formatTime(state?.elapsedMs)}{state?.persona?.name ? ` · Interviewer: ${state.persona.name}` : ''}</p>
         </div>
       </div>
+      {choosing ? <section aria-label="Feedback choice" className="pc-fade space-y-4">
+        <div>
+          <h2 className="text-base font-medium text-white">Want feedback on this call?</h2>
+          <p className="mt-1 text-sm leading-snug text-[#9aa0a6]">Feedback uses AI to transcribe and review the recording. Skipping it keeps the recording and transcript only.</p>
+        </div>
+        <div className="flex flex-col gap-2">
+          <button type="button" autoFocus onClick={() => onChooseFeedback?.(true)} className="rounded-full bg-[#1a73e8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#1b66c9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]">Get feedback</button>
+          <button type="button" onClick={() => onChooseFeedback?.(false)} className="rounded-full border border-white/20 px-5 py-2.5 text-sm font-medium text-[#8ab4f8] hover:bg-white/5">Skip feedback</button>
+        </div>
+      </section> : <>
       <div className="relative h-1 overflow-hidden rounded-full bg-white/10" aria-hidden="true"><span className="pc-indeterminate absolute inset-y-0 w-2/5 rounded-full bg-[#8ab4f8]" /></div>
       <ol aria-label="Processing steps" className="space-y-2.5">
         {stages.map((stage, index) => {
@@ -37,7 +49,8 @@ export default function EndedScreen({ state }) {
           </li>;
         })}
       </ol>
-      <p role="status" className="text-sm text-[#9aa0a6]">{analysing ? ANALYSING_MESSAGE : skipped ? 'Call ended. The recording is being saved; no feedback is generated.' : 'Call ended. The recording is being analysed and your feedback opens here next.'}</p>
+      <p role="status" className="text-sm text-[#9aa0a6]">{analysing ? ANALYSING_MESSAGE : skipped ? 'Call ended. The recording is being saved; no feedback is generated.' : 'Call ended. The recording is being saved.'}</p>
+      </>}
       {state?.error && <p role="alert" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-sm text-[#f28b82]">{state.error.message}</p>}
     </section>
   </main>;

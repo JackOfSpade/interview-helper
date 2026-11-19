@@ -3,12 +3,14 @@ import ConsentScreen from './ConsentScreen.jsx';
 import DownloadingScreen from './DownloadingScreen.jsx';
 import PrecheckScreen from './PrecheckScreen.jsx';
 import IncomingCall from './IncomingCall.jsx';
+import MissedCall from './MissedCall.jsx';
+import OutgoingCall from './OutgoingCall.jsx';
 import ConnectingScreen from './ConnectingScreen.jsx';
 import InCall from './InCall.jsx';
 import EndedScreen from './EndedScreen.jsx';
 import Replay from './Replay.jsx';
 import ErrorScreen from './ErrorScreen.jsx';
-import { MISSING_PRELOAD, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
+import { MISSING_PRELOAD, callTitle, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
 
 function readApi() {
   return typeof window === 'undefined' ? null : window.practiceCallAPI || null;
@@ -52,6 +54,16 @@ export default function PracticeCallApp() {
   }, []);
 
   const phase = isReplayWindow() && state && state.phase !== 'error' ? 'replay' : state?.phase;
+  // From the ring to the hang-up the window is titled like a call, not like this app.
+  const callerName = state?.persona?.name || '';
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const title = callTitle(phase, callerName);
+    if (!title) return undefined;
+    const before = document.title;
+    document.title = title;
+    return () => { document.title = before; };
+  }, [phase, callerName]);
   useEffect(() => {
     if (phase !== 'replay') return undefined;
     const api = readApi();
@@ -88,7 +100,7 @@ export default function PracticeCallApp() {
   };
 
   if (!state) {
-    return <main role="status" aria-live="polite" aria-label="Loading practice call" className="grid min-h-screen place-items-center bg-[#202124] text-[11px] text-violet-100">Loading practice call…</main>;
+    return <main role="status" aria-live="polite" aria-label="Loading call" className="grid min-h-screen place-items-center bg-[#202124] text-[11px] text-violet-100">Loading…</main>;
   }
   // Keyed by stage of the session so each hand-over (call, processing, feedback) fades in.
   const stageKey = phase === 'ended' || phase === 'analyzing' ? 'processing' : phase;
@@ -97,11 +109,13 @@ export default function PracticeCallApp() {
     case 'consent': return <ConsentScreen onAgree={agree} busy={busy} />;
     case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
     case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} onReady={() => invoke('ready')} />;
-    case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('hangUp', { feedback: false })} />;
+    case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('decline')} />;
+    case 'missed': return <MissedCall persona={state.persona} missed={state.missed} onCallBack={() => invoke('callBack')} onClose={() => invoke('close')} />;
+    case 'calling': return <OutgoingCall persona={state.persona} onCancel={() => invoke('cancelCallBack')} />;
     case 'connecting': return <ConnectingScreen persona={state.persona} />;
     case 'in-call': return <InCall state={state} leaveRequest={leaveRequest} api={{
       setMuted: value => invoke('setMuted', value),
-      hangUp: options => invoke('hangUp', options),
+      leave: () => invoke('leave'),
       getPreparedCards: () => invoke('getPreparedCards'),
       sendChat: text => invoke('sendChat', text),
       setTyping: value => invoke('setTyping', value),
@@ -109,7 +123,7 @@ export default function PracticeCallApp() {
       updatePad: text => invoke('updatePad', text),
     }} />;
     case 'ended':
-    case 'analyzing': return <EndedScreen state={state} />;
+    case 'analyzing': return <EndedScreen state={state} onChooseFeedback={wants => invoke('chooseFeedback', wants)} />;
     case 'replay': return <Replay replay={replay} api={{ deleteRecording: () => invoke('deleteRecording') }} />;
     case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
     default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: `The call window received an unknown phase (${String(state.phase)}).` }} onClose={() => invoke('close')} />;

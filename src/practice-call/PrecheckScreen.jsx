@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Headphones, Mic } from 'lucide-react';
+import { Check, Headphones, Mic, VideoOff } from 'lucide-react';
 import { elapsedLabel, levelPercent, setupProgress } from './callModel.js';
 
 /** Milliseconds since this screen appeared, ticking once a second. */
@@ -57,6 +57,7 @@ export default function PrecheckScreen({ level, usageWarning, persona, setup, on
         <p className="text-[11px] text-white/55">Speaking is optional: you can type every answer in the call's chat.</p>
       </div>
       <p className="flex items-start gap-1.5 text-[11px] text-white/70"><Headphones size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Headphones recommended — the interviewer's voice can otherwise be picked up as if it were you.</p>
+      <p className="flex items-start gap-1.5 text-[11px] text-white/70"><VideoOff size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Your camera is optional. If you turn it on during the call, only you see it: video stays on this Mac and is never recorded or sent.</p>
       {isReady && <button type="button" onClick={onReady}
         className="w-full rounded-lg bg-emerald-500/25 px-3 py-2 text-[13px] font-semibold text-emerald-50 hover:bg-emerald-500/35">I'm ready</button>}
       {usageWarning ? <div role="note" aria-label="Usage warning" className="rounded-lg border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{usageWarning}</div> : null}

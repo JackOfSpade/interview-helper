@@ -1,42 +1,81 @@
-// Two-tone incoming-call ring, synthesised with Web Audio (no audio files).
-// Returns a stop function; safe to call in a renderer without Web Audio.
-export function startRingtone(win, { intervalMs = 3000 } = {}) {
+// Call sounds, synthesised with Web Audio (no audio files). Every function is
+// safe to call in a renderer without Web Audio and never throws.
+
+// One decaying sine partial.
+function partial(context, out, at, hertz, seconds, peak) {
+  try {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(hertz, at);
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.exponentialRampToValueAtTime(peak, at + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + seconds);
+    oscillator.connect(gain);
+    gain.connect(out);
+    oscillator.start(at);
+    oscillator.stop(at + seconds + 0.02);
+  } catch { /* a closed context stays silent */ }
+}
+
+// Repeats `ring(context, out, now)` every intervalMs until the returned stop function is called.
+function startLoop(win, intervalMs, ring) {
   const AudioContextClass = win?.AudioContext || win?.webkitAudioContext;
   if (typeof AudioContextClass !== 'function') return () => {};
   let context;
   try { context = new AudioContextClass(); } catch { return () => {}; }
   try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the ring stays silent */ }
-  let timer = null;
+  // A compressor keeps the stacked notes loud without clipping; without one the notes go straight out.
+  let out = context.destination;
+  try {
+    if (typeof context.createDynamicsCompressor === 'function') {
+      const compressor = context.createDynamicsCompressor();
+      compressor.connect(context.destination);
+      out = compressor;
+    }
+  } catch { out = context.destination; }
   let stopped = false;
-  const tone = (at, hertz) => {
-    try {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(hertz, at);
-      gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(0.18, at + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.4);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(at);
-      oscillator.stop(at + 0.42);
-    } catch { /* a closed context stays silent */ }
-  };
-  const ring = () => {
-    if (stopped) return;
-    const now = context.currentTime;
-    tone(now, 440);
-    tone(now + 0.45, 480);
-  };
-  ring();
-  timer = setInterval(ring, intervalMs);
+  const play = () => { if (!stopped) ring(context, out, context.currentTime + 0.05); };
+  play();
+  const timer = setInterval(play, intervalMs);
   return () => {
     if (stopped) return;
     stopped = true;
-    if (timer) clearInterval(timer);
+    clearInterval(timer);
     try { context.close(); } catch { /* already closed */ }
   };
+}
+
+// The rising chime of the incoming ring: C5 E5 G5 C6.
+export const RING_NOTES = Object.freeze([523.25, 659.25, 783.99, 1046.5]);
+const RING_NOTE_GAP = 0.16;
+const RING_REPEAT_AFTER = 1.1;
+
+// Incoming-call ring: a bright rising four-note chime played twice, then a
+// pause, the way a video-call app rings. Each note is a bell: the note plus two
+// quieter, shorter overtones. Returns a stop function.
+export function startRingtone(win, { intervalMs = 3200 } = {}) {
+  return startLoop(win, intervalMs, (context, out, now) => {
+    for (const start of [0, RING_REPEAT_AFTER]) {
+      RING_NOTES.forEach((hertz, index) => {
+        const at = now + start + index * RING_NOTE_GAP;
+        partial(context, out, at, hertz, 0.55, 0.4);
+        partial(context, out, at, hertz * 2, 0.33, 0.12);
+        partial(context, out, at, hertz * 3, 0.165, 0.048);
+      });
+    }
+  });
+}
+
+// Outgoing-call tone, heard while the other side's phone rings: two soft low
+// notes, then a pause. Quieter than the incoming ring. Returns a stop function.
+export function startRingback(win, { intervalMs = 3000 } = {}) {
+  return startLoop(win, intervalMs, (context, out, now) => {
+    partial(context, out, now, 440, 0.9, 0.09);
+    partial(context, out, now, 480, 0.9, 0.09);
+    partial(context, out, now + 1.0, 440, 0.9, 0.09);
+    partial(context, out, now + 1.0, 480, 0.9, 0.09);
+  });
 }
 
 // Soft two-note chime for a colleague joining the call. Never throws: a

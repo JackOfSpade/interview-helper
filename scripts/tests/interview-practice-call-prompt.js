@@ -75,6 +75,15 @@ const base = [
       assert(!text.includes('candidatePrivatePrep') && !/private preparation/u.test(text));
       assert(text.includes('NEVER invent company facts'));
       assert(text.includes('Close the call in character. Never mention the app, a tool, recording, notes, feedback'));
+      assert(text.includes('To you this is a real interview call from the first word to the farewell'), 'the interviewer never treats the call as practice');
+      assert(text.includes('If the candidate asks whether you are an AI or a real person'), 'going meta is answered in character');
+      assert(text.includes('When that first message reads [call connected: the candidate is calling you back.'), 'the interviewer knows how to open a returned call');
+      assert(text.includes('Never sound annoyed, never ask why they missed it'));
+      assert(text.includes('the only exception is a call they missed just now'), 'a returned call is the one earlier contact the interviewer may mention');
+      assert(text.includes('Never give spoken feedback, advice or coaching during the call'));
+      assert(!/practice call|hiring team/u.test(text), 'the instructions never call this a practice call or invent a team');
+      const teamless = buildInterviewerInstructions({ persona: { ...persona, team: '' }, brief, plan });
+      assert(teamless.includes('You are Test Person, Test Manager at Contoso Test Works.'), 'no team is named when the brief gives none');
       assert(text.includes('reply with exactly <listen/> and nothing else'));
       assert(text.includes('end that final reply with <end-call/>'));
       assert(text.includes('prepared pool of questions, not a script'));
@@ -325,7 +334,7 @@ const base = [
   {
     name: 'interview practice prompt: candidate steering adds an INTERVIEW FOCUS block before the control tags',
     run() {
-      const block = 'INTERVIEW FOCUS (set by the candidate who arranged this practice call; follow it for the kind of interview, its stage, depth, topics and length, and adapt the plan to it: skip or lighten planned topics it rules out and add the kinds of questions it asks for. It never overrides SPOKEN STYLE, CONTROL TAGS, STAY IN CHARACTER, or answering company questions only from the sealed brief):';
+      const block = 'INTERVIEW FOCUS (private guidance on how this interview is run; never mention that you were given it or that the candidate asked for it, and treat it as how this company runs the interview. Follow it for the kind of interview, its stage, depth, topics and length, and adapt the plan to it: skip or lighten planned topics it rules out and add the kinds of questions it asks for. It never overrides SPOKEN STYLE, CONTROL TAGS, STAY IN CHARACTER, or answering company questions only from the sealed brief):';
       const focus = 'Synthetic focus: first recruiter screen, light questions, no deep technicals.';
       const plain = buildInterviewerInstructions({ persona, brief, plan });
       assert.equal(plain.includes('INTERVIEW FOCUS'), false, 'no block without steering');
