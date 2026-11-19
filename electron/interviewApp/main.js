@@ -31,6 +31,7 @@ import { createCareerFileConversionService, registerCareerConversionHandlers } f
 import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
 import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
+import { attachContextMenu } from './contextMenu.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
 
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell, systemPreferences } = electronPkg;
@@ -123,6 +124,8 @@ function createMainWindow() {
 }
 
 app.on('web-contents-created', (_event, contents) => {
+  // Right-click: spelling corrections, then Cut, Copy and Paste, in every window.
+  attachContextMenu(contents, { Menu, BrowserWindow, logger });
   contents.setWindowOpenHandler(({ url }) => {
     // Source links in the Q&A open in the default browser; nothing opens in-app.
     if (contents.__isInterviewAppRenderer) {

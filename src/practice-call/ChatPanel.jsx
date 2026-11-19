@@ -62,7 +62,8 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
       {typeof onClose === 'function' && <button type="button" aria-label="Close chat" onClick={onClose} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>}
     </header>
     <p className="mx-4 rounded-lg bg-[#f1f3f4] px-3 py-2 text-center text-xs text-[#5f6368]">{disabled ? 'No one else is in the call.' : 'Messages can only be seen by people in the call.'}</p>
-    <ol ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-3" aria-live="polite">
+    {/* The call window turns text selection off; the messages are the one place it is wanted, to copy from. */}
+    <ol ref={listRef} data-chat-messages="true" className="min-h-0 flex-1 cursor-text select-text space-y-3 overflow-y-auto px-5 py-3" aria-live="polite">
       {messages.map((message, index) => <li key={`${message.atMs ?? index}-${index}`} className="pc-fade">
         <span className="block text-[13px] font-medium">{message.from === 'candidate' ? 'You' : interviewerName || 'Interviewer'}</span>
         <span className="block whitespace-pre-wrap break-words text-[13px] leading-snug text-[#3c4043]">{message.text}</span>

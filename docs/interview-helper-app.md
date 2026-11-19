@@ -83,6 +83,22 @@ optional description and two actions, modelled on Infinite Canvas.
   interview was selected: the window reads the app's own copy at start. A
   saved file is never loaded on its own; it could be older than that copy.
 
+## Right-click menu (built 2026-11-19)
+
+Every window has one (`electron/interviewApp/contextMenu.js`, attached in
+`web-contents-created`). Electron shows none unless the app builds it.
+
+- **On a misspelled word in a text box:** up to six corrections, or "No Guesses
+  Found", then Learn Spelling, then Cut, Copy, Paste and Select All.
+- **In a text box otherwise:** Cut, Copy, Paste and Select All.
+- **On selected page text:** Copy. Anywhere else no menu opens.
+- The call window turns text selection off (`src/index.css`); its chat
+  messages turn it back on (`select-text` in `ChatPanel.jsx`) so they can be
+  dragged over and copied.
+- The coding pad turns spell checking off, so it gets the edit items only.
+- Not yet checked by right-clicking in the running app; the suites cover the
+  menu's contents and that a correction replaces the word.
+
 ## Text size (built 2026-11-18)
 
 One setting for every window the app opens: the main window, the cue card and

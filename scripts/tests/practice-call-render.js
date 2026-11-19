@@ -443,6 +443,8 @@ export default [
         for (const fragment of ['aria-label="Call chat"', 'One moment, checking my notes.', 'aria-label="Chat message"', 'maxLength="2000"', '<textarea', 'aria-label="Send chat message"', 'aria-live="polite"']) {
           assert(markup.includes(fragment), `chat panel is missing ${fragment}`);
         }
+        // The call window turns selection off on the body; the message list turns it back on so a message can be copied.
+        assert(/<ol[^>]*data-chat-messages="true"[^>]*class="[^"]*\bselect-text\b/.test(markup), 'chat messages must be selectable');
         assert(!markup.includes('Interviewer is typing') && !markup.includes('chat-typing'), 'the candidate typing must not be shown as the interviewer typing');
         const left = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], disabled: true, onSend: () => {}, onTyping: () => {} }));
         assert(left.includes('disabled=""') && left.includes('No one else is in the call.'), 'the chat box is disabled once the interviewer left');
