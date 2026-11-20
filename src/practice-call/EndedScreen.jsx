@@ -1,13 +1,13 @@
 import React from 'react';
-import { Check, Loader2 } from 'lucide-react';
+import { AudioLines, Check, Clock, Loader2, PhoneOff } from 'lucide-react';
 import { ANALYSIS_STAGES, analysisStageIndex } from './callModel.js';
-import Avatar from './Avatar.jsx';
 import { formatTime } from './replayModel.js';
 
 export const ANALYSING_MESSAGE = 'Analysing the recording. Your feedback opens in this window as soon as it is ready.';
 
 // Shown from hang-up until the review is written: the call UI is gone and the
-// steps of the post-call processing tick off in place.
+// steps of the post-call processing tick off in place. The interviewer is gone, so the screen is
+// about the call itself (how it ended, how long it ran, what happens to it next), not about them.
 export default function EndedScreen({ state, onChooseFeedback }) {
   // Leaving without feedback only saves the recording: one step, no review.
   const skipped = state?.feedbackRequested === false;
@@ -19,15 +19,15 @@ export default function EndedScreen({ state, onChooseFeedback }) {
   const active = analysing ? analysisStageIndex(state?.analysisStage) : -1;
   return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-6 text-[#e8eaed]" aria-label={title}>
     <section className="pc-rise w-full max-w-md space-y-5">
-      <div className="flex items-center gap-4">
-        <Avatar person={state?.persona} className="h-14 w-14 text-xl"><span className="pc-ring absolute inset-0 rounded-full" /></Avatar>
-        <div className="min-w-0">
-          <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : state?.interviewerLeft ? 'Call ended' : 'You left the call'}</h1>
-          <p className="text-sm text-[#9aa0a6]">Call length {formatTime(state?.activeMs ?? state?.elapsedMs)}{state?.persona?.name ? ` · Interviewer: ${state.persona.name}` : ''}</p>
-        </div>
-      </div>
+      <header className="flex flex-col items-center gap-3 text-center">
+        <span aria-hidden="true" className={`grid h-14 w-14 place-items-center rounded-full transition-colors duration-300 ${analysing ? 'bg-[#8ab4f8]/15 text-[#8ab4f8]' : 'bg-[#3c4043] text-[#e8eaed]'}`}>
+          {analysing ? <AudioLines size={26} className="pc-breathe" /> : <PhoneOff size={24} />}
+        </span>
+        <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : state?.interviewerLeft ? 'Call ended' : 'You left the call'}</h1>
+        <p className="inline-flex items-center gap-1.5 rounded-full bg-white/5 px-3 py-1 text-xs text-[#9aa0a6]"><Clock size={12} aria-hidden="true" />Call length {formatTime(state?.activeMs ?? state?.elapsedMs)}</p>
+      </header>
       {choosing ? <section aria-label="Feedback choice" className="pc-fade space-y-4">
-        <div>
+        <div className="text-center">
           <h2 className="text-base font-medium text-white">Want feedback on this call?</h2>
           <p className="mt-1 text-sm leading-snug text-[#9aa0a6]">Feedback uses AI to transcribe and review the recording. Skipping it keeps the recording and transcript only.</p>
         </div>

@@ -500,6 +500,12 @@ export default [
           assert(choosing.includes(fragment), `the feedback choice is missing ${fragment}`);
         }
         assert(!choosing.includes('aria-label="Processing steps"') && !choosing.includes('You left the call'), 'while choosing, no processing steps are shown, and a call the interviewer ended does not say the candidate left');
+        // The interviewer is gone once the call ends: no photo, initials or name on any after-call screen.
+        for (const [label, state] of [['left', { phase: 'ended', elapsedMs: 5_000 }], ['choosing', { phase: 'ended', feedbackChoice: 'pending', elapsedMs: 5_000 }], ['analysing', { phase: 'analyzing', analysisStage: 'review', elapsedMs: 5_000 }]]) {
+          const markup = renderToStaticMarkup(React.createElement(EndedScreen, { state: { ...state, persona: PERSONA } }));
+          assert(!markup.includes(PERSONA.name) && !markup.includes('Interviewer:'), `the ${label} screen does not name the interviewer`);
+          assert(!markup.includes('data-avatar') && !markup.includes('pc-ring'), `the ${label} screen has no interviewer avatar`);
+        }
         // No screen of the call window calls it practice, before or after the call.
         const { ConsentScreen, DownloadingScreen, PrecheckScreen, MissedCall, OutgoingCall, ErrorScreen } = bundle.module;
         const screens = {
