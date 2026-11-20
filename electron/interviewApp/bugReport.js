@@ -149,7 +149,8 @@ export function interviewRows(state, selectedIndex = null) {
       job: data.interviewHelperTypedJob ? `typed (${code(data.interviewHelperTypedJobKind) || 'unknown kind'})`
         : data.interviewHelperApplicationBundle ? 'application folder'
           : data.interviewHelperJobUrl ? 'link only' : 'none',
-      preparation: !preparation ? 'none' : code(preparation.status, /^[a-z-]{1,40}$/u) || 'saved',
+      // A failed Prepare names its fixed failure code (CLAUDE_SAFEGUARD_BLOCKED, ...), which survives a restart.
+      preparation: !preparation ? 'none' : `${code(preparation.status, /^[a-z-]{1,40}$/u) || 'saved'}${code(preparation.code, /^[A-Z][A-Z0-9_]{2,63}$/u) ? ` (${preparation.code})` : ''}`,
       runPending: typeof data.interviewHelperPreparationRunId === 'string' && data.interviewHelperPreparationRunId.length > 0,
       step: count(data.interviewHelperCurrentStep),
     };

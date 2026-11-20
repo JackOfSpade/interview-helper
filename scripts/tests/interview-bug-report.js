@@ -92,6 +92,9 @@ const tests = [
       assert.equal(rows[2].job, 'none');
       assert.equal(interviewRows(sessionsState(), 0)[0].selected, true, 'the window says which interview is on screen');
       assert.deepEqual(interviewRows(null), []);
+      const coded = { sessions: [{ id: 'a', data: { interviewHelperPreparation: { status: 'failed', error: 'x', code: 'CLAUDE_SAFEGUARD_BLOCKED' } } },
+        { id: 'b', data: { interviewHelperPreparation: { status: 'failed', code: 'not a code /private/x' } } }] };
+      assert.deepEqual(interviewRows(coded).map(row => row.preparation), ['failed (CLAUDE_SAFEGUARD_BLOCKED)', 'failed'], 'a fixed failure code is shown, free text never');
     },
   },
   {

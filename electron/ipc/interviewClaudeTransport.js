@@ -22,6 +22,13 @@
  * is no built-in fallback: no stage here is offered WebSearch or WebFetch, and
  * when Parallel is exhausted (off, rate-limited, or a limit in a tool result)
  * research fails loudly with code PARALLEL_SEARCH_EXHAUSTED so the work waits.
+ *
+ * Safeguard fallback (2026-11-20): when Claude's safeguards stop an Opus call
+ * (CLAUDE_SAFEGUARD_BLOCKED), the same call runs once more on Sonnet at the same
+ * effort in a fresh session. Seen on a Moderna protein-design posting: Prepare
+ * research on Opus high was stopped twice in a row (refusal category "bio")
+ * while Sonnet finished the same research. A block on Sonnet, or a second
+ * block, fails the call with that code.
  */
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -34,7 +41,7 @@ import {
 } from './parallelSearch.js';
 import { reportClaudeUsageLimit, trackClaudeCall, waitForClaudeRelease, waitForClaudeUsage } from './claudePause.js';
 import { standaloneClaudeActivity } from './claudeTaskActivity.js';
-import { careerWritingStageProfile } from './careerWritingCore.js';
+import { CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL, careerWritingStageProfile } from './careerWritingCore.js';
 import { routedCall } from './aiCallProviders.js';
 import { recordAiReplaySample, recordAiUsage } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
@@ -158,6 +165,9 @@ export function createInterviewClaudeTransport({
     const stage = interviewClaudeStage(task, claudeStage);
     const research = isInterviewResearchStage(stage);
     const profile = careerWritingStageProfile(stage);
+    // The model this call runs on; a safeguard block on Opus moves it to Sonnet once.
+    let model = profile.model;
+    let safeguardFallback = false;
     // Ultracode is off by default: only an explicit opt-in (call or stage profile) is forwarded.
     const ultracode = opts.ultracode === true || (opts.ultracode !== false && profile.ultracode === true);
     let sessionId = crypto.randomUUID();
@@ -201,7 +211,7 @@ export function createInterviewClaudeTransport({
         if (scope) {
           await waitForClaudeUsage(signal);
           await waitForClaudeRelease(scope.key, signal);
-          standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: profile.model, effort: profile.effort, countRound: false });
+          standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model, effort: profile.effort, countRound: false });
           noteStep(scope, task, attempt);
         }
         const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
@@ -212,18 +222,34 @@ export function createInterviewClaudeTransport({
             let key = '';
             try { key = (await parallel.readKey?.()) || ''; } catch { key = ''; }
             attemptTools = PARALLEL_RESEARCH_TOOLS.join(',');
-            reply = await runResearchStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: false,
+            reply = await runResearchStage({ ...binding(), text, signal, model, effort: profile.effort, sessionId, resume: false,
               tools: [...PARALLEL_RESEARCH_TOOLS], mcpServers: parallelMcpServers(key), maxTurns: INTERVIEW_RESEARCH_MAX_TURNS,
               persistSession: false, ultracode: false, onToolResult: parallelToolResult,
               ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
           } else {
             usedBuiltIn = true;
-            reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools: '',
+            reply = await runStage({ ...binding(), text, signal, model, effort: profile.effort, sessionId, resume: claudeStarted, tools: '',
               ...(pageImages && !claudeStarted ? { pageImages } : {}),
               ...(ultracode ? { ultracode: true } : {}),
               ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
           }
         } catch (error) {
+          if (error?.code === 'CLAUDE_SAFEGUARD_BLOCKED' && !signal?.aborted && !safeguardFallback && model === CLAUDE_OPUS_MODEL) {
+            // A false alarm on a normal posting is model-specific: the same call goes to Sonnet once,
+            // from the original prompt in a new session (the blocked one is never resumed).
+            safeguardFallback = true;
+            model = CLAUDE_SONNET_MODEL;
+            sessionId = crypto.randomUUID();
+            claudeStarted = false;
+            // Research text already carries the original prompt; a resumed CLI session's text is only the rejection.
+            if (!research) text = lastRejection ? `${originalText}\n\n${lastRejection}` : originalText;
+            if (scope) {
+              standaloneClaudeActivity.note(scope.key, "Claude's safeguards stopped Opus; trying Sonnet");
+              standaloneClaudeActivity.released(scope.key);
+            }
+            attempt -= 1;
+            continue;
+          }
           if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
           // Earlier stages are saved; this one waits for the reset and asks again.
           reportClaudeUsageLimit({
@@ -263,7 +289,7 @@ export function createInterviewClaudeTransport({
             text,
             systemAppend: '',
             model: reply?.model ?? null,
-            requestedModel: profile.model ?? null,
+            requestedModel: model ?? null,
             effort: profile.effort ?? null,
             tools: attemptTools || null,
             costUsd: reply?.costUsd ?? null,

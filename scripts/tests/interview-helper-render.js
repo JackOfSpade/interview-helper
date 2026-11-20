@@ -1275,6 +1275,32 @@ export default [
     },
   },
   {
+    name: 'interview helper render: a failed Prepare keeps its fixed failure code and says why',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = [];
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+          prepareInterviewBrief: async () => ({ success: false, error: 'The interview brief could not be prepared safely.', errorCode: 'CLAUDE_SAFEGUARD_BLOCKED' }),
+        };
+        const root = await mount(bundle, window, {
+          nodes: sourceNodes(),
+          initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
+          onPersist: (patch, next) => updates.push({ patch, next }),
+        });
+        try {
+          await bundle.module.act(async () => { await flush(); });
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
+          const failure = updates.find(item => item.patch.interviewHelperPreparation?.status === 'failed');
+          assert(failure?.patch.interviewHelperPreparation?.code === 'CLAUDE_SAFEGUARD_BLOCKED'
+            && text(window).includes("Claude's safety filter stopped this preparation"),
+          'a safeguard stop must be named in the saved state and on screen');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
     name: 'interview helper render: hostile persisted setup display text is never rendered raw',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {

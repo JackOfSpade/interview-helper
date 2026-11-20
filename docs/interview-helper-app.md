@@ -267,6 +267,8 @@ calls no AI and the panel says nothing was generated; redoing the research needs
 an empty tab or changed inputs. With changed inputs and both tabs holding cards,
 the research and the sealed answers are prepared again and the tabs are kept.
 
+**Safeguard fallback and failure reasons (2026-11-20).** Claude's safeguards stopped Prepare research on Opus high for a Moderna protein-design posting twice in a row (refusal category `bio`), while Sonnet finished the same research. `electron/ipc/interviewClaudeTransport.js` now runs any Opus call that ends in `CLAUDE_SAFEGUARD_BLOCKED` once more on Sonnet at the same effort, in a fresh session from the original prompt; a second stop, or a stop on a Sonnet stage, fails the call. A failed Prepare keeps its fixed error code: the main process sets it on the generic error, the window stores it as `interviewHelperPreparation.code` and shows a specific line (safeguards, Parallel out of usage, usage limit, timeout, sign-in), and the bug report's Preparation column shows it, for example `failed (CLAUDE_SAFEGUARD_BLOCKED)`, after a restart too.
+
 **Cancel preparation (2026-11-19).** While a Prepare runs, its status card
 shows Cancel to the right of Pause & save (and of Resume once paused); the panel
 has no cancel button of its own. It calls `cancel-interview-brief` with the run

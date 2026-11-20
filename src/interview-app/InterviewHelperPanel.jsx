@@ -47,6 +47,17 @@ function projectBundle(reply) {
 const MAX_MANUAL_AI_RETIREMENT_RECEIPTS = 32;
 const safeReceiptError = () => 'The career files could not be read. Choose them again.';
 const safePreparationRecoveryError = () => 'Preparation did not complete. Resume or change setup to try again.';
+// Why a Prepare failed, by the fixed code the main process returns. Anything else gets the generic line.
+const PREPARATION_FAILURE_MESSAGES = Object.freeze({
+  CLAUDE_SAFEGUARD_BLOCKED: "Claude's safety filter stopped this preparation, even after a retry on another model. This is usually a false alarm on a science or health posting. Resume to try again.",
+  PARALLEL_SEARCH_EXHAUSTED: 'Web research is paused because Parallel Search is out of usage. Resume in about 10 minutes, or add a Parallel API key.',
+  CLAUDE_USAGE_LIMIT: 'Claude usage limit reached. Resume after it resets.',
+  CLAUDE_TIMEOUT: 'Claude took too long on one step. Resume to try again.',
+  CLAUDE_CLI_MISSING: 'Claude Code is not installed or not signed in. Install it and sign in, then resume.',
+  CLAUDE_NOT_SIGNED_IN: 'Claude Code is not signed in. Sign in, then resume.',
+});
+const PREPARATION_FAILURE_CODE_RE = /^[A-Z][A-Z0-9_]{2,63}$/u;
+const preparationFailureMessage = code => PREPARATION_FAILURE_MESSAGES[code] || safePreparationRecoveryError();
 function manualAiCleanupMarker(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const keys = Object.keys(value).sort();
@@ -571,11 +582,13 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
       : { runId: manualAiRunId, preparation: null, recordId: null, binding: null };
     persist({ interviewHelperPreparation: { status: 'preparing' }, interviewHelperPreparationRecordId: null, interviewHelperPreparationRunId: manualAiRunId, interviewHelperPreparationInputBinding: binding });
     setPrepareNotice(null);
+    let failureCode = null;
     try {
       // A first Prepare may reuse what another interview for the same posting already prepared. "Prepare again" runs,
       // unless both Q&A tabs hold cards and the same inputs were already prepared: then there is nothing to write.
       const reply = await window.electronAPI.prepareInterviewBrief({ nodeId: id, snapshotId: activeSnapshotId, jobUrl, bundleArtifactId: bundle.artifactId, manualAiRunId, reuseExisting: !prepBrief });
       const brief = reply?.brief;
+      if (typeof reply?.errorCode === 'string' && PREPARATION_FAILURE_CODE_RE.test(reply.errorCode)) failureCode = reply.errorCode;
       if (token !== preparationOperationRef.current || operationKey !== preparationKeyRef.current) {
         await retireTerminalManualAiRun('preparation', manualAiRunId);
         return;
@@ -589,7 +602,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
           : reply?.qaKept === true ? "Research and the cue card's answers were prepared again. Both Q&A tabs already have cards, so they were left as they are." : null));
       await retireTerminalManualAiRun('preparation', manualAiRunId);
     } catch {
-      if (token === preparationOperationRef.current && operationKey === preparationKeyRef.current) persist({ interviewHelperPreparation: { status: 'failed', error: safePreparationRecoveryError() }, interviewHelperPreparationInputBinding: binding, interviewHelperPreparationRunId: manualAiRunId });
+      if (token === preparationOperationRef.current && operationKey === preparationKeyRef.current) persist({ interviewHelperPreparation: { status: 'failed', error: preparationFailureMessage(failureCode), ...(failureCode ? { code: failureCode } : {}) }, interviewHelperPreparationInputBinding: binding, interviewHelperPreparationRunId: manualAiRunId });
       else await retireTerminalManualAiRun('preparation', manualAiRunId);
     }
     finally {
@@ -620,7 +633,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
   }, [activeSnapshotId, bundleLoadStatus, data.interviewHelperJobUrl, id, prepBrief, verifiedPreparation.recordId]);
   const canPrepare = !data.locked && !manualAiStartBlocked && loaded.status === 'ready' && bundleLoadStatus === 'ready' && preparationVerificationStatus !== 'loading' && !!canonicalInterviewJobUrl(data.interviewHelperJobUrl) && !!persistedBundle?.artifactId && !!persistedBundle?.digest;
   const preparationStatus = data.interviewHelperPreparation?.status;
-  const preparationError = safePreparationRecoveryError();
+  const preparationError = preparationFailureMessage(data.interviewHelperPreparation?.code);
   const locallyPreparing = preparationStatus === 'preparing' && localPreparationRunRef.current === data.interviewHelperPreparationRunId;
   // The side panel owns this run's live activity and its Pause and Cancel buttons; the node
   // only shows that it is preparing. No save step: Resume follows the hold.

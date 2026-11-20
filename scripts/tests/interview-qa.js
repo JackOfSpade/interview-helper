@@ -434,6 +434,34 @@ export default [
     assert.equal(samples[0].tools, PARALLEL_RESEARCH_TOOLS.join(','));
     assert.equal(samples[0].tools.split(',').length, 6);
   } },
+  { name: 'interview Claude transport: a safeguard stop on Opus runs the same call once on Sonnet in a fresh session', async run() {
+    const blocked = () => Object.assign(new Error('blocked'), { code: 'CLAUDE_SAFEGUARD_BLOCKED' });
+    const research = []; const samples = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true, readKey: async () => '' },
+      runStage: async () => { throw new Error('runStage is not used for research'); },
+      runResearchStage: async args => { research.push(args); if (args.model === 'opus') throw blocked(); return { text: 'Research prose', model: 'claude-sonnet-5-5' }; },
+      recordSample: sample => samples.push(sample), recordUsage: () => {}, routeFor: () => null });
+    assert.equal(await transport.callRaw('RESEARCH', { task: 'interview-brief-research' }), 'Research prose');
+    assert.deepEqual(research.map(args => args.model), ['opus', 'sonnet']);
+    assert.equal(research[1].effort, 'high', 'the fallback keeps the stage effort');
+    assert.notEqual(research[0].sessionId, research[1].sessionId);
+    assert.equal(research[1].text, 'RESEARCH');
+    assert.equal(samples[0].requestedModel, 'sonnet');
+
+    const runs = [];
+    const writer = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, routeFor: () => null, recordSample: () => {}, recordUsage: () => {},
+      runStage: async args => { runs.push(args); throw blocked(); } });
+    await assert.rejects(writer.callText('WRITE', { task: 'interview-answers' }), error => error.code === 'CLAUDE_SAFEGUARD_BLOCKED');
+    assert.deepEqual(runs.map(args => args.model), ['opus', 'sonnet'], 'a second stop fails the call: one fallback only');
+    assert.equal(runs[1].resume, false);
+    assert.equal(runs[1].text.startsWith('WRITE'), true, 'the fresh session gets the original prompt');
+
+    const sonnetRuns = [];
+    const sonnetOnly = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, routeFor: () => null, recordSample: () => {}, recordUsage: () => {},
+      runStage: async args => { sonnetRuns.push(args); throw blocked(); } });
+    await assert.rejects(sonnetOnly.callText('TOPICS', { task: 'x', claudeStage: 'qa-technical-topics' }), error => error.code === 'CLAUDE_SAFEGUARD_BLOCKED');
+    assert.equal(sonnetRuns.length, 1, 'a stage already on Sonnet is not retried');
+  } },
   { name: 'interview Claude transport: a research error other than exhaustion propagates and never reaches runStage', async run() {
     const runs = []; let researchCalls = 0;
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, maxAttempts: 3,

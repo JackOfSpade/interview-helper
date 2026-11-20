@@ -1466,6 +1466,8 @@ export async function publishInterviewPreparedAnswers({ bank, brief, userDataPat
 }
 
 const interviewActivityKey = runId => `interview:${runId}`;
+// A failure code is a fixed upper-case identifier (CLAUDE_SAFEGUARD_BLOCKED, PARALLEL_SEARCH_EXHAUSTED, ...), never text.
+const PREPARE_FAILURE_CODE_RE = /^[A-Z][A-Z0-9_]{2,63}$/u;
 /** Register intake, sealed research and separately sealed prepared answers. */
 export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief,
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
@@ -1801,7 +1803,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     catch (error) {
       if (signal?.aborted) throw error;
       logWarning(`[Interview] brief preparation failed: ${String(error?.code || 'no code')} ${String(error?.message || error).slice(0, 300)}`);
-      throw new Error('The interview brief could not be prepared safely.');
+      // The message stays generic; a fixed code tells the window why (a safeguard stop, Parallel out of usage, ...).
+      const code = typeof error?.code === 'string' && PREPARE_FAILURE_CODE_RE.test(error.code) ? error.code : undefined;
+      throw Object.assign(new Error('The interview brief could not be prepared safely.'), code ? { code } : {});
     }
     finally { standaloneClaudeActivity.remove(interviewActivityKey(args.manualAiRunId)); }
   }
