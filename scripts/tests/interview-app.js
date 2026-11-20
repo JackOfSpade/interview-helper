@@ -148,12 +148,13 @@ const tests = [
       const imported = result.state.sessions[1];
       // Q&A and practice history are stored per id, so the id must carry over unchanged.
       assert.equal(imported.id, 'node-5e19');
-      assert.equal(imported.data.interviewHelperCurrentStep, 0, 'missing fields take the fresh-interview defaults');
+      assert.equal(imported.data.interviewHelperJobUrl, null, 'missing fields take the fresh-interview defaults');
+      assert.equal('interviewHelperCurrentStep' in imported.data || 'interviewHelperLockedPlan' in imported.data, false, 'the removed cue card rail fields are not part of new state');
       assert.equal(interviewTitle(imported), 'Reddit · Software Engineer');
       assert.equal(interviewTitle({ title: '  Final round  ', data: imported.data }), 'Final round');
       assert.equal(interviewTitle({ data: emptyInterviewData() }), 'New interview');
-      const patched = patchInterview(result.state, 'node-5e19', { interviewHelperCurrentStep: 2 });
-      assert.equal(patched.sessions[1].data.interviewHelperCurrentStep, 2);
+      const patched = patchInterview(result.state, 'node-5e19', { practiceSteering: 'final round' });
+      assert.equal(patched.sessions[1].data.practiceSteering, 'final round');
       assert.equal(patchInterview(patched, 'missing', { x: 1 }), patched, 'a patch for a deleted interview changes nothing');
       const removed = removeInterview({ ...patched, selectedId: 'node-5e19' }, 'node-5e19');
       assert.deepEqual([removed.sessions.length, removed.selectedId], [1, 'here']);
@@ -198,6 +199,14 @@ const tests = [
       assert.equal(config.appId, 'com.antigravity.interviewhelper');
       assert.equal(config.productName, 'Interview Helper');
       assert.equal(config.extraMetadata.main, 'dist-electron-interview/main.cjs');
+      // The app is signed with a local identity so macOS permission grants survive rebuilds.
+      assert.equal(config.mac.identity, 'AI Chalkboard Local Code Signing'); assert.equal(config.mac.hardenedRuntime, true);
+      assert.equal(config.mac.forceCodeSigning, true);
+      assert.equal(config.mac.timestamp, 'none');
+      assert.equal(config.mac.entitlements, 'build/entitlements.interview.plist'); assert.equal(config.mac.entitlementsInherit, 'build/entitlements.interview.plist');
+      assert.deepEqual(config.mac.extraResources.map(item => item.to), ['practice-audio/Practice Audio Helper.app'], 'only the practice-audio helper ships');
+      assert.deepEqual(Object.keys(config.mac.extendInfo).sort(), ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription']);
+      assert.doesNotMatch(read('scripts/build-macos.mjs'), /interview-audio|InterviewAudioHelper/u);
       assert.equal(pkg.main, 'dist-electron-interview/main.cjs');
       const viteConfig = read('vite.interview.config.js');
       assert.match(viteConfig, /outDir: 'dist-interview'/u);
@@ -220,7 +229,7 @@ const tests = [
       const commands = [];
       const runCommand = (command, args) => { commands.push([command, ...args]); return { status: 0 }; };
       signBundledHelpers({ apps: ['/out/Interview Helper.app'], identity: 'Local Identity', helpers: BUILD_TARGETS.interview.helpers, projectDir: '/repo', runCommand, exists: () => true });
-      assert.equal(commands.length, 2);
+      assert.equal(commands.length, 1);
       const practice = commands.find(command => command.at(-1).endsWith('Practice Audio Helper.app'));
       assert.equal(practice.at(-1), '/out/Interview Helper.app/Contents/Resources/practice-audio/Practice Audio Helper.app');
       assert.equal(practice[practice.indexOf('--entitlements') + 1], '/repo/native/practice-audio/entitlements.plist');

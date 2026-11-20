@@ -62,9 +62,7 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   // practice-call-draft-answer (testing aid: the candidate's chat reply to the latest question, put in the chat box and never sent on its own; electron/practiceCall/draftAnswer.js): Sonnet low, chosen by reasoning, not measured. The person waits on it mid-call and accuracy is not checked, so speed wins; Sonnet low writes the call's acknowledgements without leaking content, and Haiku drops supplied detail in qa-disclosures.
   'practice-call-draft-answer': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
-  // qa-glance-cues (short reminders for the live card, one call per Prepare): Opus low, not yet tested. Chosen by analogy with qa-card-repair, where Sonnet added unsupported wording and Haiku broke lines (docs/ai-model-selection.md).
-  'qa-glance-cues': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a cue (docs/ai-model-selection.md).
+  // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a short reminder (docs/ai-model-selection.md).
   'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // qa-gap-answers (which unanswered questions the career text cannot answer, and the honest admission, closest experience and reminders for those; one call per Prepare that has unanswered cards): Opus medium, not yet tested. It reads the whole career text against every open question and a wrong "gap" tells the person to deny real experience, so it gets the same thought as qa-approach-reminders.
   'qa-gap-answers': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),

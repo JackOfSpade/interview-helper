@@ -13,7 +13,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { buildInterviewAudioHelper } from './build-interview-audio-helper.mjs';
 import { buildPracticeAudioHelper } from './build-practice-audio-helper.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -30,7 +29,6 @@ export const BUILD_TARGETS = Object.freeze({
     builderConfig: 'electron-builder.interview.json',
     // Native helpers shipped in Resources, with the entitlements each must keep.
     helpers: Object.freeze([
-      Object.freeze({ resource: 'interview-audio/Interview Audio Helper.app', entitlements: 'native/interview-audio/entitlements.plist' }),
       Object.freeze({ resource: 'practice-audio/Practice Audio Helper.app', entitlements: 'native/practice-audio/entitlements.plist' }),
     ]),
   }),
@@ -519,9 +517,8 @@ export function buildMacApplication(projectDir = process.cwd()) {
   const { identity } = readConfiguredMacSigningConfig(projectDir);
   assertMacSigningPrerequisites({ identity });
 
-  // Only Interview Helper ships the native audio helpers.
+  // Only Interview Helper ships the native practice audio helper.
   if (activeTarget.helpers.length) {
-    buildInterviewAudioHelper({ projectDir, identity });
     buildPracticeAudioHelper({ projectDir, identity });
   }
   compileApplication(projectDir);

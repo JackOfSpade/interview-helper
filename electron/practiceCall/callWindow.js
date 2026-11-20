@@ -5,7 +5,7 @@ import { createCallStore, isPracticeCallId } from './callStore.js';
 import { createPracticeCallService } from './callService.js';
 import { createReplayHandler } from './replayProtocol.js';
 
-// Same import as interviewWindow.js: works in the CommonJS main bundle (no import.meta) and under the test stub.
+// Imported as a whole: works in the CommonJS main bundle (no import.meta) and under the test stub.
 const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
@@ -45,8 +45,8 @@ function trustedOwner(event, owner, authorized, nodeId) {
 
 /**
  * One practice-call window per call plus the canvas- and window-facing IPC.
- * The window is sandboxed with the practice-call preload and the same URL
- * contract as interviewWindow (`?view=practice-call`).
+ * The window is sandboxed with the practice-call preload and loads
+ * the app's renderer at `?view=practice-call`.
  */
 export function createPracticeCallController(deps = {}) {
   const runtime = deps.BrowserWindow && deps.ipcMain ? {} : electron();

@@ -78,8 +78,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('clear-interview-qa-topics', { nodeId });
   },
 
-  // Interview view and practice call
-  launchInterviewWindow: args => ipcRenderer.invoke('interview-window:launch', args),
+  // Practice call
   startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, steering }) => ipcRenderer.invoke('practice-call:start', {
     nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest,
     ...(typeof steering === 'string' ? { steering } : {}),

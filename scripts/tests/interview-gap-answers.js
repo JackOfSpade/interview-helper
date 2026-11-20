@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 import { gapAdmissionFailure, gapCareerPieces, gapClosestFailure, gapRoleQuestionFailure, generateInterviewGapAnswers, interviewGapPrompt } from '../../electron/ipc/interviewAnswerGap.js';
-import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, fillInterviewQaGaps, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard } from '../../electron/ipc/interviewQaStore.js';
+import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, fillInterviewQaGaps, loadInterviewQa, saveInterviewQaCard } from '../../electron/ipc/interviewQaStore.js';
 
 const PIECE = 'Engineer, Acme School, 2021 to 2024\nRan 3 Docker services on one virtual machine.';
 const evidence = [
@@ -99,7 +99,6 @@ export default [
       assert.deepEqual(gap.bullets, [{ stage: 'point', text: 'The closest I have done is running 3 Docker services on one machine.' }]);
       assert.deepEqual(gap.approach.map(item => item.text), ['Explain how you would learn it', 'Name what carries over']);
       assert(cards.find(card => card.question === 'Have you managed people?').gap === false, 'a question that was not a gap stays empty');
-      assert((await loadInterviewQaLiveCards({ userDataPath: dir, nodeId: 'h' })).find(card => card.id === kubernetes.id).gap === true);
 
       const again = [];
       await fillInterviewQaGaps({ userDataPath: dir, nodeId: 'h', generate: async units => { again.push(...units); return new Map(); } });

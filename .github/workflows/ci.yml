@@ -19,8 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # The one test that drives a real browser skips itself here.
-      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       # Hosted runners are several times slower than a desktop on the suites that write many files.
       TEST_TIMEOUT_MS: "180000"
     steps:

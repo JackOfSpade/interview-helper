@@ -55,7 +55,6 @@ function loadPreloadBridge() {
 const DIRECT_FORWARDING = [
   ['loadInterviewHelperCareerSnapshot', 'load-interview-helper-career-snapshot', { nodeId: 'interview-node', snapshotId: 'a'.repeat(64) }],
   ['loadInterviewApplicationBundle', 'load-interview-preparation-bundle', { nodeId: 'interview-node', artifactId: 'b'.repeat(64) }],
-  ['launchInterviewWindow', 'interview-window:launch', { nodeId: 'interview-node', snapshotId: 'a'.repeat(64), brief: { briefId: 'brief-1' } }],
 ];
 
 const tests = [
@@ -67,6 +66,7 @@ const tests = [
         assert.equal(typeof api[method], 'function', `electronAPI must expose ${method}`);
       }
       assert.equal(typeof api.prepareInterviewBrief, 'function', 'electronAPI must expose the renderer-safe brief preparation method');
+      assert.equal(api.launchInterviewWindow, undefined, 'the cue card launcher is gone');
       assert.equal(api.buildInterviewBrief, undefined, 'renderer must not receive a direct backend-named brief builder');
       for (const method of ['selectInterviewApplicationBundle', 'loadInterviewPractice', 'startInterviewPractice', 'cancelInterviewPractice', 'onInterviewPracticeUpdated']) {
         assert.equal(api[method], undefined, `electronAPI must not expose the removed ${method}`);

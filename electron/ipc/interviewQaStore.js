@@ -6,8 +6,7 @@
  * state; see bindInterviewQaPosting.
  *
  * Cards keep the sealed answer-bank card shape (headline/bullets/example with
- * evidence IDs) plus `scope`, `origin`, `source`, `author` and `status`, so the
- * live window can match and display them like prepared cards.
+ * evidence IDs) plus `scope`, `origin`, `source`, `author` and `status`.
  *
  * Preparation writes EMPTY TABS ONLY: a set that holds any card is left
  * exactly as it is, and a set with no cards is written in full. A deleted
@@ -22,7 +21,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
-import { interviewLastRole } from './interviewAnswerBank.js';
 
  const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
 const STORE_VERSION = 1;
@@ -56,7 +54,6 @@ export function approachOf(card) {
     .map(item => ({ text: typeof item?.text === 'string' ? item.text.trim() : '', example: typeof item?.example === 'string' ? item.example.trim() : '' }))
     .filter(item => item.text && text(item.text, MAX_APPROACH_LINE) && text(item.example, MAX_EXAMPLE)).slice(0, MAX_APPROACH);
 }
-const recentEmployerOf = store => (typeof store?.recentEmployer === 'string' && text(store.recentEmployer, 200) ? store.recentEmployer.trim() : '');
 
 /** A card is answered when its headline, any bullet or its example has text. */
 export function isAnsweredCard(card) {
@@ -234,8 +231,7 @@ async function locked(userDataPath, scope, nodeId, task) {
 }
 
 function section(store, scope) {
-  const recentEmployer = recentEmployerOf(store);
-  const cards = store.cards.map(card => ({ ...toQaCard(card, scope), ...(recentEmployer ? { recentEmployer } : {}) }));
+  const cards = store.cards.map(card => toQaCard(card, scope));
   const status = !cards.length ? 'missing' : cards.every(card => card.status === 'ready') ? 'ready' : 'partial';
   return scope === 'company'
     ? { status, company: store.company || '', cards, topics: topicsOf(store), foundationLinks: store.foundationLinks.map(link => ({ foundationQuestion: link.foundationQuestion, question: link.question, sourceUrl: link.sourceUrl })) }
@@ -427,8 +423,6 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   const generated = (bank?.cards || []).filter(isAnsweredCard);
   const foundationIncoming = generated.filter(card => isFoundationQuestion(card.question)).map(card => generatedCard(card));
   const companyIncoming = generated.filter(card => !isFoundationQuestion(card.question)).map(card => generatedCard(card));
-  // Remembered so the live card can leave the most recent employer unsaid.
-  const recentEmployer = (interviewLastRole(bank?.evidence)?.employer || '').trim().slice(0, 200);
   const links = [];
   for (const item of disclosureMapping) {
     const source = { url: item.sourceUrl, date: item.sourceDate || 'unknown', quote: item.evidenceQuote || '' };
@@ -453,7 +447,6 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
     const store = await readStore(userDataPath, 'foundation', nodeId);
     // Checked inside the lock: a card added meanwhile keeps the tab as it is.
     if (wanted.has('foundation') && !store.cards.length) { store.tombstones = []; fillCards(store, foundationIncoming); }
-    if (recentEmployer) store.recentEmployer = recentEmployer;
     await writeStore(userDataPath, 'foundation', nodeId, store);
   });
   await locked(userDataPath, 'company', nodeId, async () => {
@@ -481,14 +474,13 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
       }
       store.foundationLinks = store.foundationLinks.slice(-MAX_LINKS);
     }
-    if (recentEmployer) store.recentEmployer = recentEmployer;
     if (incomingCompany && !(isCompanyPlaceholder(incomingCompany) && priorCompany)) store.company = incomingCompany;
     await writeStore(userDataPath, 'company', nodeId, store);
   });
   return loadInterviewQa({ userDataPath, nodeId });
 }
 
-// ------------------------------------------------------------ glance cues --
+// ------------------------------------------------------------ answer lines --
 
 /** Every stored answer line as `{ field, index, statement }` (object statements only). */
 function cardStatements(card) {
@@ -499,47 +491,6 @@ function cardStatements(card) {
   add('example', 0, card.example);
   (Array.isArray(card.extensions) ? card.extensions : []).forEach((item, index) => add('extensions', index, item));
   return lines;
-}
-const hasCue = statement => typeof statement.cue === 'string' && !!statement.cue.trim();
-
-/**
- * Add a short live-card reminder (`cue`) to stored answer lines that lack one.
- * `generate(units)` receives `[{ id, text }]` and resolves to a Map of id to
- * cue. A cue is saved only while its line still has the text it was written
- * for, so an edit made during the call is never paired with a stale cue.
- */
-export async function fillInterviewQaCues({ userDataPath, nodeId, generate, wants = () => true, scopes: only = QA_SCOPES }) {
-  const scopes = scopesOf(only);
-  const units = [];
-  for (const scope of scopes) {
-    const store = await readStore(userDataPath, scope, nodeId);
-    for (const card of store.cards) {
-      for (const { field, index, statement } of cardStatements(card)) {
-        if (!hasCue(statement) && wants(statement.text)) units.push({ id: `${scope}:${card.id}.${field}[${index}]`, scope, cardId: card.id, field, index, text: statement.text });
-      }
-    }
-  }
-  if (!units.length) return { requested: 0, saved: 0 };
-  const cues = await generate(units.map(({ id, text }) => ({ id, text })));
-  let saved = 0;
-  for (const scope of scopes) {
-    const mine = units.filter(unit => unit.scope === scope && typeof cues?.get?.(unit.id) === 'string');
-    if (!mine.length) continue;
-    await locked(userDataPath, scope, nodeId, async () => {
-      const store = await readStore(userDataPath, scope, nodeId);
-      let changed = 0;
-      for (const unit of mine) {
-        const card = store.cards.find(item => item.id === unit.cardId);
-        const line = card && cardStatements(card).find(item => item.field === unit.field && item.index === unit.index);
-        if (!line || line.statement.text !== unit.text || hasCue(line.statement)) continue;
-        line.statement.cue = cues.get(unit.id);
-        changed += 1;
-      }
-      if (changed) await writeStore(userDataPath, scope, nodeId, store);
-      saved += changed;
-    });
-  }
-  return { requested: units.length, saved };
 }
 
 // ------------------------------------------------------ approach reminders --
@@ -686,12 +637,12 @@ export async function fillInterviewQaGaps({ userDataPath, nodeId, generate, scop
   return { requested: units.length, saved, added };
 }
 
-/** Live-window cards: Foundation then Company, each tagged with its scope. */
+/** Every saved card, Foundation then Company, each tagged with its scope; the practice call draws its questions from these. */
 export async function loadInterviewQaLiveCards({ userDataPath, nodeId }) {
   const [foundation, company] = await Promise.all([readStore(userDataPath, 'foundation', nodeId), readStore(userDataPath, 'company', nodeId)]);
   return [
-    ...foundation.cards.map(card => ({ ...card, scope: 'foundation', recentEmployer: recentEmployerOf(foundation) })),
-    ...company.cards.map(card => ({ ...card, scope: 'company', recentEmployer: recentEmployerOf(company) })),
+    ...foundation.cards.map(card => ({ ...card, scope: 'foundation' })),
+    ...company.cards.map(card => ({ ...card, scope: 'company' })),
   ];
 }
 

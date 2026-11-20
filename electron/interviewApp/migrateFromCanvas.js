@@ -18,7 +18,6 @@ export const MIGRATED_ENTRIES = Object.freeze([
   'interview-helper-answer-bindings',
   'interview-helper-qa',
   'interview-helper-career-conversions',
-  'interview-cue-card-logs',
   'practice-calls',
   'practice-models',
   'practice-voice-pool.json',

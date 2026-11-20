@@ -59,7 +59,6 @@ export default defineConfig({
         },
       }),
       withInputs(cjsEntry('electron/interviewApp/interviewAppPreload.js')),
-      withInputs(cjsEntry('electron/interviewWindowPreload.js')),
       withInputs(cjsEntry('electron/practiceCallPreload.js')),
       // Practice-call model worker thread: its own entry so the worker never loads main.cjs.
       withInputs(cjsEntry('electron/practiceCall/models/inferenceWorkerThread.js', { external: ['onnxruntime-node'] })),

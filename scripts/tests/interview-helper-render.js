@@ -5,7 +5,6 @@ import { assert } from './testHelpers.js';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
-import { buildInterviewPlan } from '../../src/utils/interviewHelper.js';
 
 const SNAPSHOT_A = 'a'.repeat(64);
 const SNAPSHOT_B = 'b'.repeat(64);
@@ -1041,15 +1040,14 @@ export default [
     },
   },
   {
-    name: 'interview helper render: preparation is fenced after URL invalidation and a valid public brief launches the narrow view',
+    name: 'interview helper render: preparation is fenced after URL invalidation and a valid public brief shows the ready panel',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
-        const pending = deferred(); const updates = []; const launches = [];
+        const pending = deferred(); const updates = [];
         window.electronAPI = {
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
           prepareInterviewBrief: async () => pending.promise,
-          launchInterviewWindow: async args => { launches.push(args); },
           ...SWITCH_APPLICATION_API,
         };
         const root = await mount(bundle, window, { initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
@@ -1072,29 +1070,25 @@ export default [
           });
           // Relaunch coverage uses a fresh prepared mount below; this instance
           // specifically proves late async preparation cannot overwrite it.
-          assert(launches.length === 0 && binding.includes(BUNDLE_ID), 'stale preparation must not make the launch path available');
+          assert(binding.includes(BUNDLE_ID) && !button(window, 'Open cue card'), 'stale preparation must not show a ready brief');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
       await withDomBundledProbe(async (bundle, window) => {
-        const launches = [];
         const ready = publicBrief();
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => { const reply = publicBundle(); reply.bundle.listingSource = 'given'; return reply; }, loadInterviewPreparedBrief: async () => ({ brief: ready }), launchInterviewWindow: async args => { launches.push(args); } };
+        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => { const reply = publicBundle(); reply.bundle.listingSource = 'given'; return reply; }, loadInterviewPreparedBrief: async () => ({ brief: ready }) };
         const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}` }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const launch = button(window, 'Open cue card');
-          assert(launch && !launch.disabled, 'a validated public brief plus reloaded bundle must enable launch');
+          assert(!button(window, 'Open cue card'), 'the cue card is gone: no launch button is offered');
           const readyPanel = window.document.querySelector('[aria-label="Interview preparation ready"]');
           assert(readyPanel?.textContent.includes('Research ready · Product Manager at Acme')
-            && readyPanel.textContent.includes('there are no prepared answers, so the cue card would stay blank.'), 'ready copy must say research alone leaves the cue card blank');
+            && readyPanel.textContent.includes('Research is prepared. Your answers are in the Q&A tabs; to have Prepare write a tab again, delete every card in it first.') && !/cue card/iu.test(readyPanel.textContent), 'ready copy for research alone points to the Q&A tabs');
           assert(readyPanel.textContent.includes('Confirm this career source matches the application you submitted.')
             && readyPanel.textContent.includes('This bundle is a captured copy; replace it after editing the documents.'), 'ready copy must explain application alignment and how to refresh frozen document content');
           assert(!readyPanel.textContent.includes('Job listing:') && window.document.querySelector('[aria-label="2. Application"] [data-listing-source="given"]:last-child')?.textContent.startsWith('Job listing: given'), 'the listing source shows in the Application section, not the preparation card');
           assert(readyPanel.textContent.includes('Submitted wording — reference, not career evidence'), 'submitted application wording must stay visibly separate from approved career evidence');
           assert(window.document.querySelector('[aria-label="3. Interview preparation"]')
             && !text(window).includes('Worker preparation'), 'the setup section must use interview terminology');
-          await bundle.module.act(async () => { launch.click(); await flush(); });
-          assert(launches.length === 1 && launches[0].nodeId === 'interview-helper' && launches[0].snapshotId === SNAPSHOT_A && launches[0].jobUrl === JOB_URL && launches[0].brief.briefId === ready.briefId, 'launch must bind the narrow window to the current canonical job URL');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
@@ -1105,17 +1099,16 @@ export default [
       for (const bankAvailable of [true, false]) {
         await withDomBundledProbe(async (bundle, window) => {
           const ready = publicBrief();
-          window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle(), loadInterviewPreparedBrief: async () => ({ brief: ready, answerBankAvailable: bankAvailable, answerCardCount: 16 }), launchInterviewWindow: async () => undefined };
+          window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle(), loadInterviewPreparedBrief: async () => ({ brief: ready, answerBankAvailable: bankAvailable, answerCardCount: 16 }) };
           const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`, interviewHelperAnswerCardCount: 20 }, nodes: sourceNodes() });
           try {
             await bundle.module.act(async () => { await flush(); await flush(); });
             const panel = window.document.querySelector('[aria-label="Interview preparation ready"]');
             assert(text(window).includes('then writes answer cards from your career data. Read and edit the cards in the Q&A panel before the interview.'), 'preparation must explain the separate answer step before the interview');
             if (bankAvailable) {
-              assert(panel?.textContent.includes('16 prepared answers ready') && panel.textContent.includes('shows short cues when it recognises a prepared question.'), 'a verified answer bank must announce its real count and what the cue card will show');
-              assert(panel.textContent.includes('It stays blank for anything else.'), 'ready copy must say the card stays blank for an unmatched question');
+              assert(panel?.textContent.includes('16 prepared answers ready') && !/cue card/iu.test(panel.textContent), 'a verified answer bank must announce its real count');
             } else {
-              assert(panel?.textContent.includes('Research ready') && panel.textContent.includes('Prepare again to add answer cards.') && !panel.textContent.includes('20 prepared answers'), 'legacy preparation must retain honest cue-only copy and ignore renderer-supplied answer counts');
+              assert(panel?.textContent.includes('Research ready') && panel.textContent.includes('Your answers are in the Q&A tabs') && !panel.textContent.includes('20 prepared answers'), 'research-only preparation keeps research-only copy and ignores renderer-supplied answer counts');
             }
           } finally { await bundle.module.act(async () => root.unmount()); }
         });
@@ -1141,33 +1134,30 @@ export default [
         }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
-          assert(text(window).includes('Checking saved brief…') && button(window, 'Prepare interview brief')?.disabled && !button(window, 'Open cue card'), 'cached brief content must remain hidden and preparation disabled while main verification is pending');
+          assert(text(window).includes('Checking saved brief…') && button(window, 'Prepare interview brief')?.disabled && !window.document.querySelector('[aria-label="Interview preparation ready"]'), 'cached brief content must remain hidden and preparation disabled while main verification is pending');
           await bundle.module.act(async () => { pending.resolve({ brief: null }); await flush(); });
-          assert(text(window).includes('Saved brief could not be verified; prepare again.') && !text(window).includes('Research ready · Product Manager') && !button(window, 'Open cue card'), 'a missing/mismatched main record must not create a renderer preview or launch path');
+          assert(text(window).includes('Saved brief could not be verified; prepare again.') && !text(window).includes('Research ready · Product Manager') && !window.document.querySelector('[aria-label="Interview preparation ready"]'), 'a missing/mismatched main record must not create a renderer preview or launch path');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
   },
   {
-    name: 'interview helper render: an imported snapshot pin stays stable and never falls back to Job Search',
+    name: 'interview helper render: an imported snapshot pin stays stable, never falls back to Job Search and tolerates old cue card fields',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
-        const original = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: snapshot(), snapshotId: SNAPSHOT_A });
-        assert(original.status === 'supported', 'fixture must provide a saved supported rail');
         const initialData = {
           interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
           interviewHelperJobUrl: JOB_URL,
           interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           interviewHelperPreparation: publicBrief(), interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
           interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`,
-          interviewHelperLockedPlan: original, interviewHelperCurrentStep: 0,
+          interviewHelperLockedPlan: { stale: 'saved by an older version' }, interviewHelperCurrentStep: 3,
         };
-        const updates = []; const launches = []; const loadedSnapshotIds = [];
+        const updates = []; const loadedSnapshotIds = [];
         window.electronAPI = {
           loadInterviewHelperCareerSnapshot: async ({ snapshotId: requested }) => { loadedSnapshotIds.push(requested); return { snapshot: snapshot(requested) }; },
           loadInterviewApplicationBundle: async () => publicBundle(),
           loadInterviewPreparedBrief: async () => ({ brief: publicBrief() }),
-          launchInterviewWindow: async args => { launches.push(args); },
         };
         const root = await mount(bundle, window, { initialData, nodes: sourceNodes(SNAPSHOT_B), onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
@@ -1176,17 +1166,15 @@ export default [
             && !text(window).includes('Job Search')
             && !updates.some(item => item.patch.interviewHelperCareerMode === 'job-search'),
           'an imported snapshot pin must stay active and nothing may fall back to a Job Search source');
-          assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]') && !window.document.querySelector('[aria-label="Paste or type the interviewer question"]'),
-            'the typed question rail is gone from the canvas helper; questions are captured by the interview view');
-          await bundle.module.act(async () => { button(window, 'Open cue card').click(); await flush(); });
-          assert(launches[0]?.snapshotId === SNAPSHOT_A && launches[0]?.plan === null, 'the launched interview view must use the pinned import snapshot and carry no canvas rail');
+          assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]') && !window.document.querySelector('[aria-label="Paste or type the interviewer question"]') && !/cue card/iu.test(text(window)),
+            'old saved cue card rail fields load without rendering any rail or launch button');
           assert(loadedSnapshotIds.every(requested => requested === SNAPSHOT_A), 'only the pinned import snapshot may be requested');
         } finally { await bundle.module.act(async () => root.unmount()); }
 
         const noneLoads = [];
         window.electronAPI = { loadInterviewHelperCareerSnapshot: async ({ snapshotId: requested }) => { noneLoads.push(requested); return { snapshot: snapshot(requested) }; } };
         const noneRoot = await mount(bundle, window, {
-          initialData: { interviewHelperCareerMode: 'none', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperLockedPlan: original, interviewHelperCurrentStep: 0 },
+          initialData: { interviewHelperCareerMode: 'none', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperLockedPlan: { stale: 'saved by an older version' }, interviewHelperCurrentStep: 3 },
           nodes: sourceNodes(),
         });
         try {
@@ -1823,41 +1811,6 @@ export default [
     },
   },
   {
-    name: 'interview helper render: a locked-rail launch refusal is explained while other launch failures stay generic',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => {
-        let rejection = new Error("Error invoking remote method 'interview-window:launch': Error: Another Interview Helper on this canvas has an active interview rail.");
-        window.electronAPI = {
-          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
-          loadInterviewApplicationBundle: async () => publicBundle(),
-          loadInterviewPreparedBrief: async () => ({ brief: publicBrief() }),
-          launchInterviewWindow: async () => { throw rejection; },
-        };
-        const root = await mount(bundle, window, {
-          initialData: {
-            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
-            interviewHelperJobUrl: JOB_URL,
-            interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
-            interviewHelperPreparation: publicBrief(), interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
-            interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`,
-          },
-          nodes: sourceNodes(),
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          const launchButton = button(window, 'Open cue card');
-          assert(launchButton && !launchButton.disabled, 'fixture must render an enabled launch action');
-          const alert = () => [...window.document.querySelectorAll('[role="alert"]')].map(item => item.textContent).join(' ');
-          await bundle.module.act(async () => { launchButton.click(); await flush(); await flush(); });
-          assert(/Another Interview Helper on this canvas has an active interview rail/u.test(alert()), `the locked-rail refusal must be repeated to the user, got: ${alert()}`);
-          rejection = new Error("Error invoking remote method 'interview-window:launch': Error: open /Users/someone/Library/Application Support/private.json: EACCES");
-          await bundle.module.act(async () => { button(window, 'Open cue card').click(); await flush(); await flush(); });
-          assert(/could not be opened/u.test(alert()) && !/EACCES|Library|Another Interview Helper/u.test(alert()), `other launch failures must stay generic and never echo paths, got: ${alert()}`);
-        } finally { await bundle.module.act(async () => root.unmount()); }
-      });
-    },
-  },
-  {
     name: 'interview helper render: a prepare that fails while the bundle picker is open is retired, not orphaned, when another bundle is picked',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
@@ -1906,7 +1859,6 @@ export default [
           loadInterviewPreparedBrief: async () => ({ brief: publicBrief() }),
           listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
           selectInterviewApplicationFolder: async () => ({ ...publicBundle(), jobUrl: JOB_URL }),
-          launchInterviewWindow: async () => undefined,
         };
         const root = await mount(bundle, window, {
           initialData: {
@@ -1919,13 +1871,13 @@ export default [
         });
         try {
           await bundle.module.act(async () => { await flush(); await flush(); });
-          assert(button(window, 'Open cue card'), 'fixture must start with a ready brief');
+          assert(window.document.querySelector('[aria-label="Interview preparation ready"]'), 'fixture must start with a ready brief');
           const before = updates.length;
           await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
           await settle(bundle);
           await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); await flush(); await flush(); });
           assert(!updates.slice(before).some(item => item.patch.interviewHelperPreparation === null || item.patch.interviewHelperPreparationRecordId === null), 'an identical bundle must not clear the finished brief');
-          assert(button(window, 'Open cue card'), 'the finished brief must still be launchable after re-picking the same bundle');
+          assert(window.document.querySelector('[aria-label="Interview preparation ready"]'), 'the finished brief must still show as ready after re-picking the same bundle');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },

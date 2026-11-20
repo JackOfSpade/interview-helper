@@ -152,7 +152,6 @@ export function interviewRows(state, selectedIndex = null) {
       // A failed Prepare names its fixed failure code (CLAUDE_SAFEGUARD_BLOCKED, ...), which survives a restart.
       preparation: !preparation ? 'none' : `${code(preparation.status, /^[a-z-]{1,40}$/u) || 'saved'}${code(preparation.code, /^[A-Z][A-Z0-9_]{2,63}$/u) ? ` (${preparation.code})` : ''}`,
       runPending: typeof data.interviewHelperPreparationRunId === 'string' && data.interviewHelperPreparationRunId.length > 0,
-      step: count(data.interviewHelperCurrentStep),
     };
   });
 }
@@ -165,9 +164,9 @@ function interviewsSection({ state, renderer }) {
     `- ${rows.length} saved · Applied Jobs folder ${state?.appliedJobsFolder ? 'chosen' : 'not chosen'}`,
     ...(rows.length ? [
       '',
-      '| # | On screen | Named | Career files | Career text stored | Job | Preparation | Run id held | Step |',
-      '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
-      ...rows.map(row => `| ${row.index} | ${yes(row.selected)} | ${yes(row.named)} | ${row.careerFiles} | ${yes(row.careerSnapshot)} | ${row.job} | ${row.preparation} | ${yes(row.runPending)} | ${row.step} |`),
+      '| # | On screen | Named | Career files | Career text stored | Job | Preparation | Run id held |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- |',
+      ...rows.map(row => `| ${row.index} | ${yes(row.selected)} | ${yes(row.named)} | ${row.careerFiles} | ${yes(row.careerSnapshot)} | ${row.job} | ${row.preparation} | ${yes(row.runPending)} |`),
     ] : []),
   ].join('\n');
 }

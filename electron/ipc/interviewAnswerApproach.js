@@ -2,7 +2,7 @@
  * Approach reminders: how to answer a "how do you work" interview question.
  *
  * Questions such as "How do you work under pressure?" ask for a way of
- * working, not for one past event. For those the live card shows two or three
+ * working, not for one past event. For those the Q&A card holds two or three
  * short imperative reminders ("Split work into small tasks") that the person
  * illustrates with a real example of their own while speaking.
  *
@@ -12,7 +12,7 @@
  * the same card as its example; the pointer is an id of that line, so the model
  * can select a validated line but cannot write a new claim.
  */
-import { glanceWordCount } from '../../src/utils/interviewGlanceCue.js';
+import { glanceWordCount } from '../../src/utils/wordCount.js';
 
 const CARDS_PER_CALL = 40;
 // Three at most: read in a glance, and one real example has to fit them all.

@@ -92,7 +92,7 @@ export function buildInterviewAnswerEvidence({ snapshot, brief } = {}) {
   const roles = new Map((snapshot.profile.roles || []).map(role => [role.id, role]));
   const add = value => {
     // Never truncate a statement or split off a qualifier. An oversized field
-    // remains available to the exact-cue fallback, outside this answer bank.
+    // remains available outside this answer bank.
     if (!evidenceText(value.text) || !text(value.entityId, 160) || !text(value.sourceLabel, 700)) return;
     const item = { id: evidenceAddress(value, snapshot.snapshotId, brief.briefId), ...value,
       candorFlags: deriveInterviewCandorFlags(value.text) };
@@ -606,7 +606,7 @@ async function sameRoot(store) {
 
 // Retain the latest publications in each private store, including a reused
 // content-addressed bank. No renderer paths, temporary files or symlink targets
-// participate in retention. An expired helper falls back to saved career cues.
+// participate in retention. 
 async function pruneRecords(store, currentRecordId) {
   await sameRoot(store);
   const currentFile = path.join(store.root, `${currentRecordId}.json`);

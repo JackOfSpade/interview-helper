@@ -1,6 +1,6 @@
 # Interview Helper live-use audit
 
-Live selection update (2026-10-30): [AI matching and two-section recall display](interview-live-ai-matching.md) now supersedes the lexical-only live-flow descriptions below. The separate benchmark is still the authority for choosing transport/model/effort defaults; no benchmark scripts were changed.
+> **Historical (2026-11-20):** the live cue card this audit describes, with its audio helper and AI matching, was removed. Its sections on the live window, listening and matching are kept as history only and no longer describe the app.
 
 Date: 2026-10-30. Baseline means the code present at the start of this task; implementation changes are recorded separately below. File line numbers in the baseline trace refer to that initial code and may move in the accompanying change.
 

@@ -4,12 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   addInterviewQaCard, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaFromPreparation, isAnsweredCard, isFoundationQuestion,
-  loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
+  loadInterviewQa, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
 import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
 import { PARALLEL_RESEARCH_TOOLS, PARALLEL_EXHAUSTED_CODE, parallelBlocked, parallelExhaustedError, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
-import { attachInterviewLiveCards, cardsOf } from '../../electron/interviewWindow.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
 
 const statement = (text, evidenceIds = ['career-1']) => ({ text, evidenceIds, quotes: [] });
@@ -157,9 +156,9 @@ export default [
       const added = await addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { question: 'What would you change about Discord?', headline: 'Faster onboarding.', bullets: ['One'], extensions: ['Extra'] } });
       assert.match(added.cards[0].id, /^user-[a-f0-9]{12}$/u);
       await assert.rejects(addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'company', card: { question: 'what would you change about discord' } }), /already in this section/);
-      const live = await loadInterviewQaLiveCards({ userDataPath: dir, nodeId: 'h' });
-      assert.deepEqual(live[0].headline, { text: 'Faster onboarding.', evidenceIds: [], quotes: [] });
-      assert.equal(live[0].scope, 'company');
+      const stored = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).company.cards[0];
+      assert.equal(stored.headline, 'Faster onboarding.');
+      assert.equal(stored.author, 'user');
     });
   } },
   { name: 'interview Q&A disclosures: only exact research substrings survive; AI mapping must name offered cards', async run() {
@@ -219,37 +218,6 @@ export default [
     assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['sonnet', 'low', ''], 'the technical-topics stage is Sonnet low');
     replies = ['bad', 'bad', 'bad'];
     await assert.rejects(transport.callText('X', { task: 'interview-answer-bank', responseSchema: { type: 'object' } }), error => /no JSON object/.test(error.message) && error.code === 'VALIDATION_FAILED');
-  } },
-  { name: 'interview window: live Q&A overlay keeps unedited sealed cards, shows user edits, and orders by store', run() {
-    const sealedIntro = card('intro', 'Tell me about yourself.', 'Sealed intro.');
-    const sealedWhy = card('why', 'Why are you interested in this role?', 'Sealed why.');
-    const sealed = { cards: [sealedIntro, sealedWhy], evidence: [] };
-    assert.deepEqual(cardsOf(sealed), sealed.cards, 'no store means the sealed cards');
-    attachInterviewLiveCards(sealed, [
-      { ...structuredClone(sealedIntro), scope: 'foundation', origin: 'catalog', author: 'generated' },
-      { ...structuredClone(sealedWhy), headline: { text: 'My edited why.', evidenceIds: [], quotes: [] }, scope: 'company', origin: 'catalog', author: 'user' },
-      { id: 'disclosed-1', question: 'Design a rate limiter.', headline: { text: '' }, bullets: [], example: { text: '' }, scope: 'company', origin: 'disclosed', source: { url: 'https://x.test' }, author: 'generated' },
-    ]);
-    const live = cardsOf(sealed);
-    assert.equal(live[0], sealedIntro, 'an unedited generated card is the sealed object itself');
-    assert.notEqual(live[1], sealedWhy); assert.equal(live[1].headline.text, 'My edited why.');
-    assert.equal(live.length, 3);
-    attachInterviewLiveCards(sealed, []);
-    assert.deepEqual(cardsOf(sealed), sealed.cards, 'an empty store falls back to the sealed bank');
-  } },
-  { name: 'interview window: live Q&A ids stay unique across scopes and an extension trimmed by the fact-check stays trimmed', run() {
-    const sealedWhy = { ...card('c3', 'Why Acme?', 'Acme ships fast.'), extensions: [{ id: 'x1', text: 'It saved 80 percent.', evidenceIds: [] }] };
-    const sealed = { cards: [sealedWhy], evidence: [] };
-    attachInterviewLiveCards(sealed, [
-      { ...card('c3', 'Tell me about yourself.', 'Another helper intro.'), scope: 'foundation', origin: 'catalog', author: 'generated' },
-      { ...structuredClone(sealedWhy), extensions: [], scope: 'company', origin: 'catalog', author: 'generated' },
-    ]);
-    const live = cardsOf(sealed);
-    assert.equal(new Set(live.map(item => item.id)).size, 2, 'live ids are unique');
-    assert.equal(live.find(item => item.id === 'c3').question, 'Why Acme?', 'the card matching its sealed question keeps the contested id');
-    const why = live.find(item => item.question === 'Why Acme?');
-    assert.notEqual(why, sealedWhy, 'a card whose extension was removed is not swapped back to the sealed object');
-    assert.deepEqual(why.extensions, []);
   } },
   { name: 'interview practice: AI-planned order uses every question once with the introduction first', async run() {
     const questions = ['Why are you interested in this company?', 'Tell me about yourself.', 'Design a rate limiter.'];

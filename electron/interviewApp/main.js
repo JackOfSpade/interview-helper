@@ -9,10 +9,8 @@ import { atomicWriteFile } from '../utils/atomicWrite.js';
 import { getRecentLogs, logger } from '../logger.js';
 import { pathToFileURL } from 'node:url';
 import { registerCareerTextHandlers } from '../ipc/careerText.js';
-import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from '../ipc/interviewHelper.js';
-import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from '../ipc/interviewPreparation.js';
-import { createInterviewWindowController } from '../interviewWindow.js';
-import { createInterviewTalkingPoints } from '../interviewTalkingPoints.js';
+import { registerInterviewHelperHandlers } from '../ipc/interviewHelper.js';
+import { registerInterviewPreparationHandlers } from '../ipc/interviewPreparation.js';
 import { createPracticeCallController, createReplayHandler } from '../practiceCall/callWindow.js';
 import { createPracticeAudioHelper, practiceAudioHelperPath } from '../interviewPracticeAudio.js';
 import { createMicrophoneAccess } from '../practiceCall/microphoneAccess.js';
@@ -65,7 +63,6 @@ function isOwnRendererUrl(rawUrl) {
 }
 
 let mainWindow = null;
-let interviewWindowController = null;
 let practiceCallController = null;
 let quitting = false;
 let sessionStore = null;
@@ -115,7 +112,6 @@ function createMainWindow() {
     saveEverythingNow(win).finally(() => { savedForClose = true; try { if (!win.isDestroyed()) win.close(); } catch { /* already gone */ } });
   });
   win.on('closed', () => {
-    interviewWindowController?.cleanupOwner(win);
     if (mainWindow === win) mainWindow = null;
   });
   if (DEV_SERVER_URL) win.loadURL(new URL('interview.html?view=interview-helper', DEV_SERVER_URL).toString());
@@ -166,7 +162,7 @@ if (!app.requestSingleInstanceLock()) {
       if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || (event.senderFrame && event.senderFrame.parent)) throw new Error('Interview Helper request was not authorized.');
       return handler(...args);
     };
-    // Text size: one setting for the main window, the cue card and the practice call.
+    // Text size: one setting for the main window and the practice call.
     const textSize = createTextSizeController({
       store: createTextSizeStore({ filePath: path.join(roots.profile, 'text-size.json') }),
       getAllWindows: () => BrowserWindow.getAllWindows(),
@@ -286,17 +282,6 @@ if (!app.requestSingleInstanceLock()) {
       resolveAppliedJobsRoot: async () => (await sessions.load()).appliedJobsFolder || null,
       onQaChanged: (change) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('interview-app:qa-changed', change); },
     });
-    interviewWindowController = createInterviewWindowController({
-      BrowserWindow, ipcMain, appInstance: dataApp,
-      isAuthorizedOwner: isMainWindow,
-      loadSnapshot: ({ snapshotId, userDataPath }) => loadInterviewHelperCareerSnapshot({ snapshotId, userDataPath }),
-      loadBundle: ({ artifactId, userDataPath }) => loadInterviewPreparationBundle({ artifactId, userDataPath }),
-      preloadPath: path.join(__dirname, 'interviewWindowPreload.js'),
-      // Live talking points for questions no prepared card answers.
-      createTalkingPoints: createInterviewTalkingPoints,
-      devServerUrl: DEV_SERVER_URL ? new URL('interview.html', DEV_SERVER_URL).toString() : null,
-      distHtmlPath: RENDERER_HTML,
-    });
     try {
       const reviewTransport = createInterviewClaudeTransport();
       const practiceCallText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
@@ -357,7 +342,7 @@ if (!app.requestSingleInstanceLock()) {
       logger.warn(`[PracticeCall] unavailable: ${error?.message || error}`);
     }
 
-    registerNetworkHandlers({ onNodeDeleted: (sender, nodeId) => interviewWindowController?.cleanupBySenderAndNode(sender, nodeId) });
+    registerNetworkHandlers();
     registerNonApiAiHandlers();
     // Preparation and the typed job are answered by the local Claude Code CLI through this worker.
     startClaudeTaskWorker({ userData: roots.profile, nativeImage: electronPkg.nativeImage, getAllWindows: () => BrowserWindow.getAllWindows() });
@@ -381,7 +366,7 @@ if (!app.requestSingleInstanceLock()) {
         desktopPath: () => app.getPath('desktop'),
         sources: {
           app: () => app,
-          windows: () => ({ 'Cue card': (interviewWindowController?.sessionCount?.() || 0) > 0, 'Practice call': Boolean(practiceCallController?.getWindow()) }),
+          windows: () => ({ 'Practice call': Boolean(practiceCallController?.getWindow()) }),
           sessions: () => sessions.load(),
           claudeStatus: () => claudeTaskWorkerStatus(),
           claudeActivity: () => claudeTaskWorkerActivity(),

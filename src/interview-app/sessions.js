@@ -25,8 +25,6 @@ export function emptyInterviewData() {
     interviewHelperPreparationRunId: null,
     interviewHelperManualAiCleanup: null,
     interviewHelperManualAiRetirementReceipts: null,
-    interviewHelperLockedPlan: null,
-    interviewHelperCurrentStep: 0,
   };
 }
 

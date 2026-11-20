@@ -37,10 +37,9 @@ import { createInterviewClaudeTransport } from './interviewClaudeTransport.js';
 import { INTERVIEW_DISCLOSURE_RESEARCH_INSTRUCTION, mapInterviewDisclosures } from './interviewQaDisclosures.js';
 import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
-import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
 import { generateInterviewGapAnswers } from './interviewAnswerGap.js';
-import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { generateInterviewTopics } from './interviewQaTopics.js';
 import { createQuestionHistory } from '../practiceCall/questionHistory.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
@@ -1483,7 +1482,6 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
-  fillCues = fillInterviewQaCues,
   fillApproaches = fillInterviewQaApproaches,
   fillGaps = fillInterviewQaGaps,
   // Which Q&A tabs hold no cards: the only ones a Prepare writes. It reads files only.
@@ -1670,7 +1668,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     try { await fs.promises.writeFile(await preparedIndexFile(args), JSON.stringify({ version: 1, briefRecordId }), { encoding: 'utf8', mode: 0o600 }); }
     catch (error) { logWarning(`[Interview] prepared index not saved: ${String(error?.message || error).slice(0, 200)}`); }
   };
-  const reusePrepared = async (args) => {
+  // A preparation saved while both Q&A tabs held cards is research only: it has no answer set,
+  // so it is reused only while no tab is empty (an empty tab needs answers to be written).
+  const reusePrepared = async (args, { needsAnswers = false } = {}) => {
     try {
       const saved = JSON.parse(await fs.promises.readFile(await preparedIndexFile(args), 'utf8'));
       if (saved?.version !== 1 || !ID_RE.test(saved.briefRecordId || '')) return null;
@@ -1679,8 +1679,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       if (!brief || brief.inputs.careerSnapshotId !== args.snapshotId || brief.inputs.jobUrlSha256 !== sha256(args.canonicalJobUrl)
         || brief.inputs.applicationArtifactId !== args.bundleArtifactId) return null;
       const bank = await loadAnswers({ brief, briefRecordId: saved.briefRecordId, userDataPath });
-      if (!bank?.cards?.length) return null;
-      return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: true, answerCardCount: bank.cards.length, reused: true };
+      if (bank?.cards?.length) return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: true, answerCardCount: bank.cards.length, reused: true };
+      if (needsAnswers) return null;
+      return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: false, answerCardCount: 0, reused: true };
     } catch { return null; }
   };
   const prepareRuns = new Map();
@@ -1713,7 +1714,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     const emptyAtStart = await emptyQaScopes({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId });
     throwIfAborted(signal);
     if (reuseExisting || !emptyAtStart.length) {
-      const existing = await reusePrepared(args);
+      const existing = await reusePrepared(args, { needsAnswers: emptyAtStart.length > 0 });
       throwIfAborted(signal);
       if (existing) return { ...existing, ...(emptyAtStart.length ? {} : { qaKept: true }) };
     }
@@ -1726,20 +1727,29 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throwIfAborted(signal);
       if (!published || !isPublishedInterviewBrief(published.brief) || !ID_RE.test(published.briefRecordId)
         || interviewPreparedBriefRecordId(published.brief) !== published.briefRecordId) throw new Error('The interview brief could not be prepared safely.');
-      const answers = await buildAnswers({ ...args, callText, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
-      throwIfAborted(signal);
-      const answerSummary = await publishAnswers({ bank: answers?.bank, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
-      throwIfAborted(signal);
-      if (answerSummary?.answerBankAvailable !== true || !Number.isInteger(answerSummary.answerCardCount)
-        || answerSummary.answerCardCount < INTERVIEW_ANSWER_MIN_CARDS || answerSummary.answerCardCount > 20) throw new Error('The interview answers could not be prepared safely.');
       // General and posting Q&A are written from the sealed bank, and only for a
       // tab that holds no cards: a tab with cards is left exactly as it is.
       let qaWarning = null;
       let disclosureMapping = [];
       const userDataPath = appInstance.getPath('userData');
       const company = published.brief.role?.company || '';
-      const scopes = await emptyQaScopes({ userDataPath, nodeId: args.nodeId, company });
+      let scopes = await emptyQaScopes({ userDataPath, nodeId: args.nodeId, company });
       throwIfAborted(signal);
+      // The answer set is only the source the empty tabs are written from. With no empty tab it
+      // would be thrown away, so this Prepare is research only and writes no answers.
+      let answers = null;
+      let answerSummary = { answerBankAvailable: false, answerCardCount: 0 };
+      if (scopes.length) {
+        answers = await buildAnswers({ ...args, callText, brief: published.brief, signal, userDataPath });
+        throwIfAborted(signal);
+        answerSummary = await publishAnswers({ bank: answers?.bank, brief: published.brief, signal, userDataPath });
+        throwIfAborted(signal);
+        if (answerSummary?.answerBankAvailable !== true || !Number.isInteger(answerSummary.answerCardCount)
+          || answerSummary.answerCardCount < INTERVIEW_ANSWER_MIN_CARDS || answerSummary.answerCardCount > 20) throw new Error('The interview answers could not be prepared safely.');
+        // The answer set takes minutes: a card added to a tab meanwhile keeps that tab as it is.
+        scopes = await emptyQaScopes({ userDataPath, nodeId: args.nodeId, company });
+        throwIfAborted(signal);
+      }
       const writesPosting = scopes.includes('company');
       // Every step after the seal is optional: a failure leaves a warning and the
       // prepared answers stay usable; only a cancellation ends the run.
@@ -1758,17 +1768,12 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
           foundationQuestions: INTERVIEW_FOUNDATION_QUESTIONS.map(item => item.question),
           companyQuestions: bankQuestions.filter(question => !isFoundationQuestion(question)) });
       });
-      const checkedBank = answers?.bank;
-      // With no empty tab this writes nothing and only returns the saved Q&A for the practice step.
+      const checkedBank = answers?.bank || null;
+      // With no empty tab this writes nothing (there is no bank) and only returns the saved Q&A for the practice step.
       const qa = await fillQa({ userDataPath, nodeId: args.nodeId, bank: checkedBank, company, disclosureMapping, scopes });
       throwIfAborted(signal);
       if (qa && scopes.length) {
-        // Live-card reminders: every answer line of a tab written now gets a
-        // short cue. A tab that already had cards gets none.
-        await optionalStep('glance cues', 'Short reminders could not be written this time; the live card shows trimmed answer lines.', () => fillCues({
-          userDataPath, nodeId: args.nodeId, wants: needsGlanceCue, scopes,
-          generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) }));
-        // Approach reminders: for "how do you work" questions the live card
+        // Approach reminders: for "how do you work" questions the Q&A card
         // shows general good practice to illustrate, not a past-work claim.
         await optionalStep('approach reminders', 'Approach reminders could not be written this time; those cards show their prepared lines.', () => fillApproaches({
           userDataPath, nodeId: args.nodeId, scopes,
@@ -1784,7 +1789,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         // this" answer instead of staying empty. It runs after the topics step, which first
         // turns unanswered technical questions into topics.
         await optionalStep('honest-gap answers', 'Answers for questions outside your experience could not be written this time; those cards stay empty.', async () => {
-          const filled = await fillGaps({ userDataPath, nodeId: args.nodeId, scopes,
+          await fillGaps({ userDataPath, nodeId: args.nodeId, scopes,
             generate: async (units, { needRole, existing } = {}) => {
               // Once per posting the same request also names the role's own experience questions the
               // career text cannot answer; that needs the listing.
@@ -1792,9 +1797,6 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
               return generateInterviewGapAnswers({ units, evidence: checkedBank?.evidence, callText, signal, logWarning,
                 role: needRole ? { themes: published.brief.roleThemes, listingText: bundle?.listingText || '', existing } : null });
             } });
-          // The new lines get their short live-card reminders in the same Prepare.
-          if (filled?.saved > 0 || filled?.added > 0) await fillCues({ userDataPath, nodeId: args.nodeId, wants: needsGlanceCue, scopes,
-            generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
         });
       }
       if (qa) {

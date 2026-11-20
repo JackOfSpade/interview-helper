@@ -32,7 +32,7 @@ export function scanForTitle(text, scanFrom = 0) {
 // fetched page that hasn't yielded one within 3s is almost certainly not going to.
 const TITLE_FETCH_TIMEOUT_MS = 3000;
 
-export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance = ipcMain, registerHandler = handleSafe } = {}) {
+export function registerNetworkHandlers({ ipcMainInstance = ipcMain, registerHandler = handleSafe } = {}) {
   // Add direct listener for node task cancellation
   ipcMainInstance.on('cancel-node-task', (event, nodeId, cause = null, manualAiRunIds = []) => {
     // `cause` is the renderer's own account of WHY (Reset / cleared files /
@@ -42,10 +42,6 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
       abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause), {
         manualAiRunIds: typeof manualAiRunIds === 'string' ? [manualAiRunIds] : manualAiRunIds,
       });
-      // This direct route is dispatched only after the canvas has committed a
-      // deletion. Keep companion-window retirement on that committed boundary:
-      // transactional cancellation probes may still be rolled back.
-      if (cause === 'node-deleted' && typeof onNodeDeleted === 'function') onNodeDeleted(event.sender, nodeId);
     }
   });
 

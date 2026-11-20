@@ -27,7 +27,7 @@
  * questions this role's interviewers would ask that the career text cannot
  * answer, each with its gap answer. They become cards of the posting.
  */
-import { glanceWordCount } from '../../src/utils/interviewGlanceCue.js';
+import { glanceWordCount } from '../../src/utils/wordCount.js';
 import { APPROACH_MAX_CHARS, APPROACH_MAX_REMINDERS, APPROACH_MAX_WORDS, approachReminderFailure } from './interviewAnswerApproach.js';
 
 export const INTERVIEW_GAP_STAGE = 'qa-gap-answers';

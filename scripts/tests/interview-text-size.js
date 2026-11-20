@@ -86,7 +86,7 @@ export default [
     async run() {
       const { controller, open, writes, changes } = setup();
       const main = open();
-      const cueCard = open({ size: [380, 560], minimum: [320, 380], position: [1500, 600] });
+      const second = open({ size: [380, 560], minimum: [320, 380], position: [1500, 600] });
       main.webContents.emit('dom-ready');
       assert.deepEqual(main.zooms, [1]);
       assert.deepEqual(main.size, [1180, 860], 'the default size changes nothing');
@@ -95,12 +95,12 @@ export default [
       const state = await controller.set(200);
       assert.equal(state.percent, 200);
       assert.equal(state.canGrow, false);
-      assert.deepEqual([main.zooms.at(-1), cueCard.zooms.at(-1)], [2, 2]);
+      assert.deepEqual([main.zooms.at(-1), second.zooms.at(-1)], [2, 2]);
       assert.deepEqual(main.minimum, [1440, 1040]);
       assert.deepEqual(main.size, [1440, 1040]);
-      assert.deepEqual(cueCard.minimum, [640, 760]);
-      assert.deepEqual(cueCard.size, [640, 760]);
-      assert.deepEqual(cueCard.position, [1088, 315], 'a window grown past the screen edge is brought back');
+      assert.deepEqual(second.minimum, [640, 760]);
+      assert.deepEqual(second.size, [640, 760]);
+      assert.deepEqual(second.position, [1088, 315], 'a window grown past the screen edge is brought back');
       assert.deepEqual(writes, [200]);
       assert.deepEqual(changes, [200]);
 

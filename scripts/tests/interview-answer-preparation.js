@@ -557,7 +557,7 @@ export default [
           loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
           mapDisclosures: async () => { order.push('disclosures'); return []; },
           fillQa: async () => { order.push('qa'); return { foundation: { cards: [{ question: 'Tell me about yourself.' }] }, company: { cards: [] } }; },
-          fillCues: async () => { order.push('cues'); }, fillApproaches: async () => { order.push('approaches'); },
+          fillApproaches: async () => { order.push('approaches'); },
           preparePractice: async () => { order.push('practice'); },
           fillTopics: async request => { order.push('topics'); if (failTopics) throw new Error('topics down'); topicRequest = request; },
           writeTopics: async () => ({ topics: [], technical: [] }),
@@ -569,7 +569,7 @@ export default [
         assert(rejected, 'a non-boolean reuseExisting is refused');
         const none = await run({ ...args, reuseExisting: true });
         assert(!none.reused && aiCalls > 0, 'with no finished preparation, reuseExisting runs a normal Prepare');
-        assert(order.join() === 'disclosures,qa,cues,approaches,topics,practice', `topics run after the Q&A fill and before practice, got ${order.join()}`);
+        assert(order.join() === 'disclosures,qa,approaches,topics,practice', `topics run after the Q&A fill and before practice, got ${order.join()}`);
         assert(typeof topicRequest.generate === 'function' && topicRequest.nodeId === args.nodeId, 'the topics step gets a generator for this node');
         const bundleOnDisk = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${args.bundleArtifactId}.json`), 'utf8'));
         assert(bundleOnDisk && bundle, 'the posting bundle exists for the topics step');
@@ -593,33 +593,46 @@ export default [
     },
   },
   {
-    name: 'interview answer preparation: Prepare writes Q&A only for the tabs with no cards, and calls no AI when both have cards and the inputs are already prepared',
+    name: 'interview answer preparation: Prepare writes Q&A only for the tabs with no cards, writes no answer set when both have cards, and calls no AI when the inputs are already prepared',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-empty-tabs-'));
       try {
         const { args, value } = await fixture(root);
         const handlers = new Map(); const loadSnapshot = async () => snapshot;
-        const order = []; const scoped = {}; let aiCalls = 0; let empty = []; let changed = 0; const asked = [];
+        const order = []; const scoped = {}; let aiCalls = 0; let answerCalls = 0; let empty = []; let changed = 0; const asked = []; let duringAnswers = null;
         const step = name => async request => { order.push(name); scoped[name] = request.scopes; };
         registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
           buildBrief: a => buildInterviewBrief({ ...a, callRaw: async () => { aiCalls++; return research; }, callText: async (_prompt, opts) => { aiCalls++; opts.responseValidator(assessment); return assessment; } }),
-          buildAnswers: a => buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => { aiCalls++; return answerReply(value, prompt, opts); } }),
+          buildAnswers: a => buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => { aiCalls++; answerCalls++; duringAnswers?.(); return answerReply(value, prompt, opts); } }),
           publishAnswers: a => publishInterviewPreparedAnswers({ ...a, loadSnapshot }),
           loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
           emptyQaScopes: async request => { asked.push(request.company); return [...empty]; },
           mapDisclosures: async () => { order.push('disclosures'); return []; },
           fillQa: async request => { order.push('qa'); scoped.qa = request.scopes; return { foundation: { cards: [{ question: 'Tell me about yourself.' }] }, company: { cards: [] } }; },
-          fillCues: step('cues'), fillApproaches: step('approaches'), fillGaps: step('gaps'),
+          fillApproaches: step('approaches'), fillGaps: step('gaps'),
           fillTopics: async () => { order.push('topics'); }, writeTopics: async () => ({ topics: [], technical: [] }),
           preparePractice: async () => { order.push('practice'); },
           onQaChanged: () => { changed += 1; } });
         const run = request => handlers.get('build-interview-brief')({}, request);
-        // Both tabs have cards and these inputs were never prepared: research and the sealed answers are
-        // still built for the cue card, and no Q&A step runs.
+        // Both tabs have cards and these inputs were never prepared: the research is built, but no answer set
+        // (it would be thrown away), and no Q&A step runs.
         const kept = await run({ ...args });
-        assert(!kept.reused && kept.qaKept === true && kept.answerBankAvailable && aiCalls > 0, 'a new preparation with both tabs holding cards is built and says the tabs were kept');
+        assert(!kept.reused && kept.qaKept === true && kept.answerBankAvailable === false && kept.answerCardCount === 0 && aiCalls > 0 && answerCalls === 0,
+          `a new preparation with both tabs holding cards is research only and says the tabs were kept, got ${JSON.stringify({ ...kept, brief: undefined, answerCalls })}`);
         assert(order.join() === 'qa,practice' && scoped.qa.length === 0 && changed === 0, `no Q&A writing step runs when no tab is empty, got ${order.join()}`);
-        assert(asked.length === 2 && asked[0] === undefined && typeof asked[1] === 'string' && asked[1].length > 0, 'the tabs are checked before the run and again with the company name');
+        assert(asked.length === 2 && asked[0] === undefined && typeof asked[1] === 'string' && asked[1].length > 0, 'the tabs are checked before the run and again with the company name; with no empty tab there is no answer set to wait for');
+        // A research-only preparation is not reused while a tab is empty: that tab needs answers.
+        empty = ['foundation'];
+        const needs = handlers.get('build-interview-brief');
+        let refused = null;
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => { if (channel === 'build-interview-brief') refused = handler; }, aiTransport: syntheticAiTransport,
+          buildBrief: async () => { throw new Error('research ran'); },
+          loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
+          emptyQaScopes: async () => [...empty] });
+        const blocked = await refused({}, { ...args, reuseExisting: true }).catch(error => error);
+        assert(blocked instanceof Error && !blocked.reused, 'reuseExisting with an empty tab does not reuse a research-only preparation');
+        assert(needs === handlers.get('build-interview-brief'), 'the main handlers are untouched');
+        empty = [];
         // The same inputs again: nothing to write and a saved preparation exists, so "Prepare again" calls no AI.
         const before = aiCalls; order.length = 0;
         const again = await run({ ...args });
@@ -627,17 +640,22 @@ export default [
         // Only the posting tab is empty: every Q&A step runs for that tab alone.
         empty = ['company'];
         const posting = await run({ ...args });
-        assert(!posting.reused && !Object.hasOwn(posting, 'qaKept') && aiCalls > before, 'an empty tab makes Prepare again run');
-        assert(order.join() === 'disclosures,qa,cues,approaches,topics,gaps,practice' && changed === 1, `the posting tab gets every step, got ${order.join()}`);
-        for (const name of ['qa', 'cues', 'approaches', 'gaps']) assert(scoped[name].join() === 'company', `${name} is limited to the empty tab`);
+        assert(!posting.reused && !Object.hasOwn(posting, 'qaKept') && aiCalls > before && answerCalls > 0 && posting.answerBankAvailable === true, 'an empty tab makes Prepare again run and write the answer set');
+        assert(order.join() === 'disclosures,qa,approaches,topics,gaps,practice' && changed === 1, `the posting tab gets every step, got ${order.join()}`);
+        for (const name of ['qa', 'approaches', 'gaps']) assert(scoped[name].join() === 'company', `${name} is limited to the empty tab`);
         // Only General is empty: past interview questions and technical topics belong to the posting and are skipped.
         empty = ['foundation']; order.length = 0;
         await run({ ...args });
-        assert(order.join() === 'qa,cues,approaches,gaps,practice' && changed === 2, `General alone skips disclosures and topics, got ${order.join()}`);
-        for (const name of ['qa', 'cues', 'approaches', 'gaps']) assert(scoped[name].join() === 'foundation', `${name} is limited to General`);
+        assert(order.join() === 'qa,approaches,gaps,practice' && changed === 2, `General alone skips disclosures and topics, got ${order.join()}`);
+        for (const name of ['qa', 'approaches', 'gaps']) assert(scoped[name].join() === 'foundation', `${name} is limited to General`);
         // A first Prepare may still reuse while a tab is empty; it does not claim the tabs were kept.
         const first = await run({ ...args, reuseExisting: true });
         assert(first.reused === true && !Object.hasOwn(first, 'qaKept'), 'reuse with an empty tab leaves Prepare again able to write it');
+        // A card added to the empty tab while the answer set is written keeps that tab as it is.
+        empty = ['company']; order.length = 0; duringAnswers = () => { empty = []; };
+        const raced = await run({ ...args });
+        duringAnswers = null;
+        assert(raced.qaKept === true && order.join() === 'qa,practice' && scoped.qa.length === 0, `the tabs are checked again after the answer set, got ${order.join()}`);
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },

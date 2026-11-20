@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
 /**
- * Text size of every window of this app (main window, cue card, practice call).
+ * Text size of every window of this app (main window, practice call).
  * The setting lives in the main process; the View menu changes the same value.
  */
 export function TextSizeControl({ onError }) {

@@ -87,14 +87,14 @@ optional description and two actions, modelled on Infinite Canvas.
   in the main window, kept in memory only. Typed text is not recorded.
 - There are no filter codes: a report here is small enough to read whole.
 - Only the main window can ask for a report (`interview-app:copy-bug-report`,
-  `interview-app:save-bug-report`). The cue card and practice call windows have
+  `interview-app:save-bug-report`). The practice call window has
   no button. The practice call window records its own clicks, screens, errors and
   console warnings (`src/practice-call/callEventLog.js`) and sends each line over
   `practice-call-window:log-event`; the main process adds it to the call's debug
   log and keeps the last 300 in memory. A pressed control there is named only
   from a fixed list (seek and chapter buttons, whose labels hold call content,
   become "Seek to a moment" and "Show chapters"; anything else is "(a
-  control)"). The cue card's events are not recorded.
+  control)").
 
 ## Saving (2026-11-19)
 
@@ -143,7 +143,7 @@ Every window has one (`electron/interviewApp/contextMenu.js`, attached in
 
 ## Text size (built 2026-11-18)
 
-One setting for every window the app opens: the main window, the cue card and
+One setting for every window the app opens: the main window and
 the practice call (`electron/interviewApp/textSize.js`).
 
 - **The list control is − 125% +.** The percentage is a readout, not a button:
@@ -156,7 +156,7 @@ the practice call (`electron/interviewApp/textSize.js`).
 - **Windows keep up.** Each window's minimum size is multiplied by the setting,
   a window that is now too small is grown, and a new window opens larger by the
   same factor, all within the screen it is on. A window therefore never shows
-  less than its 100% minimum layout (main 720×520, cue card 320×380, practice
+  less than its 100% minimum layout (main 720×520, practice
   call 760×520), unless the screen itself is smaller than that.
 - **Saved** in `text-size.json` in the profile folder; a missing or damaged
   file is 100%.
@@ -198,7 +198,7 @@ verified facts).
   career piece lacks, and reminders that describe the person. A question the
   career text can answer is not a gap and stays empty for the answer writer.
   The card is stored with `gap: true`, shows "Honest gap" in the Q&A panel and
-  leads with the admission on the cue card; an edit makes it an ordinary card.
+  leads with the admission; an edit makes it an ordinary card.
   The answer writer keeps only questions it can answer, so a job far from the
   career often leaves no empty card. So once each time the posting's tab is
   written (`gapQuestionsGeneratedAt` in the posting's Q&A file) the same call also
@@ -247,9 +247,8 @@ screen reloads, whichever interview it shows.
 Prepare writes Q&A only for a tab that has no cards (owner's request,
 2026-11-19). It looks at General and at the posting's set separately and writes
 the empty ones; a tab that holds any card, generated, edited or added by hand,
-is left exactly as it is: no new question, no added wording, no filled answer,
-no short cue and no approach reminder. So an answer the person edits gets no new
-short cue, and the cue card shows its trimmed line. A card added by hand before
+is left exactly as it is: no new question, no added wording, no filled answer
+and no approach reminder. A card added by hand before
 the first Prepare makes its tab count as not empty. To have a tab written again,
 delete every card in it: its deleted questions then return, and for the posting
 the role's honest-gap questions are written again. While a tab has cards a
@@ -258,14 +257,22 @@ per posting, never again, and a deleted topic does not come back. Reported past
 interview questions and technical topics belong to the posting, so those steps
 run only when the posting's tab is written.
 
-The AI still writes one full answer set on every Prepare that runs, because the
-cue card needs a sealed set that holds the two required General questions; only
-what is saved to the tabs is limited. A first Prepare on an interview reuses a
-finished preparation of the same career data, posting and application when one
-exists. "Prepare again" does the same when both tabs have cards, so it then
-calls no AI and the panel says nothing was generated; redoing the research needs
-an empty tab or changed inputs. With changed inputs and both tabs holding cards,
-the research and the sealed answers are prepared again and the tabs are kept.
+A Prepare with at least one empty tab writes one full answer set and seals it on
+disk; only what is saved to the tabs is limited. The sealed set is what the Q&A
+fill, the honest-gap answers and the reuse check below work from (it must hold
+the two required General questions), and its card count is the "prepared
+answers" number the panel shows. Nothing else reads it. **A Prepare with no empty
+tab is research only (2026-11-20):** the answer set would be thrown away, so it
+is not written (no answer-writer call, no repair rounds); the reply has
+`answerBankAvailable: false`, `answerCardCount: 0` and `qaKept: true`, and the
+panel shows "Research ready" and points to the Q&A tabs. A first Prepare on an
+interview reuses a finished preparation of the same career data, posting and
+application when one exists; a research-only preparation is reused only while
+no tab is empty, since an empty tab needs answers. "Prepare again" reuses too
+when both tabs have cards, so it then calls no AI and the panel says nothing was
+generated; redoing the research needs an empty tab or changed inputs. With
+changed inputs and both tabs holding cards, only the research is prepared again
+and the tabs are kept.
 
 **Failure reasons (2026-11-20).** Claude's safeguards stopped Prepare research on Opus high for a Moderna protein-design posting twice in a row (refusal category `bio`), and the window only said "Preparation did not complete". A failed Prepare now keeps its fixed error code: the main process sets it on the generic error, the window stores it as `interviewHelperPreparation.code` and shows a specific line (safeguards, Parallel out of usage, usage limit, timeout, sign-in), and the bug report's Preparation column shows it, for example `failed (CLAUDE_SAFEGUARD_BLOCKED)`, after a restart too. There is no model fallback: the owner chose to show the reason rather than retry on Sonnet (2026-11-20).
 
@@ -340,17 +347,18 @@ posting (`practice-question-history.json`). The planner favours entries asked
 least, so repeated practice goes through the pool. For a topic the interviewer
 makes up its own question or exercise each call.
 
-## The cue card
+## Removed: the live cue card (2026-11-20)
 
-The live window is a display only. The page reaches the controller
-(`electron/interviewWindow.js`) through five bridge calls: `getBrief`,
-`startListening`, `stopListening`, `onListeningUpdated` and `onBriefUpdated`.
-The controller exports `launch`, `getBrief`, `startListening`, `stopListening`
-and session helpers, nothing else. A question reaches it from the listening
-path (`onQuestion`) or from a plan the canvas supplies at launch; there is no
-typed question, follow-up, prepared-card choice, Next, layout or pin control.
-The window opens pinned and stays pinned. The snapshot and sealed answer bank
-are verified once at launch. Details: `docs/interview-live-ai-matching.md`.
+The always-on-top live window that listened to the interview audio, matched each
+question to a prepared card with AI and showed short cues was removed at the
+owner's request, together with the Interview Audio Helper, the short-cue
+("glance") writing step in Prepare and the Q&A editor's card preview and match
+tester. Reasons: practising without a crutch prepares better for in-person
+finals, and a near-miss match is worse than no card. Q&A tabs, approach
+reminders, extensions, variants, the sealed answer bank, practice calls and the
+practice-audio helper are unchanged. Old saved data that carries the cue card's
+fields still loads; data already on disk (such as the cue card logs folder) is
+not deleted by code.
 
 ## Data
 

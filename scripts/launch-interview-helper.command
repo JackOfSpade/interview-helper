@@ -69,7 +69,7 @@ source_manifest() {
       node -e 'for (const file of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) process.stdout.write(file + "\0")' "$inputs" || return 1
       printf '%s\0' package.json package-lock.json interview.html vite.interview.config.js vite.main-externals.js \
         electron-builder.interview.json config/application-model.json scripts/build-macos.mjs \
-        scripts/build-interview-audio-helper.mjs scripts/build-practice-audio-helper.mjs \
+        scripts/build-practice-audio-helper.mjs \
         scripts/launch-interview-helper.command scripts/source-manifest.mjs || return 1
       git -C "$PROJECT_DIR" ls-files -z --cached --others --exclude-standard -- native public build || return 1
     elif git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then

@@ -1,6 +1,6 @@
 import { assert } from './testHelpers.js';
 import { buildInterviewAnswerEvidence } from '../../electron/ipc/interviewAnswerBank.js';
-import { prepareInterviewExtensionCandidates, sanitizeInterviewExtensions, validateInterviewExtensionPoint,
+import { sanitizeInterviewExtensions, validateInterviewExtensionPoint,
   INTERVIEW_EXTENSION_MAX_CHARACTERS, INTERVIEW_EXTENSION_MAX_WORDS } from '../../electron/ipc/interviewAnswerExtensions.js';
 
 function statement(source, text = source.text) {
@@ -32,24 +32,6 @@ function rejects(point, context, expectedRule) {
 }
 
 export default [
-  {
-    name: 'interview extensions: two additional grounded points survive with tiny host-derived example hooks',
-    run() {
-      const { bank, card, source } = fixture();
-      const before = JSON.stringify(bank);
-      const candidates = prepareInterviewExtensionCandidates(bank);
-      assert(candidates[card.id].length === 2, 'both a new detail and another career story survive as optional points');
-      assert(candidates[card.id][0].text === card.extensions[0].text && candidates[card.id][1].text === card.extensions[1].text, 'dedicated generated points retain their IDs, prose and order');
-      assert(candidates[card.id][0].sourceLabel === source.sourceLabel && candidates[card.id][0].quotes[0].quote === source.text, 'each point retains its complete exact cited source');
-      assert(candidates[card.id][1].exampleHook === 'Example Employer · Product Manager', 'a host-derived role hook helps the human find an example');
-      const project = bank.evidence.find(item => item.entityId === 'migration');
-      card.extensions.push({ id: 'archive', ...statement(project) });
-      assert(prepareInterviewExtensionCandidates(bank)[card.id][2].exampleHook === 'Archive migration', 'a different project provides its own tiny hook');
-      card.extensions.pop();
-      candidates[card.id][0].text = 'Changed locally.';
-      assert(JSON.stringify(bank) === before, 'candidate projection cannot mutate the sealed card');
-    },
-  },
   {
     name: 'interview extensions: invented metrics, technologies, outcomes, entities and altered source quotes reject',
     run() {
@@ -125,7 +107,7 @@ export default [
   {
     name: 'interview extensions: sparse rejection keeps valid siblings and never promotes the card example',
     run() {
-      const { bank, card, source, evidence } = fixture();
+      const { card, source, evidence } = fixture();
       const valid = structuredClone(card.extensions);
       card.extensions = [{ id: 'invented', ...statement(evidence[1], 'I doubled deployment conversion.') }, valid[0],
         { id: 'duplicate', ...card.example }, { ...valid[1], quotes: [] }, valid[1]];
@@ -133,9 +115,9 @@ export default [
       assert(retained.length === 2 && retained.map(point => point.id).join() === valid.map(point => point.id).join(), 'bad points individually drop without regenerating safe siblings');
       assert(card.extensions.length === 5 && card.headline.evidenceIds[0] === source.id, 'sparse sanitization does not mutate the draft or prepared answer');
       card.extensions = [];
-      assert(prepareInterviewExtensionCandidates(bank)[card.id].length === 0, 'an example is never implicitly promoted into section B');
+      assert(sanitizeInterviewExtensions(card, evidence).length === 0, 'an example is never implicitly promoted into section B');
       delete card.extensions;
-      assert(prepareInterviewExtensionCandidates(bank)[card.id].length === 0, 'a legacy bank without dedicated extensions remains honest');
+      assert(sanitizeInterviewExtensions(card, evidence).length === 0, 'a legacy bank without dedicated extensions remains honest');
     },
   },
   {
@@ -167,7 +149,7 @@ export default [
       rejects({ ...point, text: 'I served Cedar subscription teams.' }, context, 'INTERVIEW_ANSWER_RESEARCH_AGENCY');
       rejects({ ...point, evidenceIds: [research.id, context.source.id], quotes: [...point.quotes, { evidenceId: context.source.id, quote: context.source.text }] }, context, 'INTERVIEW_EXTENSION_RESEARCH');
       context.card.extensions = [point];
-      assert(prepareInterviewExtensionCandidates(context.bank)[context.card.id][0].exampleHook === research.sourceUrl, 'research hooks identify the sealed research source');
+      assert(sanitizeInterviewExtensions(context.card, context.evidence)[0].evidenceIds[0] === research.id, 'a research-backed extension keeps its separate research citation');
     },
   },
 ];

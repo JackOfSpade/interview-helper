@@ -1,6 +1,6 @@
 /** Dedicated, Prepare-generated optional claims. Like the memorized lines,
  * every point is bound to complete cited evidence before it can be sealed.
- * The live window only exposes that approved prose; it never creates claims.
+ * Only that approved prose is exposed; nothing here creates claims.
  */
 import { interviewClaimContent, interviewClaimGuardFailures,
   interviewSpokenWordCount, interviewStandaloneFailures } from './interviewSpokenClaims.js';
@@ -20,26 +20,10 @@ function exact(value, keys) {
   return plain(value) && Reflect.ownKeys(value).length === keys.length
     && Reflect.ownKeys(value).every(key => typeof key === 'string' && keys.includes(key));
 }
-function sourceLabel(sources) { return [...new Set(sources.map(source => source.sourceLabel))].join(' · '); }
 function extensionFailure(rule) {
   const error = new Error('The optional interview extension is not grounded in additional prepared evidence.');
   error.code = rule;
   throw error;
-}
-
-/** Hooks are source navigation, never AI-authored facts. Keep the project name
- * when available and otherwise the documented role/employer or research label.
- * The full source label and exact quotation remain independently inspectable.
- */
-function exampleHook(sources) {
-  const labels = sources.map(source => {
-    if (source.kind === 'research') return source.sourceField === 'roleContext' ? 'Prepared role research' : source.sourceUrl || source.sourceLabel;
-    const label = source.sourceLabel.split(' · ').at(-1);
-    if (label && !/^Saved (?:achievement|career evidence)$/u.test(label)) return label;
-    return [source.roleContext?.employer, source.roleContext?.title].filter(Boolean).join(' · ') || label;
-  });
-  const hook = [...new Set(labels.filter(Boolean))].join(' · ');
-  return hook.length <= 120 ? hook : `${hook.slice(0, 117).trimEnd()}…`;
 }
 
 /** Mechanical checks run on each extension just as on headline/bullet claims.
@@ -109,19 +93,4 @@ export function sanitizeInterviewExtensions(card, evidence = [], { compareSiblin
     catch { /* Drop only this point; keep safe siblings and the memorized card. */ }
   }
   return points;
-}
-
-/** Read the separately prepared points, never promote the memorized example.
- * Attribution and tiny hooks are derived from the same sealed sources.
- */
-export function prepareInterviewExtensionCandidates(bank) {
-  const result = Object.create(null);
-  for (const card of Array.isArray(bank?.cards) ? bank.cards : []) {
-    if (!POINT_ID.test(card?.id || '')) continue;
-    result[card.id] = sanitizeInterviewExtensions(card, bank.evidence).map(point => {
-      const sources = point.evidenceIds.map(id => bank.evidence.find(source => source.id === id));
-      return { ...point, sourceLabel: sourceLabel(sources), exampleHook: exampleHook(sources) };
-    });
-  }
-  return result;
 }

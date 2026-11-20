@@ -31,7 +31,7 @@ const sessionsState = () => ({
 
 const sources = (overrides = {}) => ({
   app: () => ({ getVersion: () => '1.2.3', isPackaged: true }),
-  windows: () => ({ 'Cue card': false, 'Practice call': true }),
+  windows: () => ({ 'Practice call': true }),
   sessions: () => sessionsState(),
   claudeStatus: () => ({ paused: true, pauseCode: 'CLAUDE_USAGE_LIMIT' }),
   claudeActivity: () => ({
@@ -87,8 +87,8 @@ const tests = [
     name: 'bug report: interviews appear as states and counts, never as names, links or text',
     run() {
       const rows = interviewRows(sessionsState());
-      assert.deepEqual(rows[0], { index: 1, selected: false, named: true, careerFiles: 2, careerSnapshot: true, job: 'application folder', preparation: 'failed', runPending: true, step: 2 });
-      assert.deepEqual(rows[1], { index: 2, selected: true, named: false, careerFiles: 0, careerSnapshot: false, job: 'typed (generated)', preparation: 'none', runPending: false, step: 0 });
+      assert.deepEqual(rows[0], { index: 1, selected: false, named: true, careerFiles: 2, careerSnapshot: true, job: 'application folder', preparation: 'failed', runPending: true });
+      assert.deepEqual(rows[1], { index: 2, selected: true, named: false, careerFiles: 0, careerSnapshot: false, job: 'typed (generated)', preparation: 'none', runPending: false });
       assert.equal(rows[2].job, 'none');
       assert.equal(interviewRows(sessionsState(), 0)[0].selected, true, 'the window says which interview is on screen');
       assert.deepEqual(interviewRows(null), []);
@@ -109,7 +109,7 @@ const tests = [
       assert.match(markdown, /Main window: 1180 × 860 px/u);
       assert.match(markdown, /- Practice call: open/u);
       assert.match(markdown, /3 saved · Applied Jobs folder chosen/u);
-      assert.match(markdown, /\| 1 \| no \| yes \| 2 \| yes \| application folder \| failed \| yes \| 2 \|/u);
+      assert.match(markdown, /\| 1 \| no \| yes \| 2 \| yes \| application folder \| failed \| yes \|$/mu);
       assert.match(markdown, /Paused: CLAUDE_USAGE_LIMIT/u);
       assert.match(markdown, /interview-answer · running \/ writing · model claude-opus \(high\) · round 2 · rejected 1 · tool turns 3 · started 90s ago · in this phase 5s · last failure CLAUDE_TIMEOUT \(attempt 1\)/u);
       assert.match(markdown, /Reading https:\/\/example\.test\/page$/mu, 'a step keeps the page, not its query');
