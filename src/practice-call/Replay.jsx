@@ -1,16 +1,36 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Pause, Play, Trash2 } from 'lucide-react';
 import { FeedbackView } from '../components/InterviewPracticePanel.jsx';
 import { replaySpeakerName } from './persona.js';
-import { bubbleLeftPx, chapterIndexAt, formatTime, markerTone, nearestMarker, positionToMs, scrubberKeyTarget, segmentFill, segmentLayout, turnAt } from './replayModel.js';
+import { pauseSpanAt as pauseSpanAtMs, activeLengthMs, activeTimeMs, bubbleLeftPx, chapterIndexAt, formatTime, normalizePauseSpans, markerTone, nearestMarker, positionToMs, scrubberKeyTarget, skipPausedMs, segmentFill, segmentLayout, turnAt } from './replayModel.js';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
 import { padSnapshotAt, screenAt } from './screenMarkup.js';
 import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
-export function DeliverySection({ delivery }) {
-  const entries = delivery && typeof delivery === 'object' && !Array.isArray(delivery)
-    ? Object.entries(delivery).map(([key, value]) => [key, describeDeliveryValue(value)]).filter(([, text]) => text)
+const TYPED_ONLY_DELIVERY = 'Delivery was not measured: every answer was typed.';
+
+// Whether the post-call analysis found every answer was typed rather than spoken.
+// Without the analysis figure (the payload may not carry it), the transcript decides: answers, all typed.
+const isTypedOnly = replay => {
+  const given = replay?.analysis?.metrics?.typedOnly ?? replay?.metrics?.typedOnly;
+  if (typeof given === 'boolean') return given;
+  const answers = (Array.isArray(replay?.transcript) ? replay.transcript : []).filter(turn => (turn?.speaker ?? turn?.role) === 'candidate');
+  return answers.length > 0 && answers.every(turn => turn?.channel === 'chat');
+};
+
+export function DeliverySection({ delivery, typedOnly = false }) {
+  const record = delivery && typeof delivery === 'object' && !Array.isArray(delivery) ? delivery : null;
+  // Nothing was spoken, so pace, pauses and the like have nothing to say: one line instead.
+  if (typedOnly) {
+    const summary = describeDeliveryValue(record?.summary) || TYPED_ONLY_DELIVERY;
+    return <section aria-label="Delivery" data-delivery-typed-only="true" className="rounded-md border border-white/10 bg-black/20 p-2">
+      <p className="text-[10px] font-semibold uppercase text-white/45">Delivery</p>
+      <p className="mt-1 text-[11px] text-white/75">{summary}</p>
+    </section>;
+  }
+  const entries = record
+    ? Object.entries(record).map(([key, value]) => [key, describeDeliveryValue(value)]).filter(([, text]) => text)
     : [];
   if (!entries.length) return null;
   return <section aria-label="Delivery" className="rounded-md border border-white/10 bg-black/20 p-2">
@@ -18,6 +38,10 @@ export function DeliverySection({ delivery }) {
     <ul className="mt-1 space-y-0.5">{entries.map(([key, text]) => <li key={key} className="text-[11px] text-white/75"><span className="capitalize text-violet-200">{humanizeKey(key)}</span>: {text}</li>)}</ul>
   </section>;
 }
+
+// Following playback in the transcript: how long a hand scroll is left alone, and the edge margin.
+const FOLLOW_PAUSE_MS = 4000;
+const FOLLOW_MARGIN_PX = 24;
 
 // Width used for the hover bubble until it has been measured in the DOM.
 const BUBBLE_ESTIMATE_PX = 96;
@@ -45,7 +69,7 @@ function chapterMarkers(chapters, durationMs) {
 
 // Chaptered seek bar: a 5px rail that grows under the pointer, a chapter bubble
 // that replaces native tooltips, and one committed seek per pointer gesture.
-export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
+export function Scrubber({ chapters, durationMs, positionMs, onSeek, pauseSpans = [], format = formatTime }) {
   const total = Math.max(0, Number(durationMs) || 0);
   const chapterList = Array.isArray(chapters) ? chapters : [];
   const layout = segmentLayout(chapterList, total);
@@ -117,7 +141,7 @@ export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
   };
 
   return <div role="slider" tabIndex={0} aria-label="Replay position" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.round(displayMs)}
-    aria-valuetext={`${formatTime(displayMs)} of ${formatTime(total)}${currentTitle ? `, ${currentTitle}` : ''}`} data-scrubber="true"
+    aria-valuetext={`${format(displayMs)} of ${format(total)}${currentTitle ? `, ${currentTitle}` : ''}`} data-scrubber="true"
     onKeyDown={onKeyDown} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishDrag} onPointerCancel={finishDrag} onPointerLeave={onPointerLeave}
     style={{ paddingTop: touchMode ? 17 : 6, paddingBottom: touchMode ? 17 : 6 }}
     className="relative w-full cursor-pointer touch-none select-none rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
@@ -137,6 +161,8 @@ export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
           {reach > fill && <div aria-hidden="true" className="absolute inset-y-0 bg-white/40" style={{ left: `${fill * 100}%`, width: `${(reach - fill) * 100}%` }} />}
         </div>;
       })}
+      {total > 0 && pauseSpans.map((span, at) => <span key={`paused-${at}`} aria-hidden="true" data-pause-span={at} className="pc-paused-span pointer-events-none absolute inset-y-0"
+        style={{ left: `${(span.startMs / total) * 100}%`, width: `${((span.endMs - span.startMs) / total) * 100}%` }} />)}
       {markers.map(marker => <span key={`marker-${marker.key}`} aria-hidden="true" data-marker-kind={marker.kind}
         className={`absolute bottom-[5px] h-1 w-0.5 ${markerTone(marker.kind)}`} style={{ left: `${marker.leftPct}%` }} />)}
       <div aria-hidden="true" className="absolute inset-y-0 w-px bg-violet-200/80" style={{ left: `${percent}%` }} />
@@ -147,15 +173,15 @@ export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
         className="pointer-events-none absolute z-20 max-w-[160px] rounded bg-black/85 px-1.5 py-1 text-[10px] leading-tight text-white shadow-lg"
         style={{ left: `${bubbleLeft}px`, bottom: 'calc(100% + 8px)' }}>
         {bubbleTitle ? <p className="truncate text-white/90">{bubbleTitle}</p> : null}
-        <p className="font-mono text-[9px] text-white/60">{formatTime(bubbleMs)}</p>
+        <p className="font-mono text-[9px] text-white/60">{format(bubbleMs)}{pauseSpanAtMs(pauseSpans, bubbleMs) ? ' · paused' : ''}</p>
       </div>}
     </div>
   </div>;
 }
 
-function TurnList({ transcript, currentTurn, onSeek, replay }) {
+function TurnList({ transcript, currentTurn, onSeek, replay, format = formatTime }) {
   if (!transcript.length) return <p className="text-[11px] text-white/40">No transcript for this call.</p>;
-  return <ol aria-label="Call transcript" className="max-h-56 space-y-1 overflow-y-auto pr-1">
+  return <ol aria-label="Call transcript" className="space-y-1">
     {transcript.map((turn, index) => {
       const startMs = turn?.startMs;
       const timed = typeof startMs === 'number' && Number.isFinite(startMs);
@@ -171,9 +197,9 @@ function TurnList({ transcript, currentTurn, onSeek, replay }) {
       const overMark = !mine && turn?.overlay ? <span data-over-mark="true" className="mr-1 text-[9px] italic text-white/45">(over the speaker)</span> : null;
       return <li key={`turn-${index}`} data-overlay={!mine && turn?.overlay ? 'true' : undefined}>
         {timed ? <button type="button" onClick={() => onSeek(startMs)} aria-current={current ? 'true' : undefined} data-current-turn={current ? 'true' : 'false'}
-          aria-label={`Seek to ${turn?.text || (mine ? 'your turn' : 'interviewer turn')} at ${formatTime(startMs)}`}
+          aria-label={`Seek to ${turn?.text || (mine ? 'your turn' : 'interviewer turn')} at ${format(startMs)}`}
           className={`block w-full rounded px-1.5 py-1 text-left text-[11px] ${current ? 'bg-violet-500/25 text-violet-50 ring-1 ring-violet-300/40' : 'text-white/70 hover:bg-white/5'}`}>
-          <span className="mr-1 text-[9px] uppercase text-white/45">{label} · {formatTime(startMs)}</span>{overMark}{body}
+          <span className="mr-1 text-[9px] uppercase text-white/45">{label} · {format(startMs)}</span>{overMark}{body}
         </button> : <div data-untimed-turn="true" data-current-turn="false" className="block w-full rounded px-1.5 py-1 text-left text-[11px] text-white/40">
           <span className="mr-1 text-[9px] uppercase text-white/45">{label}</span>{overMark}{body}
         </div>}
@@ -193,12 +219,21 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const [deleteError, setDeleteError] = useState(null);
   const audioRef = useRef(null);
   const chaptersRef = useRef(null);
+  const scrollRef = useRef(null);
+  const handScrollAtRef = useRef(0);
   const pendingSeekRef = useRef(null);
   const audioUrl = !deleted && replay?.audioUrl ? replay.audioUrl : null;
   const analysis = replay?.analysis || null;
+  const pauseSpans = useMemo(() => normalizePauseSpans(replay?.pauseSpans, durationMs), [replay?.pauseSpans, durationMs]);
+  const activeMs = activeLengthMs(durationMs, pauseSpans, replay?.activeMs);
+  const hasPauses = pauseSpans.length > 0 && activeMs < durationMs;
+  // Times shown to the candidate leave the paused time out; positions stay on the recording clock.
+  const shown = ms => formatTime(hasPauses ? activeTimeMs(pauseSpans, ms) : ms);
   const seek = ms => {
     const raw = Math.max(0, Number(ms) || 0);
-    const target = durationMs > 0 ? Math.min(raw, durationMs) : raw;
+    const clamped = durationMs > 0 ? Math.min(raw, durationMs) : raw;
+    // A paused stretch is never played: landing in one goes to its end.
+    const target = skipPausedMs(pauseSpans, clamped);
     setPositionMs(target);
     const audio = audioRef.current;
     let ready = false;
@@ -245,13 +280,30 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const currentChapterTitle = currentChapterIndex >= 0 ? String(chapters[currentChapterIndex]?.title || `Chapter ${currentChapterIndex + 1}`) : '';
   const showChapters = () => chaptersRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
   const hasFeedback = !!replay?.feedback;
+  const typedOnly = isTypedOnly(replay);
   // What was on the shared screen, and the code the candidate had written, at this moment.
   const shownScreen = screenAt(replay?.screens, positionMs);
   const shownPad = padSnapshotAt(replay?.pad, positionMs);
   const hasShare = (Array.isArray(replay?.screens) && replay.screens.length > 0) || (Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0);
+  // While playing, keep the current turn in view by moving this container only (scrollIntoView
+  // would also scroll the ancestors). Not on first mount, and not just after the reader scrolled.
+  const markHandScroll = () => { handScrollAtRef.current = Date.now(); };
+  const followedTurnRef = useRef(currentTurn);
+  useEffect(() => {
+    if (followedTurnRef.current === currentTurn) return;
+    followedTurnRef.current = currentTurn;
+    const container = scrollRef.current;
+    if (!playing || !container || currentTurn < 0 || Date.now() - handScrollAtRef.current < FOLLOW_PAUSE_MS) return;
+    const row = container.querySelector?.('[data-current-turn="true"]');
+    if (!row) return;
+    const view = container.getBoundingClientRect();
+    const at = row.getBoundingClientRect();
+    if (at.top >= view.top + FOLLOW_MARGIN_PX && at.bottom <= view.bottom - FOLLOW_MARGIN_PX) return;
+    container.scrollTop += at.top - view.top - Math.max(FOLLOW_MARGIN_PX, (view.height - at.height) / 3);
+  }, [currentTurn, playing]);
   // The review leads: it is what the call window turns into once processing is done.
-  return <main className="min-h-screen bg-[#202124] p-4 text-violet-50" aria-label="Call replay">
-    <header className="pc-rise flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
+  return <main className="flex h-screen flex-col overflow-hidden bg-[#202124] p-4 text-violet-50" aria-label="Call replay" data-replay-root="true">
+    <header className="pc-rise flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
       <h1 className="text-lg font-normal text-white">{hasFeedback ? 'Your call feedback' : 'Call replay'}</h1>
       <div className="flex items-center gap-1">
         <button type="button" aria-label={playing ? 'Pause recording' : 'Play recording'} onClick={togglePlay} disabled={!audioUrl}
@@ -264,27 +316,41 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         </button>
       </div>
     </header>
-    <div className={`mt-3 grid items-start gap-4 ${hasFeedback ? 'md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]' : ''}`}>
-    {hasFeedback && <section aria-label="Feedback" className="pc-rise space-y-2 rounded-xl bg-[#2d2e30] p-3" style={{ animationDelay: '80ms' }}>
-      <FeedbackView feedback={replay.feedback} />
-      <DeliverySection delivery={replay.feedback.delivery} />
+    <div data-replay-body="true" className={`mt-3 grid min-h-0 flex-1 gap-4 ${hasFeedback ? 'grid-rows-[minmax(0,1fr)_minmax(0,1fr)] min-[720px]:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] min-[720px]:grid-rows-[minmax(0,1fr)]' : 'grid-rows-[minmax(0,1fr)]'}`}>
+    {hasFeedback && <section aria-label="Feedback" tabIndex={0} data-replay-scroll="feedback" className="pc-rise pc-scroll-hidden min-h-0 space-y-2 overflow-y-auto rounded-xl bg-[#2d2e30] p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300" style={{ animationDelay: '80ms' }}>
+      <FeedbackView feedback={replay.feedback} typedOnly={typedOnly} />
+      <DeliverySection delivery={replay.feedback.delivery} typedOnly={typedOnly} />
     </section>}
-    <div className="pc-rise min-w-0 space-y-2" style={{ animationDelay: hasFeedback ? '180ms' : '80ms' }}>
+    <div data-replay-column="player" className="pc-rise flex min-h-0 min-w-0 flex-col gap-2" style={{ animationDelay: hasFeedback ? '180ms' : '80ms' }}>
+    <div data-replay-player="true" className="shrink-0 space-y-2">
     <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" aria-label="Call recording"
       onLoadedMetadata={applyPendingSeek}
-      onTimeUpdate={event => { if (pendingSeekRef.current === null) setPositionMs((Number(event.currentTarget.currentTime) || 0) * 1000); }}
+      onTimeUpdate={event => {
+        if (pendingSeekRef.current !== null) return;
+        const audio = event.currentTarget;
+        const now = (Number(audio.currentTime) || 0) * 1000;
+        const landing = skipPausedMs(pauseSpans, now);
+        if (landing !== now) {
+          try { audio.currentTime = landing / 1000; } catch { /* not seekable yet */ }
+          setPositionMs(landing);
+          return;
+        }
+        setPositionMs(now);
+      }}
       onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
     {!audioUrl && <p role="status" aria-label="Recording unavailable" className="rounded-md border border-white/10 bg-black/20 p-2 text-[11px] text-white/55">
-      {deleted ? 'Recording deleted. The transcript, chapters and feedback are kept.' : 'The recording for this call is not available. The transcript and feedback are kept.'}
+      {deleted ? 'Recording deleted. The transcript, chapters and feedback are kept.'
+        : replay?.recordingPruned ? `Only the ${replay.recordingsKept ?? 10} most recent calls keep their recording. The transcript, chapters and feedback of this one are kept.`
+          : 'The recording for this call is not available. The transcript and feedback are kept.'}
     </p>}
     {analysis?.status === 'analyzing' && <p role="status" aria-label="Analysis status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">Analysis is still running. Chapters and feedback may be incomplete.</p>}
     {analysis?.status === 'failed' && <p role="alert" aria-label="Analysis failed" className="flex items-start gap-1 rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">
       <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Analysis failed{analysis.error ? `: ${analysis.error}` : ''}. The transcript and recording are still available.
     </p>}
     {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">{deleteError}</p>}
-    <Scrubber chapters={chapters} durationMs={durationMs} positionMs={positionMs} onSeek={seek} />
+    <Scrubber chapters={chapters} durationMs={durationMs} positionMs={positionMs} onSeek={seek} pauseSpans={pauseSpans} format={shown} />
     <div className="flex min-w-0 items-baseline gap-2 text-[10px] text-white/45">
-      <span className="shrink-0 whitespace-nowrap font-mono">{formatTime(positionMs)} / {formatTime(durationMs)}</span>
+      <span className="shrink-0 whitespace-nowrap font-mono">{shown(positionMs)} / {hasPauses ? `${formatTime(activeMs)} · recording ${formatTime(durationMs)}` : formatTime(durationMs)}</span>
       {currentChapterTitle
         ? <button type="button" aria-label={`Current chapter: ${currentChapterTitle}. Show chapters`} onClick={showChapters}
           className="flex min-w-0 items-center gap-1 rounded px-1 text-left text-violet-200/80 hover:bg-white/5 hover:text-violet-100">
@@ -292,6 +358,15 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         </button>
         : null}
     </div>
+    {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-1 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-[11px] text-red-100">
+      <p>Delete the recording for this call? The transcript, chapters and feedback are kept.</p>
+      <div className="flex gap-1">
+        <button type="button" onClick={confirmDelete} aria-label="Confirm delete recording" className="rounded border border-red-400/40 bg-red-500/25 px-2 py-1 hover:bg-red-500/35">Delete</button>
+        <button type="button" onClick={() => setConfirmingDelete(false)} className="rounded border border-white/15 px-2 py-1 text-white/70 hover:bg-white/5">Keep recording</button>
+      </div>
+    </div>}
+    </div>
+    <div ref={scrollRef} onWheel={markHandScroll} onTouchMove={markHandScroll} onKeyDown={markHandScroll} aria-label="Chapters and transcript" role="region" tabIndex={0} data-replay-scroll="chapters" className="pc-scroll-hidden min-h-0 flex-1 space-y-2 overflow-y-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
     {/* A call that shared anything keeps this area at one height for the whole replay, so the
         chapters under it do not jump as the playback moves in and out of a shared screen. */}
     {hasShare && <section aria-label="Shared screen and code at this moment" data-replay-share="true" className="grid gap-2 lg:grid-cols-2">
@@ -302,7 +377,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         ? <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-44" />
         : <p data-replay-share-empty="pad" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">No code had been written yet at this moment.</p>}
     </section>}
-    <div className={`grid gap-2 ${hasFeedback ? '' : 'md:grid-cols-2'}`}>
+    <div className={`grid gap-2 ${hasFeedback ? '' : 'min-[720px]:grid-cols-2'}`}>
       <section aria-label="Chapters" ref={chaptersRef} className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Chapters</p>
         {chapters.length === 0 && <p className="text-[11px] text-white/40">No chapters yet.</p>}
@@ -311,18 +386,18 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
           const startMs = Number(chapter?.startMs) || 0;
           const title = chapter?.title || `Chapter ${index + 1}`;
           return <li key={`chapter-${index}`}>
-            <button type="button" onClick={() => seek(startMs)} aria-label={`Seek to ${title} at ${formatTime(startMs)}`}
+            <button type="button" onClick={() => seek(startMs)} aria-label={`Seek to ${title} at ${shown(startMs)}`}
               className="flex w-full items-baseline justify-between gap-2 rounded px-1 text-left text-[11px] text-white/80 hover:bg-white/5">
-              <span>{title}</span><span className="font-mono text-[10px] text-white/45">{formatTime(startMs)}</span>
+              <span>{title}</span><span className="font-mono text-[10px] text-white/45">{shown(startMs)}</span>
             </button>
             {markers.length > 0 && <ul aria-label={`Moments in ${title}`} className="ml-2 mt-0.5 space-y-0.5">{markers.map((marker, markerIndex) => {
               const raw = Number(marker?.atMs) || 0;
               const atMs = durationMs > 0 ? Math.min(Math.max(0, raw), durationMs) : Math.max(0, raw);
               const label = marker?.label || marker?.kind || 'Moment';
               return <li key={`marker-${index}-${markerIndex}`}>
-                <button type="button" onClick={() => seek(atMs)} aria-label={`Seek to ${label} at ${formatTime(atMs)}`}
+                <button type="button" onClick={() => seek(atMs)} aria-label={`Seek to ${label} at ${shown(atMs)}`}
                   className="flex w-full items-center gap-1 rounded px-1 text-left text-[10px] text-white/65 hover:bg-white/5">
-                  <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${markerTone(marker?.kind)}`} />{label}<span className="ml-auto font-mono text-white/40">{formatTime(atMs)}</span>
+                  <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${markerTone(marker?.kind)}`} />{label}<span className="ml-auto font-mono text-white/40">{shown(atMs)}</span>
                 </button>
               </li>;
             })}</ul>}
@@ -331,16 +406,10 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
       </section>
       <section aria-label="Transcript" className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Transcript</p>
-        <TurnList transcript={transcript} currentTurn={currentTurn} onSeek={seek} replay={replay} />
+        <TurnList transcript={transcript} currentTurn={currentTurn} onSeek={seek} replay={replay} format={shown} />
       </section>
     </div>
-    {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-1 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-[11px] text-red-100">
-      <p>Delete the recording for this call? The transcript, chapters and feedback are kept.</p>
-      <div className="flex gap-1">
-        <button type="button" onClick={confirmDelete} aria-label="Confirm delete recording" className="rounded border border-red-400/40 bg-red-500/25 px-2 py-1 hover:bg-red-500/35">Delete</button>
-        <button type="button" onClick={() => setConfirmingDelete(false)} className="rounded border border-white/15 px-2 py-1 text-white/70 hover:bg-white/5">Keep recording</button>
-      </div>
-    </div>}
+    </div>
     </div>
     </div>
   </main>;

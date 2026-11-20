@@ -23,7 +23,7 @@ export default function EndedScreen({ state, onChooseFeedback }) {
         <Avatar person={state?.persona} className="h-14 w-14 text-xl"><span className="pc-ring absolute inset-0 rounded-full" /></Avatar>
         <div className="min-w-0">
           <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : state?.interviewerLeft ? 'Call ended' : 'You left the call'}</h1>
-          <p className="text-sm text-[#9aa0a6]">Call length {formatTime(state?.elapsedMs)}{state?.persona?.name ? ` · Interviewer: ${state.persona.name}` : ''}</p>
+          <p className="text-sm text-[#9aa0a6]">Call length {formatTime(state?.activeMs ?? state?.elapsedMs)}{state?.persona?.name ? ` · Interviewer: ${state.persona.name}` : ''}</p>
         </div>
       </div>
       {choosing ? <section aria-label="Feedback choice" className="pc-fade space-y-4">

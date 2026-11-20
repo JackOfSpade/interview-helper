@@ -25,7 +25,24 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   maxResumePauseMs: 1200,
   maxPausedMs: 2500,
   voiceNoteTimeoutMs: 150,
+  openerDeadlineMs: 1500, // from the start of the turn: an acknowledgement not known by then is aborted and none is spoken
+  // Joining the acknowledgement and the reply. The reply's first sentence is flushed to the voice (spoken without
+  // waiting for more text, which the service otherwise does until it has about 8 words) only when the acknowledgement
+  // is about to run out: joinFlushLeadMs before its audio ends. When the reply is ready earlier, a natural pause is
+  // left after the acknowledgement (JOIN_PAUSE_MS, by how it ended), but only with at least joinGapMinLeadMs of the
+  // acknowledgement still to play, since the pause starts a new voice segment that must connect in time.
+  joinFlushLeadMs: 900,
+  joinGapMinLeadMs: 900,
 });
+
+/** The pause a speaker leaves after a line, by how the line ended: a full stop pauses longer than a comma. */
+export const JOIN_PAUSE_MS = Object.freeze({ '.': 450, '!': 450, '?': 550, '…': 650, ',': 220, ';': 300, ':': 300, '—': 280, '–': 280, '-': 280, other: 200 });
+/** The pause after a spoken line: its last letter-or-punctuation character decides; tags and closing quotes are skipped. */
+export function joinPauseMs(text) {
+  const tail = String(text ?? '').replace(/\[[^\]]*\]/g, ' ').replace(/['"”’)\]\s]+$/u, '');
+  const last = tail.endsWith('...') ? '…' : tail.slice(-1);
+  return JOIN_PAUSE_MS[last] ?? JOIN_PAUSE_MS.other;
+}
 
 // Fallback if the helper never reports `cancelled` for a stopped utterance.
 const CANCEL_WAIT_MS = 500;
@@ -54,7 +71,13 @@ const WAIT_MIN_S = 6;
 const WAIT_MAX_S = 300;
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
-const MAX_OPENER_WORDS = 3;
+// Joining it to the reply: an acknowledgement word not yet voiced is counted at this (measured 2026-11-19 on the real
+// voices: 13 clips, 320 to 470 ms a word, median about 390), the near-silence after its last word at this until known,
+// and a pause shorter than this is not worth a new voice segment.
+const ACK_WORD_ESTIMATE_MS = 390;
+const ACK_TAIL_ESTIMATE_MS = 150;
+const JOIN_GAP_MIN_MS = 60;
+const LEADING_TAGS = /^(?:\s*\[[^\]]*\])+\s*/u;
 const MAX_SILENCE_CHECKS = 3; // unanswered check-ins before the interviewer gives up and the line drops
 const nonSpace = text => String(text ?? '').replace(/\s/g, '').length; // the overlay position unit: whitespace never counts
 const tokens = value => String(value ?? '').split(/\s+/).filter(Boolean);
@@ -293,6 +316,9 @@ export function createPracticeCallEngine({
     reply.finishTimer = null;
     unschedule(reply.gateTimer);
     reply.gateTimer = null;
+    unschedule(reply.openerTimer);
+    cancelJoinFlush(reply);
+    reply.openerTimer = null;
     reply.voiceQueue = [];
     reply.buffered = [];
     attempt(() => reply.ctl.opener.abort());
@@ -390,10 +416,10 @@ export function createPracticeCallEngine({
       voiceDone: false, finishCalled: false, endSent: false,
       gateOpen: immediate, gateTimer: null, voiceQueue: [], voiceCharsSent: 0, finishDeferred: false,
       mainDone: false, mainListen: false, mainPass: false, mainForwarded: 0,
-      openerSettled: greeting,
+      openerSettled: greeting, noteSettled: true, mainStarted: false, voiceNote: '', ackText: '', openerTimer: null,
       ctl: { opener: new AbortController(), main: new AbortController(), voice: new AbortController() },
       stream: null, sampleRate: null, entry: null, heardText: undefined,
-      wait: null, heldPause: null, textSinceGap: false, unknownScreens: [], heldTurn: false, checkIn: false, padProgress: false, segChars: 0, parserChars: 0, gapParserChars: 0, heldTag: '', openerChars: 0, openerInSegment: false, overlayCaption: null, overlayCount: 0, overlaysSent: [], overlayStarts: [], overlaysShown: 0,
+      wait: null, heldPause: null, textSinceGap: false, unknownScreens: [], heldTurn: false, checkIn: false, padProgress: false, segChars: 0, parserChars: 0, gapParserChars: 0, heldTag: '', openerChars: 0, openerInSegment: false, joinFlushTimer: null, joinFlushAtGate: false, joinPauseMs: 0, overlayCaption: null, overlayCount: 0, overlaysSent: [], overlayStarts: [], overlaysShown: 0,
       asked: [], writer: null, tagged: null, taggedCutIn: false, partSpeakers: [], speakerStarts: [], shownSpeaker: null,
       positionMs: 0, playbackStarted: false, shownInOrder: null, cancelTimer: null, boundaryAfter: [], cancelWait: null, afterCancel: null,
       used: { acks: 0, interruption: null, notSpoken: false },
@@ -440,14 +466,15 @@ export function createPracticeCallEngine({
       reply.turnBase = base;
       // A silence prompt or pad progress answers nothing the candidate said, so there is nothing to acknowledge first.
       const withOpener = !reply.checkIn && !reply.padProgress && !handover;
+      reply.pausedAck = pausedAck;
       reply.messages = {
         // The short opening reaction never needs the pad's code or the unheard rest of a cut-off reply, so only the main message carries them.
         ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint }) } : {}),
-        main: prefix + formatTurn({ ...base, openerPlaying: withOpener, pausedAck }),
       };
       if (!withOpener) reply.openerSettled = true;
     }
     if (pausedAck !== null) reply.openerSettled = true;
+    reply.noteSettled = typed || greeting || pausedAck !== null || handover;
     try {
       reply.stream = voice.open({ utteranceId: reply.utteranceId, signal: reply.ctl.voice.signal, ...(speakers ? { speakerId: floor } : {}) });
     } catch {
@@ -490,15 +517,51 @@ export function createPracticeCallEngine({
       const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
       reply.gateTimer = schedule(gateMs - since, () => { reply.gateTimer = null; openGate(reply); });
     }
-    if (reply.messages.opener !== undefined) runOpener(reply);
-    if (typed || greeting || pausedAck !== null || handover) runMain(reply);
-    else requestVoiceNote(reply);
+    // The main message waits for the acknowledgement's words (so the reply never repeats it) and, on a spoken
+    // turn, for the ear's note; both are awaited at once.
+    if (reply.messages.opener !== undefined) {
+      reply.openerTimer = schedule(th.openerDeadlineMs, () => {
+        reply.openerTimer = null;
+        if (current !== reply || reply.openerSettled) return;
+        attempt(() => reply.ctl.opener.abort());
+        finishOpener(reply, 'timeout');
+      });
+      runOpener(reply);
+    }
+    if (!reply.noteSettled) requestVoiceNote(reply);
+    else maybeStartMain(reply);
     return reply;
+  }
+
+  /** The acknowledgement is known (spoken, dropped, passed, timed out or failed): report it once and release the main reply. */
+  function finishOpener(reply, outcome, written = '', words = 0) {
+    if (reply.openerSettled) return;
+    reply.openerSettled = true;
+    unschedule(reply.openerTimer);
+    reply.openerTimer = null;
+    if (outcome === 'spoken') reply.ackText = stripAudioTags(written);
+    emit({ type: 'opener', text: written, spoken: outcome === 'spoken', words, ms: Math.round(now() - reply.spec.at), outcome });
+    if (outcome === 'listen') return;
+    maybeStartMain(reply);
+    settle(reply);
+  }
+
+  /** Start the main session once both the acknowledgement and (spoken turns) the voice note are known. */
+  function maybeStartMain(reply) {
+    if (current !== reply || reply.mainStarted || !reply.openerSettled || !reply.noteSettled) return;
+    reply.mainStarted = true;
+    // Built now, once, so it can carry the acknowledgement's words and the ear's note (the greeting's is set at the start).
+    if (reply.turnBase) {
+      reply.messages.main = reply.mainPrefix + formatTurn({
+        ...reply.turnBase, pausedAck: reply.pausedAck, ...(reply.voiceNote ? { voiceNote: reply.voiceNote } : {}), ...(reply.ackText ? { acknowledgement: reply.ackText } : {}),
+      });
+    }
+    runMain(reply);
   }
 
   /** Ask the ear how the candidate sounded; a note decorates the MAIN message only. */
   function requestVoiceNote(reply) {
-    if (typeof ear?.voiceNote !== 'function') { runMain(reply); return; }
+    if (typeof ear?.voiceNote !== 'function') { reply.noteSettled = true; maybeStartMain(reply); return; }
     const startMs = Number.isFinite(turnStartMs) ? turnStartMs : 0;
     const endMs = Number.isFinite(lastVadEndMs) ? lastVadEndMs : startMs;
     let settled = false;
@@ -508,11 +571,9 @@ export function createPracticeCallEngine({
       settled = true;
       unschedule(timer);
       if (current !== reply) return; // generation fence: a stale note never reaches a newer turn
-      const value = typeof note === 'string' ? note.trim() : '';
-      if (value && reply.turnBase) {
-        reply.messages.main = reply.mainPrefix + formatTurn({ ...reply.turnBase, openerPlaying: reply.messages.opener !== undefined, voiceNote: value });
-      }
-      runMain(reply);
+      reply.voiceNote = typeof note === 'string' ? note.trim() : '';
+      reply.noteSettled = true;
+      maybeStartMain(reply);
     };
     timer = schedule(th.voiceNoteTimeoutMs, () => settle(null));
     Promise.resolve().then(() => ear.voiceNote({ startMs, endMs })).then(settle, () => settle(null));
@@ -523,6 +584,12 @@ export function createPracticeCallEngine({
     attempt(() => reply.stream.sendText(text));
   }
 
+  /** Ask the voice to speak what it has now; behind the silence gate the request waits in the queue with the texts. */
+  function flushVoice(reply) {
+    if (reply.gateOpen) attempt(() => reply.stream.flush?.());
+    else reply.voiceQueue.push({ flush: true });
+  }
+
   /** The silence gate fired: flush the queued texts in order, then run a finish that was waiting on the flush. */
   function openGate(reply) {
     if (current !== reply || reply.gateOpen) return;
@@ -531,12 +598,18 @@ export function createPracticeCallEngine({
     reply.voiceQueue = [];
     for (const text of queued) {
       if (typeof text === 'string') transmit(reply, text);
+      else if (text.flush) attempt(() => reply.stream.flush?.());
       else if (text.overlay) attempt(() => reply.stream.overlay?.(text.overlay));
       else if (text.gap !== undefined) attempt(() => reply.stream.gap?.(text.gap));
       else attempt(() => (text.cutIn ? reply.stream.setSpeaker?.(text.speakerId, { cutIn: true }) : reply.stream.setSpeaker?.(text.speakerId)));
     }
     // Only the acknowledgement was waiting: speak it now (see runOpener).
     if (queued.length === 1 && queued[0] === reply.flushAfter) attempt(() => reply.stream.flush?.());
+    // The reply's first sentence waited with it: flush it joinFlushLeadMs before the acknowledgement and the pause end.
+    if (reply.joinFlushAtGate) {
+      reply.joinFlushAtGate = false;
+      scheduleJoinFlush(reply, Math.max(0, ackRemainingMs(reply) + (reply.joinPauseMs || 0) - th.joinFlushLeadMs));
+    }
     if (reply.finishDeferred) { reply.finishDeferred = false; callFinish(reply); }
   }
 
@@ -615,6 +688,7 @@ export function createPracticeCallEngine({
     reply.dropping = false; // the voice never left the speaker before the dropped segment
     if (id === reply.writer) return;
     reply.writer = id;
+    cancelJoinFlush(reply); // the segment that held the first sentence ends here and is voiced whole
     reply.heldTag = ''; // a delivery tag shapes only its own speaker's next words
     reply.segChars = 0;
     reply.openerInSegment = false; // the acknowledgement belongs to the segment that just ended
@@ -777,11 +851,12 @@ export function createPracticeCallEngine({
    * A written pause is held until words follow it: one with no words before it, or with nothing spoken after it by the
    * end of the reply, adds only dead air and is never sent to the voice (a gap cannot be taken back once sent).
    */
-  function flushHeldPause(reply) {
+  /** `pendingChars`: parser characters already counted for a sentence that will be sent after this pause. */
+  function flushHeldPause(reply, pendingChars = 0) {
     if (reply.heldPause === null) return;
     const delayMs = reply.heldPause;
     reply.heldPause = null;
-    queueGap(reply, delayMs);
+    queueGap(reply, delayMs, pendingChars);
   }
 
   /** The prepared screen a reference names ("p1" is part 1, "p1.2" part 2), or null. */
@@ -802,14 +877,16 @@ export function createPracticeCallEngine({
   }
 
   /** Real silence between the words before and after this point, in order with the text, speaker switches and gates. */
-  function queueGap(reply, delayMs) {
+  function queueGap(reply, delayMs, pendingChars = 0) {
     if (typeof reply.stream?.gap !== 'function') return;
+    cancelJoinFlush(reply); // a gap ends the segment that held the first sentence, which voices it
     // The voice starts a new segment: the overlay anchors count characters from here, as after a speaker switch.
     reply.textSinceGap = false;
     reply.segChars = 0;
     reply.openerInSegment = false;
-    // A held delivery tag was counted by the parser here but is sent after the gap, so it belongs to the new segment.
-    reply.gapParserChars = reply.parserChars - nonSpace(reply.heldTag);
+    // A held delivery tag was counted by the parser here but is sent after the gap, so it belongs to the new segment;
+    // so does a sentence already counted that is sent after it (a held pause is let out ahead of its sentence).
+    reply.gapParserChars = reply.parserChars - nonSpace(reply.heldTag) - pendingChars;
     if (reply.gateOpen) attempt(() => reply.stream.gap(delayMs));
     else reply.voiceQueue.push({ gap: delayMs });
   }
@@ -892,22 +969,91 @@ export function createPracticeCallEngine({
     return reply.positionMs + since;
   }
 
+  /** How long the acknowledgement still has to play: its audio not yet played, plus an estimate for words not yet voiced. */
+  function ackRemainingMs(reply) {
+    const audioMs = reply.sampleRate ? (reply.audioBytes / 2 / reply.sampleRate) * 1000 : 0;
+    const played = reply.playbackStarted ? Math.min(livePosition(reply), audioMs) : 0;
+    const count = tokens(reply.ackText).length;
+    // Until every word is voiced (or when the voice reports no words), the whole acknowledgement is estimated from its
+    // word count, and the audio already received stands in for it once it is longer: never the two added together.
+    const total = reply.words.length >= count ? audioMs : Math.max(audioMs, count * ACK_WORD_ESTIMATE_MS);
+    return Math.max(0, total - played);
+  }
+
+  function cancelJoinFlush(reply) {
+    if (reply.joinFlushTimer) unschedule(reply.joinFlushTimer);
+    reply.joinFlushTimer = null;
+    reply.joinFlushAtGate = false;
+  }
+
+  /** Flush the first sentence `ms` from now (at once for 0), unless its segment ends first. */
+  function scheduleJoinFlush(reply, ms) {
+    cancelJoinFlush(reply);
+    if (ms <= 0) { flushVoice(reply); return; }
+    reply.joinFlushTimer = schedule(ms, () => { reply.joinFlushTimer = null; if (current === reply) flushVoice(reply); });
+  }
+
+  /** Near-silence the voice already left after the acknowledgement's last word; an assumed typical value until it is all voiced. */
+  function ackTailMs(reply) {
+    const audioMs = reply.sampleRate ? (reply.audioBytes / 2 / reply.sampleRate) * 1000 : 0;
+    const done = reply.words.length > 0 && reply.words.length >= tokens(reply.ackText).length;
+    return done ? Math.max(0, audioMs - Math.max(...reply.words.map(word => word.endMs))) : ACK_TAIL_ESTIMATE_MS;
+  }
+
+  /**
+   * Before the reply's first sentence goes to the voice: when the acknowledgement still has time to play, leave a
+   * natural pause after it (a new voice segment, so only with joinGapMinLeadMs to spare). Returns when to flush the
+   * first sentence: at once when nothing is playing ahead of it, else joinFlushLeadMs before the acknowledgement (and
+   * the pause) ends, so a sentence that arrives early waits for the next one and the two are voiced together.
+   */
+  function joinAfterAcknowledgement(reply, parsedChars) {
+    if (!reply.ackText || !reply.openerInSegment) return 0; // nothing ahead, or a pause or a switch already parted them
+    const remaining = ackRemainingMs(reply);
+    let pause = 0;
+    const report = flushInMs => { emit({ type: 'join', utteranceId: reply.utteranceId, remainingMs: Math.round(remaining), pauseMs: pause, flushInMs: flushInMs === null ? null : Math.round(flushInMs), gated: !reply.gateOpen }); return flushInMs; };
+    // Behind the voice gate nothing has played yet, so the whole acknowledgement is still ahead (its words estimated).
+    if (remaining >= th.joinGapMinLeadMs) {
+      pause = Math.round(Math.max(0, joinPauseMs(reply.ackText) - ackTailMs(reply)));
+      if (pause >= JOIN_GAP_MIN_MS) {
+        queueGap(reply, pause);
+        // The parser has already counted this sentence, but it is sent after the gap, in the new segment.
+        reply.gapParserChars = reply.parserChars - parsedChars;
+      } else pause = 0;
+    }
+    reply.joinPauseMs = pause;
+    // Behind the gate nothing plays yet: the flush is timed when the gate opens and the acknowledgement starts.
+    if (!reply.gateOpen) { report(null); reply.joinFlushAtGate = true; return null; }
+    return report(Math.max(0, remaining + pause - th.joinFlushLeadMs));
+  }
+
   function forwardMain(reply, sentence) {
     if (reply.spec.mainFirstSentenceMs === null) reply.spec.mainFirstSentenceMs = now() - reply.spec.at;
     // A held pause goes out ahead of the next words (and of a speaker switch before them), unless nobody will say them.
-    if (reply.heldPause !== null && /[\p{L}\p{N}]/u.test(stripAudioTags(sentence)) && !absentAt(reply)) flushHeldPause(reply);
+    if (reply.heldPause !== null && /[\p{L}\p{N}]/u.test(stripAudioTags(sentence)) && !absentAt(reply)) flushHeldPause(reply, nonSpace(sentence));
     applyTag(reply); // before the sentence is counted: a switch sits ahead of it
     if (reply.dropping) return; // attributed to a colleague who has not joined: said by no voice, counted nowhere
     // Delivery tags alone make no sound: they wait for the next words of this speaker, also across a gap.
     if (!/[\p{L}\p{N}]/u.test(stripAudioTags(sentence))) { reply.heldTag = reply.heldTag ? `${reply.heldTag} ${sentence}` : sentence; return; }
     if (reply.heldTag) { sentence = `${reply.heldTag} ${sentence}`; reply.heldTag = ''; }
-    if (!reply.openerSettled) {
-      reply.openerSettled = true;
-      attempt(() => reply.ctl.opener.abort());
+    // Heard 2026-11-19: a mood tag on the reply's first sentence made the voice flip tone straight after the
+    // acknowledgement, and the instruction alone did not stop it (24 of 25 replies kept one). Right after an
+    // acknowledgement in the same voice, the first sentence is voiced in the same mood: its leading tags are dropped
+    // (later sentences keep theirs, so a real change of tone still comes, one sentence on).
+    const first = reply.mainSentences.length === 0;
+    const parsedChars = nonSpace(sentence); // as the parser counted it, held tag included
+    let droppedChars = 0;
+    if (first && reply.ackText && reply.openerInSegment) {
+      const plain = sentence.replace(LEADING_TAGS, '');
+      if (/[\p{L}\p{N}]/u.test(plain)) { droppedChars = parsedChars - nonSpace(plain); sentence = plain; }
     }
+    const flushInMs = first ? joinAfterAcknowledgement(reply, parsedChars) : null;
+    // Overlay anchors are in parser characters: the dropped tag was counted there but never reaches the voice.
+    reply.gapParserChars += droppedChars;
     reply.mainForwarded += 1;
     reply.mainSentences.push(sentence);
     sendVoice(reply, sentence);
+    // The voice waits for about 8 words before it speaks, and a first sentence is often shorter ("Good to hear.").
+    if (flushInMs !== null) scheduleJoinFlush(reply, flushInMs);
   }
 
   /**
@@ -966,33 +1112,34 @@ export function createPracticeCallEngine({
         const head = parser.push(String(result?.text ?? ''));
         const tail = parser.end();
         const control = controlFor(reply, tail.control ?? result?.control);
-        if (control === 'listen') return discardSilent(reply, 'listen');
+        if (control === 'listen') {
+          finishOpener(reply, 'listen');
+          return discardSilent(reply, 'listen');
+        }
         // A pass from the acknowledgement session only means it makes no sound. Whether the line gets a reply is the
         // main session's decision alone: found live on 2026-11-18, where this session's pass cancelled a real reply.
-        reply.openerSettled = true;
         const written = [...head.sentences, ...tail.sentences].join(' ').trim();
-        // The acknowledgement is one to three words. Anything longer has content in it, which the
-        // reply (written without sight of it) would then say again, so it is not spoken at all.
-        // A bare delivery tag with no words makes no sound, so it is not an acknowledgement either.
+        // The acknowledgement chooses its own length and is spoken as written, however long (the owner's call,
+        // 2026-11-19: a word cap was arbitrary and untested). A bare delivery tag with no words makes no sound.
         const words = tokens(stripAudioTags(written)).length;
-        const spoken = words >= 1 && words <= MAX_OPENER_WORDS ? written : '';
+        const spoken = words >= 1 ? written : '';
         if (spoken) {
           sendVoice(reply, spoken);
           reply.openerChars = nonSpace(spoken);
           reply.openerSpoken = spokenChars(spoken);
           reply.openerInSegment = true;
-          // An acknowledgement is a word or two, far below what the voice service waits for before
-          // it makes a sound. Ask for it now, or it would only be heard once the reply arrives.
+          // An acknowledgement is far below what the voice service waits for before it makes a sound.
+          // Ask for it now, or it would only be heard once the reply arrives.
           reply.flushAfter = spoken;
           if (reply.gateOpen) attempt(() => reply.stream.flush?.());
         }
-        return settle(reply);
+        return finishOpener(reply, spoken ? 'spoken' : control === 'pass' ? 'pass' : 'dropped', written, words);
       } catch (error) {
         if (current !== reply || reply.openerSettled || (isCancel(error) && !guard?.state.timedOut)) return;
-        if (tries >= 1) { reply.openerSettled = true; return settle(reply); }
+        if (tries >= 1) return finishOpener(reply, 'error');
         const restarted = await restart('opener');
         if (current !== reply) return;
-        if (!restarted) { reply.openerSettled = true; return settle(reply); }
+        if (!restarted) return finishOpener(reply, 'error');
       }
     }
   }
@@ -1120,6 +1267,7 @@ export function createPracticeCallEngine({
   }
 
   function callFinish(reply) {
+    cancelJoinFlush(reply); // finishing voices everything sent, so a pending first-sentence flush has nothing left to do
     const done = failed => {
       if (current !== reply) return;
       if (!reply.gotAudio) return voiceNotSpoken(reply);

@@ -7,7 +7,7 @@
  */
 import { pathToFileURL } from 'node:url';
 import { createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS } from '../electron/interviewPracticeCallEngine.js';
-import { SCENARIOS, getScenario, AMI_PAUSES, PAUSE_SOURCE_LINE } from './fixtures/interview-practice-call-scenarios.mjs';
+import { SCENARIOS, getScenario, AMI_PAUSES, PAUSE_SOURCE_LINE, ACK_REACTION } from './fixtures/interview-practice-call-scenarios.mjs';
 
 export const HELPER_OFFSET = 5000; // helper atMs = clock ms - 5000
 export const SWEEP_SPECULATE_MS = [400, 500, 600, 800];
@@ -25,6 +25,23 @@ export const PHASE0 = Object.freeze({
   classifier: { p50: 900, p95: 1087 },
   voice: { p50: 546, p95: 574 },
 });
+
+/**
+ * The acknowledgement session, measured live on 2026-11-19 (scripts/practice-probes/opener-ack.mjs, 25 turns of a real call):
+ * the time until the WHOLE reaction text is known, which is what the main reply now waits for. Haiku low: 0.60 / 0.70 s,
+ * Sonnet low: 0.71 / 0.79 s; the fake samples between them. PHASE0.opener above stays the old first-word figure.
+ */
+export const OPENER_WHOLE = Object.freeze({ p50: 650, p95: 800 });
+/**
+ * The main session on Opus low with the real instructions, measured live on 2026-11-19 (scripts/practice-probes/main-first-sentence.mjs,
+ * 26 turns of a real call): time from the start of the turn to its first complete sentence. The default fakes keep PHASE0.main;
+ * pass it with `mainSpec` (CLI --measured) to simulate the call as it is now.
+ */
+export const MAIN_FIRST_SENTENCE = Object.freeze({ p50: 2965, p95: 3789 });
+/** Voice time to first audio of a line after the first of an utterance (library voice, docs section 9: 0.2 to 0.25 s). */
+export const VOICE_LATER_LINE_MS = 250;
+/** What a spoken word costs in the fake voice for the acknowledgement: about 330 ms per word. */
+export const ACK_MS_PER_WORD = 330;
 
 export function mulberry32(seed) {
   let state = seed >>> 0;
@@ -53,12 +70,12 @@ export function createLognormal(rand, spec) {
 }
 
 /** One independent PRNG stream per fake so a change in one fake never shifts another's samples. */
-export function createLatencies(seed) {
+export function createLatencies(seed, openerSpec = OPENER_WHOLE, mainSpec = PHASE0.main) {
   const stream = index => mulberry32(Math.imul(seed >>> 0, 2654435761) + index * 40503 + 17);
   const helper = stream(5);
   return {
-    opener: createLognormal(stream(1), PHASE0.opener),
-    main: createLognormal(stream(2), PHASE0.main),
+    opener: createLognormal(stream(1), openerSpec),
+    main: createLognormal(stream(2), mainSpec),
     classifier: createLognormal(stream(3), PHASE0.classifier),
     voice: createLognormal(stream(4), PHASE0.voice),
     cancelLagMs: () => 1 + Math.floor(helper() * 15),
@@ -115,9 +132,9 @@ function wantsListen(world, who) {
   return world.listenDraws[who]() < world.listenAccuracy;
 }
 
-function createWorld(clock, scenario, seed, listenAccuracy = 1) {
+function createWorld(clock, scenario, seed, listenAccuracy = 1, { reaction = scenario.reaction ?? ACK_REACTION, openerSpec = OPENER_WHOLE, openerTailMs = 0, mainSpec = PHASE0.main, laterLineMs = 0 } = {}) {
   const world = {
-    clock, scenario, seed, latency: createLatencies(seed), engine: null, engineEnded: false,
+    clock, scenario, seed, reaction, openerTailMs, laterLineMs, ackTexts: new Set(), latency: createLatencies(seed, openerSpec, mainSpec), engine: null, engineEnded: false,
     listenAccuracy, listenDraws: createListenDraws(seed), inPause: false,
     earOn: false, earInPause: false, smartTurnAccuracy: null, earAnswers: [],
     earDraws: mulberry32(Math.imul(seed >>> 0, 1103515245) + 12345),
@@ -268,7 +285,7 @@ function createFakeVoice(world) {
   const { clock } = world;
   return {
     open({ utteranceId, signal } = {}) {
-      const rec = { utteranceId, texts: [], words: [], audioMs: 0 };
+      const rec = { utteranceId, texts: [], words: [], audioMs: 0, deliveries: [], gaps: [], flushes: 0 };
       world.voice.push(rec);
       const timers = new Set();
       let audioCb = () => {};
@@ -277,6 +294,7 @@ function createFakeVoice(world) {
       let firstSendAt = null;
       let ttfa = 0;
       let lastDelivery = 0;
+      let pendingGapMs = 0; // silence the voice puts ahead of the next text it speaks
       let pending = 0;
       let waiter = null;
       const release = () => { if (waiter && pending === 0) { const done = waiter; waiter = null; done(); } };
@@ -297,12 +315,18 @@ function createFakeVoice(world) {
         rec.texts.push(text);
         const now = clock.now();
         if (firstSendAt === null) { firstSendAt = now; ttfa = world.latency.voice(); }
-        const at = Math.max(now, firstSendAt + ttfa, lastDelivery);
+        const at = Math.max(now + (rec.texts.length === 1 ? 0 : world.laterLineMs), firstSendAt + ttfa, lastDelivery);
         lastDelivery = at;
-        const durationMs = (text.length / CHARS_PER_SECOND) * 1000;
-        const bytes = Math.round((durationMs / 1000) * SAMPLE_RATE) * 2;
-        const startMs = rec.audioMs;
-        rec.audioMs += durationMs;
+        // The acknowledgement is spoken at about 330 ms a word; every other text at 15 characters a second.
+        const isAck = text === world.reaction || world.ackTexts.has(text);
+        const durationMs = isAck ? text.split(/\s+/).filter(Boolean).length * ACK_MS_PER_WORD : (text.length / CHARS_PER_SECOND) * 1000;
+        const pauseMs = pendingGapMs;
+        pendingGapMs = 0;
+        rec.deliveries.push({ text, at, durationMs, ack: isAck, pauseMs });
+        // A gap is silence in the audio itself, ahead of this text's speech.
+        const bytes = Math.round(((pauseMs + durationMs) / 1000) * SAMPLE_RATE) * 2;
+        const startMs = rec.audioMs + pauseMs;
+        rec.audioMs += pauseMs + durationMs;
         const list = text.split(/\s+/).filter(Boolean);
         const words = list.map((word, index) => ({
           word, startMs: startMs + (index * durationMs) / list.length, endMs: startMs + ((index + 1) * durationMs) / list.length,
@@ -322,6 +346,9 @@ function createFakeVoice(world) {
         }, at - now);
         timers.add(timer);
       };
+      stream.gap = ms => { if (!aborted && ms > 0) { pendingGapMs += ms; rec.gaps.push(ms); } };
+      // The fake voice speaks every text at once, so there is no buffered text to release.
+      stream.flush = () => { if (!aborted) rec.flushes += 1; };
       stream.finish = () => new Promise(resolve => {
         if (aborted || pending === 0) return resolve();
         waiter = resolve;
@@ -397,10 +424,11 @@ function createFakeSession(world, kind) {
       world.openerMessages.push(message);
       const first = world.latency.opener();
       const listen = wantsListen(world, 'opener');
-      const text = listen ? '<listen/>' : (world.scenario.reaction ?? 'Got it,');
+      const text = listen ? '<listen/>' : world.reaction;
+      if (!listen) world.ackTexts.add(text);
       return runCall(world, signal, {
         steps: [{ at: first, fn: () => onDelta?.(text) }],
-        end: failure || { at: first + 150, result: { text, control: listen ? 'listen' : undefined } },
+        end: failure || { at: first + world.openerTailMs, result: { text, control: listen ? 'listen' : undefined } },
       });
     }
     if (kind === 'classifier') {
@@ -570,10 +598,13 @@ async function perform(world, helper, action, index) {
 
 /** thresholds are passed straight to the engine (speculateMs, commitMs, voiceGateMs, ...); listenAccuracy defaults to
  * the scenario's value, else 1.0. ear: { smartTurnAccuracy } installs the fake Smart Turn ear; false/null leaves it off. */
-export async function runScenario(scenario, { thresholds = DEFAULT_CALL_THRESHOLDS, seed = 1, listenAccuracy, ear = false } = {}) {
+export async function runScenario(scenario, { thresholds = DEFAULT_CALL_THRESHOLDS, seed = 1, listenAccuracy, ear = false, reaction, openerSpec, openerTailMs, mainSpec, laterLineMs } = {}) {
   const accuracy = listenAccuracy ?? scenario.listenAccuracy ?? 1;
   const clock = createVirtualClock();
-  const world = createWorld(clock, scenario, seed, accuracy);
+  const world = createWorld(clock, scenario, seed, accuracy, {
+    ...(reaction !== undefined ? { reaction } : {}), ...(openerSpec ? { openerSpec } : {}), ...(openerTailMs !== undefined ? { openerTailMs } : {}),
+    ...(mainSpec ? { mainSpec } : {}), ...(laterLineMs ? { laterLineMs } : {}),
+  });
   const fakeEar = ear ? createFakeEar(world, typeof ear === 'object' ? ear : {}) : undefined;
   const helper = createFakeHelper(world);
   const voice = createFakeVoice(world);
@@ -635,6 +666,26 @@ function measureCutIns(world, endedAt) {
   return list;
 }
 
+/**
+ * For every reply that was heard and began with the acknowledgement: the silence between the end of the acknowledgement
+ * and the first audio of the main reply. gapMs is all of it. It has two parts: stallMs, the helper running out of audio
+ * because the reply's first sentence arrived after the acknowledgement ended (an audible failure, zero when the reply was
+ * ready in time), and pauseMs, the silence the engine asked the voice for on purpose (gap), which is not a failure.
+ * Reactions are told apart by their text.
+ */
+function measureAckGaps(world) {
+  const gaps = [];
+  for (const rec of world.voice) {
+    const first = rec.deliveries[0];
+    const next = rec.deliveries.find((item, index) => index > 0 && !item.ack);
+    const start = world.playbackStarts.find(item => item.utteranceId === rec.utteranceId);
+    if (!first?.ack || !next || !start) continue;
+    const stallMs = Math.max(0, next.at - (start.at + first.durationMs));
+    gaps.push({ utteranceId: rec.utteranceId, gapMs: stallMs + next.pauseMs, stallMs, pauseMs: next.pauseMs, ackMs: first.durationMs });
+  }
+  return gaps;
+}
+
 /** Characters sent to the fake voice for replies that were discarded (never heard) or cut in. Uses the engine's
  * 'discarded' events' voiceCharsSent when present, else the fake voice's own per-utterance count. */
 function countWastedVoiceChars(world, events, cutInList) {
@@ -670,7 +721,7 @@ function collect(world, engine, events, scriptDone) {
     earAnswers: world.earAnswers, speculations: Math.max(0, world.mainCalls.length - 1), commands: world.commands, transcript: engine.state().transcript,
     events, mainMessages: world.mainMessages, timings, cutIns, cutInList, wastedVoiceChars, listenAccuracy: world.listenAccuracy,
     talkOverMsTotal: cutInList.reduce((sum, item) => sum + item.talkOverMs, 0), discarded, ended: endedEvent,
-    openerMessages: world.openerMessages, classifierCalls: world.classifierCalls, restarts: world.restarts,
+    ackGaps: measureAckGaps(world), openerMessages: world.openerMessages, classifierCalls: world.classifierCalls, restarts: world.restarts,
     voice: world.voice, helperLog: world.helperLog, answers: world.answers, pauseWindows: world.pauseWindows,
     incomplete: !scriptDone, durationMs: world.clock.now(),
   };
@@ -691,7 +742,7 @@ export function chooseBest(rows, rule = BEST_RULE) {
 
 export async function runSweep({
   seeds = 5, scenario = getScenario('pause-heavy-answers'), speculateMs = SWEEP_SPECULATE_MS, commitMs = SWEEP_COMMIT_MS,
-  voiceGateMs = SWEEP_VOICE_GATE_MS, listenAccuracy = SWEEP_LISTEN_ACCURACY, ear = [false],
+  voiceGateMs = SWEEP_VOICE_GATE_MS, listenAccuracy = SWEEP_LISTEN_ACCURACY, ear = [false], run = {},
 } = {}) {
   const seedsUsed = seedList(seeds);
   const rows = [];
@@ -702,7 +753,7 @@ export async function runSweep({
           if (commit <= speculate) continue;
           for (const gate of voiceGateMs) {
             if (gate > commit) continue;
-            rows.push(await sweepRow(scenario, seedsUsed, { speculateMs: speculate, commitMs: commit, voiceGateMs: gate }, accuracy, useEar));
+            rows.push(await sweepRow(scenario, seedsUsed, { speculateMs: speculate, commitMs: commit, voiceGateMs: gate }, accuracy, useEar, run));
           }
         }
       }
@@ -718,7 +769,7 @@ export async function runSweep({
 // ear: false runs the sweep with the ear off; true installs the fake Smart Turn ear at DEFAULT_SMART_TURN_ACCURACY.
 const earOption = useEar => (useEar ? { smartTurnAccuracy: DEFAULT_SMART_TURN_ACCURACY } : false);
 
-async function sweepRow(scenario, seedsUsed, thresholds, listenAccuracy, useEar = false) {
+async function sweepRow(scenario, seedsUsed, thresholds, listenAccuracy, useEar = false, run = {}) {
   let answers = 0;
   let cutIns = 0;
   let talkOver = 0;
@@ -726,8 +777,10 @@ async function sweepRow(scenario, seedsUsed, thresholds, listenAccuracy, useEar 
   let discarded = 0;
   let speculations = 0;
   const latencies = [];
+  const gaps = [];
   for (const seed of seedsUsed) {
-    const result = await runScenario(scenario, { thresholds, seed, listenAccuracy, ear: earOption(useEar) });
+    const result = await runScenario(scenario, { thresholds, seed, listenAccuracy, ear: earOption(useEar), ...run });
+    gaps.push(...result.ackGaps);
     answers += result.answers.length;
     cutIns += result.cutIns;
     talkOver += result.talkOverMsTotal;
@@ -748,6 +801,13 @@ async function sweepRow(scenario, seedsUsed, thresholds, listenAccuracy, useEar 
     discardRate: speculations ? discarded / speculations : 0,
     wastedVoiceChars: wasted, wastedVoiceCharsPerAnswer: answers ? round(wasted / answers) : 0,
     p50Ms: round(percentile(latencies, 0.5)), p95Ms: round(percentile(latencies, 0.95)),
+    // gapP50/gapP95: all the silence between the acknowledgement and the reply. gap>0 and gap>200: only the helper
+    // stalling for lack of audio, never the pause the engine leaves on purpose.
+    ackGapP50Ms: round(percentile(gaps.map(gap => gap.gapMs), 0.5)), ackGapP95Ms: round(percentile(gaps.map(gap => gap.gapMs), 0.95)),
+    ackGapPositiveRate: gaps.length ? gaps.filter(gap => gap.stallMs > 0).length / gaps.length : 0,
+    ackGapOver200Rate: gaps.length ? gaps.filter(gap => gap.stallMs > 200).length / gaps.length : 0,
+    ackPauseRate: gaps.length ? gaps.filter(gap => gap.pauseMs > 0).length / gaps.length : 0,
+    ackGapCount: gaps.length,
   };
 }
 
@@ -768,11 +828,12 @@ export function summarizeSweep(rows, { maxCutInRate = SUMMARY_MAX_CUT_IN_RATE, t
 }
 
 const pct = value => `${(value * 100).toFixed(1)}%`;
-const ROW_HEADER = 'speculateMs commitMs voiceGate listen  cutIn/answer talkOverMs discarded wastedChars/answer  p50ms   p95ms  ear';
+const ROW_HEADER = 'speculateMs commitMs voiceGate listen  cutIn/answer talkOverMs discarded wastedChars/answer  p50ms   p95ms  ear gapP50 gapP95  gap>0 gap>200';
 const rowLine = row => [String(row.speculateMs).padEnd(11), String(row.commitMs).padEnd(8), String(row.voiceGateMs).padEnd(9),
   row.listenAccuracy.toFixed(1).padEnd(6), pct(row.cutInRate).padStart(12), String(row.talkOverMsMean ?? '-').padStart(10),
   pct(row.discardRate).padStart(9), String(row.wastedVoiceCharsPerAnswer).padStart(18), String(row.p50Ms).padStart(7),
-  String(row.p95Ms).padStart(7), (row.ear ? 'on' : 'off').padStart(4)].join(' ');
+  String(row.p95Ms).padStart(7), (row.ear ? 'on' : 'off').padStart(4), String(row.ackGapP50Ms ?? '-').padStart(6), String(row.ackGapP95Ms ?? '-').padStart(6),
+  pct(row.ackGapPositiveRate ?? 0).padStart(6), pct(row.ackGapOver200Rate ?? 0).padStart(8)].join(' ');
 
 const earLabelOf = group => `${group.listenAccuracy.toFixed(1)} (ear ${group.ear ? 'on' : 'off'})`;
 
@@ -806,13 +867,26 @@ export function formatSweep(sweep, { table = true } = {}) {
 }
 
 // ---- CLI --------------------------------------------------------------------
+/** --reaction "text", --opener-p50 / --opener-p95 (ms until the whole acknowledgement is known), --opener-tail (ms after its first delta). */
+function runOptions(value, argv = []) {
+  const run = {};
+  if (value('reaction') !== undefined) run.reaction = value('reaction');
+  if (value('opener-p50') !== undefined || value('opener-p95') !== undefined) {
+    run.openerSpec = { p50: Number(value('opener-p50') ?? OPENER_WHOLE.p50), p95: Number(value('opener-p95') ?? OPENER_WHOLE.p95) };
+  }
+  if (value('opener-tail') !== undefined) run.openerTailMs = Number(value('opener-tail'));
+  // --measured: the main session's measured first-sentence time and the voice's later-line start.
+  if (argv.includes('--measured')) { run.mainSpec = MAIN_FIRST_SENTENCE; run.laterLineMs = VOICE_LATER_LINE_MS; }
+  return run;
+}
+
 async function main(argv) {
   const flag = name => argv.includes(`--${name}`);
   const value = name => { const at = argv.indexOf(`--${name}`); return at >= 0 ? argv[at + 1] : undefined; };
   const seeds = value('seeds') ? Number(value('seeds')) : 5;
   const json = flag('json');
   if (flag('sweep')) {
-    const sweep = await runSweep({ seeds });
+    const sweep = await runSweep({ seeds, run: runOptions(value, argv) });
     console.log(json ? JSON.stringify(sweep, null, 2) : formatSweep(sweep, { table: flag('table') }));
     return;
   }

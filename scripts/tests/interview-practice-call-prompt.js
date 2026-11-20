@@ -123,7 +123,7 @@ const base = [
       assert(none.endsWith('Reply only READY now.'));
       const opener = buildOpenerInstructions({ persona: { ...persona, temperament: null, voice }, brief, plan });
       // The acknowledgement session never chooses a temperament: it is told the manner and how the voice sounds.
-      assert(opener.includes('listening sounds of an interviewer') && opener.endsWith('Reply only READY now.') && opener.includes('Manner: professional and even.'));
+      assert(opener.includes('listening sounds of an interviewer') && opener.endsWith('Reply only READY now.') && opener.includes('Manner: professional and even;'));
       assert(!buildInterviewerInstructions({ persona, brief, plan }).includes('YOUR VOICE'));
     },
   },
@@ -212,15 +212,24 @@ const base = [
       const opener = buildOpenerInstructions({ persona, brief, plan, steering: 'A long steering note about the round.' });
       assert(opener.includes(OPENER_BLOCK));
       assert(opener.endsWith('Reply only READY now.'));
-      assert.match(OPENER_BLOCK, /one to three words/u);
-      assert.match(OPENER_BLOCK, /Never repeat, summarise or refer to anything the candidate said/u);
+      assert.match(OPENER_BLOCK, /ONE short spoken reaction/u);
+      assert.match(OPENER_BLOCK, /Choose the length a real listener would naturally say after THIS line:/u, 'it picks its own natural length');
+      assert(!/at most \d+ words|\d+ to \d+ words/u.test(OPENER_BLOCK), 'no word count anywhere');
+      assert.match(OPENER_BLOCK, /Never pad it to fill time/u);
+      assert.doesNotMatch(OPENER_BLOCK, /Say about|this time/u, 'there is no word target');
+      assert.doesNotMatch(OPENER_BLOCK, /one to three words/u);
+      assert.match(OPENER_BLOCK, /Never describe, rate or restate the answer/u);
+      assert.match(OPENER_BLOCK, /ANY line of that kind/u, 'generic enough that any follow-up can come after it');
+      assert.match(OPENER_BLOCK, /never write the same reaction twice/u);
+      assert.match(OPENER_BLOCK, /Never praise, state a fact/u);
+      assert.match(OPENER_BLOCK, /Never write a hesitation \(no ellipsis/u);
       assert.match(OPENER_BLOCK, /reply exactly <listen\/>/u);
       assert.match(OPENER_BLOCK, /reply exactly <pass\/>/u);
       assert(opener.includes(persona.name), 'it knows whose voice it is');
       for (const absent of ['SEALED BRIEF', 'INTERVIEW PLAN', 'INTERVIEW FOCUS', 'HOW TO RUN THE INTERVIEW', 'candidatePrivatePrep', 'A long steering note']) {
         assert(!opener.includes(absent), `no ${absent} in the acknowledgement instructions`);
       }
-      assert(opener.length < 2500, 'small enough to answer fast');
+      assert(opener.length < 4000, 'small enough to answer fast');
       assert(!buildInterviewerInstructions({ persona, brief, plan }).includes('listening sounds of an interviewer'));
     },
   },
@@ -228,7 +237,7 @@ const base = [
     name: 'interview practice prompt: control tags explain the new notes, chat and typed turns',
     run() {
       const text = buildInterviewerInstructions({ persona, brief, plan });
-      assert(text.includes('[A short spoken reaction is already playing before your reply.]'));
+      assert(text.includes("[You have already started your reply out loud with: '…' Carry on from there.]"));
       assert(text.includes('[Your previous reply was not spoken: the candidate was still talking.]'));
       assert(text.includes('<chat>…</chat> posts text to the call'));
       assert(text.includes("Candidate (typed in chat): '…'") && text.includes('[candidate is typing in chat]'));
@@ -257,8 +266,10 @@ const base = [
     run() {
       assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', notSpoken: true }),
         "[elapsed 00:00] [Your previous reply was not spoken: the candidate was still talking.] Candidate: 'x'");
-      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', openerPlaying: true }),
-        "[elapsed 00:00] [A short spoken reaction is already playing before your reply.] Candidate: 'x'");
+      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', acknowledgement: 'Okay, yeah, I follow.' }),
+        "[elapsed 00:00] Candidate: 'x' [You have already started your reply out loud with: 'Okay, yeah, I follow.' Carry on from there.]", 'the marker is the last part, after the Candidate line');
+      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', acknowledgement: '' }), "[elapsed 00:00] Candidate: 'x'", 'no marker when nothing is spoken');
+      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', acknowledgement: '  ' }), "[elapsed 00:00] Candidate: 'x'");
       assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', lastSpoken: 'Hi there.' }),
         "[elapsed 00:00] [You last said: 'Hi there.'] Candidate: 'x'");
       assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', typing: true }),
@@ -266,12 +277,13 @@ const base = [
       assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'x', channel: 'chat' }),
         "[elapsed 00:00] Candidate (typed in chat): 'x'");
       assert.equal(formatTurnMessage({
-        elapsedMs: 61_000, candidateText: 'x', channel: 'chat', notSpoken: true, openerPlaying: true, lastSpoken: 'L',
+        elapsedMs: 61_000, candidateText: 'x', channel: 'chat', notSpoken: true, acknowledgement: 'Right, yeah.', lastSpoken: 'L',
         acknowledgements: ['right'], interruption: { heardText: 'abc' }, typing: true,
       }), "[elapsed 01:01] [Your previous reply was not spoken: the candidate was still talking.] "
-        + "[A short spoken reaction is already playing before your reply.] [You last said: 'L'] "
+        + "[You last said: 'L'] "
         + '[Candidate acknowledgements while you spoke: "right"] '
-        + "[You were interrupted after saying: 'abc'. The rest was not heard.] [candidate is typing in chat] Candidate (typed in chat): 'x'");
+        + "[You were interrupted after saying: 'abc'. The rest was not heard.] [candidate is typing in chat] Candidate (typed in chat): 'x' "
+        + "[You have already started your reply out loud with: 'Right, yeah.' Carry on from there.]");
     },
   },
   {
@@ -1051,7 +1063,7 @@ export default [
       assert(controls.includes('<asked n="3"/>') && controls.includes('It is never spoken'));
       assert(controls.includes('Write it once per planned question, only the first time; never for follow-ups, small talk or questions of your own.'));
       assert(controls.includes('before any speaker tag'));
-      assert(text.includes('[A short spoken reaction is already playing before your reply.]'), 'the reworded reaction rule is kept');
+      assert(text.includes("[You have already started your reply out loud with:"), 'the marker rule is kept');
     },
   },
   {
@@ -1194,7 +1206,7 @@ export default [
       const opener = buildOpenerInstructions({ persona, brief, plan });
       assert.match(opener, /only an acknowledgement that needs no reply/u);
       assert.match(opener, /reply exactly <pass\/> instead/u);
-      assert(opener.length < 2800, 'still small enough to answer fast');
+      assert(opener.length < 4000, 'still small enough to answer fast');
     },
   },
   {
@@ -1254,4 +1266,68 @@ export default [
       assert.equal(VOICE_STABILITY_MIN < VOICE_STABILITY_MAX, true);
     },
   },
+  {
+    name: 'interview practice prompt: the reply continues from the exact acknowledgement words and never reacts again',
+    run() {
+      const text = buildInterviewerInstructions({ persona, brief, plan });
+      const rule = text.split('\n').find(entry => entry.startsWith("- A message containing [You have already started your reply out loud with: '…' Carry on from there.]"));
+      assert.ok(rule, 'its own rule');
+      assert.match(rule, /quotes the first words of your own reply: they are already spoken/u);
+      assert.match(rule, /your next words never react again: no second acknowledgement, agreement, thanks, sympathy or reassurance/u);
+      assert.match(rule, /Go straight to the substance/u);
+      assert.match(rule, /your first sentence carries no delivery tag, so it is heard in the same mood/u, 'the first sentence has no tag and keeps the tone');
+      assert.match(rule, /in a panel, in the voice of whoever holds the floor/u);
+      assert.match(rule, /A message without that note has nothing spoken ahead of it/u);
+      assert.match(rule, /interruption rule above comes first/u, 'the interruption rule keeps precedence');
+      assert.doesNotMatch(rule, /already playing/u);
+    },
+  },
+  {
+    name: 'interview practice prompt: the acknowledgement panel note says the reaction is spoken in the floor holder\'s voice',
+    run() {
+      const solo = buildOpenerInstructions({ persona, brief, plan });
+      const panel = buildOpenerInstructions({ persona, brief, plan, panel: [{ id: 'B', name: 'John' }] });
+      assert(!solo.includes('Other interviewers share this call'));
+      assert(panel.includes('Other interviewers share this call, and your reaction is spoken in the voice of whichever of them holds the floor. Never write a speaker tag.'));
+    },
+  },
+  {
+    name: 'interview practice prompt: the acknowledgement manner differs by temperament',
+    run() {
+      const manner = temperament => buildOpenerInstructions({ persona: { ...persona, temperament } }).split('\n').find(line => line.startsWith('The interviewer:'));
+      assert.notEqual(manner('warm'), manner('tough'));
+      assert.match(manner('warm'), /gladness and sympathy/u);
+      assert.match(manner('tough'), /never gushing/u);
+    },
+  },
+  {
+    name: 'interview practice prompt: a turn message never carries a length note, and the opener instructions let the acknowledgement choose its own length',
+    run() {
+      const note = formatTurnMessage({ elapsedMs: 0, candidateText: 'a longer line here', acknowledgementWords: 9 });
+      assert(!note.includes('Say about'), 'a word target is ignored');
+      assert.equal(note, "[elapsed 00:00] Candidate: 'a longer line here'");
+      assert.match(OPENER_BLOCK_TEXT(), /a bare "Mm-hm\." or "Right\." after a word or two, a few words after most answers, a little more after something long, personal or hard/u);
+      assert.match(OPENER_BLOCK_TEXT(), /never a promise to answer or help/u);
+    },
+  },
+  {
+    name: 'interview practice prompt: a panel colleague greets the candidate once, in the prompt only',
+    run() {
+      const prompt = buildInterviewerInstructions({ persona, brief, plan, callPlan });
+      assert.match(prompt, /A colleague greets the candidate once\. If they already said hello \(a remark spoken over the lead's introduction counts\) or were introduced and have already spoken, their first line on taking the floor starts with their question or a reference to what was said, never another hello\./u);
+      assert(!buildInterviewerInstructions({ persona, brief, plan: plan, callPlan: soloPlan }).includes('greets the candidate once'), 'a call with no colleagues does not carry panel conduct');
+    },
+  },
+  {
+    name: 'interview practice prompt: a figure the brief does not hold is deflected as someone who knows the subject, with no number',
+    run() {
+      const prompt = buildInterviewerInstructions({ persona, brief, plan });
+      assert.match(prompt, /NEVER invent company facts, numbers/u, 'the ban on inventing stays');
+      assert.match(prompt, /your own team's size, say\) but the brief holds no figure, do not refuse to talk about it and do not give a number/u);
+      assert.match(prompt, /still being shaped around the project or changes with the phase/u);
+      assert.match(prompt, /the recruiter can give the current picture/u);
+    },
+  },
 ];
+
+function OPENER_BLOCK_TEXT() { return buildOpenerInstructions({ persona }); }

@@ -19,6 +19,14 @@ const isInterviewer = turn => turn?.speaker === 'interviewer';
 const arrays = (metrics, keys) => keys.flatMap(key => list(metrics?.[key]));
 const answerArrays = (metrics, key) => list(metrics?.answers).flatMap(answer => list(answer?.[key]));
 
+/** Cut at a word boundary with an ellipsis; text that fits is returned whole. */
+function clip(text, max) {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const space = head.lastIndexOf(' ');
+  return `${(space > max / 2 ? head.slice(0, space) : head).trimEnd().replace(/[,;:.-]+$/, '')}\u2026`;
+}
+
 function pauseMarkers(candidateProsodyByTurn) {
   const seen = new Set();
   const markers = [];
@@ -100,10 +108,11 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
       const turn = turns[number(moment?.turnIndex)] ?? null;
       return { atMs: turn ? ms(turn.startMs) : null, kind: moment?.kind === 'filler' ? 'filler' : 'moment', label: label(moment?.label) || 'Flagged moment' };
     }),
-    ...turns.filter(turn => turn?.channel === 'chat').map(turn => ({
+    // The candidate's own typed lines are the chapter's text already; only the interviewer's chat is a marker.
+    ...turns.filter(turn => turn?.channel === 'chat' && isInterviewer(turn)).map(turn => ({
       atMs: ms(turn.startMs),
       kind: 'chat',
-      label: `${turn.speaker === 'candidate' ? 'Candidate' : 'Interviewer'} typed: ${label(turn.text).slice(0, 120)}`,
+      label: `Interviewer typed: ${clip(label(turn.text), 120)}`,
     })),
   ].filter(marker => marker.atMs !== null).map(marker => ({ ...marker, atMs: Math.max(0, Math.min(marker.atMs, total)) })).sort((left, right) => left.atMs - right.atMs);
 

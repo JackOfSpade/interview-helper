@@ -50,6 +50,49 @@ node --import ./scripts/test-stubs/register.mjs scripts/practice-probes/live-cal
 It does not cover microphone capture, on-device transcription or turn-taking on real speech: those
 need a spoken call in the built app.
 
+## C. The acknowledgement ("opener") on the real Claude CLI
+
+`opener-ack.mjs` feeds interviewer-line / candidate-line pairs from a saved `call.json` to the real opener
+instructions on one warm Claude CLI session, in call order, and prints every reaction with its latency, word count
+and structural rule breaks (word count, question, ellipsis, digits, content words shared with the candidate's line).
+Whether a reaction reads like a real listener is for the reader. Spends Claude usage only.
+
+```sh
+node scripts/practice-probes/opener-ack.mjs <call.json> --model haiku --effort low --limit 25
+```
+
+The acknowledgement chooses its own length (no target note since 2026-11-19), so the probe sends none.
+
+## D. The main session's time to its first sentence (what the acknowledgement must cover)
+
+`main-first-sentence.mjs` starts one real main interviewer session (Opus low by default) with the real instructions
+(`buildInterviewerInstructions`) built from a saved call's persona, panel and plan (a stand-in brief: the record does not
+keep the real one), greets, then replays the call's candidate lines in order. Each message is built as the engine builds it,
+with the `[You have already started your reply out loud with ...]` marker carrying a plausible reaction and
+`[You last said ...]` carrying the session's own last reply, and long pauses taken out of the call clock (`activeElapsed`).
+It prints, per turn and as p50/p75/p90/p95, the time to the first delta, to the first complete sentence (the
+transport's own sentence splitting) and for the whole reply, and `--json` keeps each reply's full text. Spends Claude
+usage only.
+
+`main-latency-breakdown.mjs` replays the same way and times, per turn, the CLI's first stream event, thinking, the first
+text and the first sentence (`--model`, `--settings JSON`, `--thinking off`).
+
+## E. Rendered turns: what the candidate would hear
+
+`turn-audio.mjs` replays a saved call's lines on a warm acknowledgement session (Sonnet low) and reply session
+(`--model`), and for the turns in `--turns` speaks both with the call's real ElevenLabs voices in the engine's order,
+pauses and flushes, placing each audio chunk where a player would play it. It writes `turn-NN.wav` (a soft click marks
+the end of the candidate's line) and `index.json` with texts and timings. `--stability-add 0.15` raises every voice's
+stability; `--text-only` writes texts only, no voice. Spends Claude usage and ElevenLabs credits.
+
+```sh
+node scripts/practice-probes/turn-audio.mjs <call.json> --model opus --turns 2,4,6,9,12,13,17 --out <dir>
+```
+
+```sh
+node scripts/practice-probes/main-first-sentence.mjs <call.json> --model opus --effort low --limit 26
+```
+
 ## Tests (no network, no microphone)
 
 ```sh

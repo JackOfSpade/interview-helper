@@ -125,3 +125,30 @@ export function playJoinChime(win) {
     setTimeout(() => { try { context.close(); } catch { /* already closed */ } }, 800);
   } catch { /* no audio available */ }
 }
+
+// Softer, falling two-note chime for someone leaving the call: the join chime reversed and
+// quieter. Never throws: a window without audio just stays silent.
+export function playLeaveChime(win) {
+  try {
+    const AudioContextClass = win?.AudioContext || win?.webkitAudioContext;
+    if (typeof AudioContextClass !== 'function') return;
+    const context = new AudioContextClass();
+    try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the chime stays silent */ }
+    const now = context.currentTime;
+    [[784, 0], [523, 0.14]].forEach(([hertz, offset]) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const at = now + offset;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(hertz, at);
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.05, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.28);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(at);
+      oscillator.stop(at + 0.3);
+    });
+    setTimeout(() => { try { context.close(); } catch { /* already closed */ } }, 800);
+  } catch { /* no audio available */ }
+}

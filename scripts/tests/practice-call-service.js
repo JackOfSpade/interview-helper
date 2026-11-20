@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import * as nodeFs from 'node:fs/promises';
+import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createCallStore } from '../../electron/practiceCall/callStore.js';
 import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
-import { createPracticeCallService, technicalTopicQuestion } from '../../electron/practiceCall/callService.js';
+import { createPracticeCallService, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
+import { DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
 import { createPanelVoiceFactory } from '../../electron/practiceCall/eleven/panelVoice.js';
 import { createReplayHandler } from '../../electron/practiceCall/replayProtocol.js';
 import { capCareerDocumentText, loadCareerDocumentText } from '../../electron/practiceCall/careerDocumentText.js';
@@ -498,9 +500,9 @@ test('engine ended and helper error end the call', async () => {
   await endedService.answer();
   ended.engine()({ type: 'ended', reason: 'interviewer' });
   await new Promise(resolve => setTimeout(resolve, 20));
-  // The interviewer leaving does not end the call for the candidate.
+  // The interviewer ending the call does not end it for the candidate; the interviewers leave one by one a moment later.
   assert.equal(endedService.getState().phase, 'in-call');
-  assert.equal(endedService.getState().interviewerLeft, true);
+  assert.equal(endedService.getState().interviewerLeft, false, 'nobody has left yet');
   assert.equal((await endedService.hangUp()).phase, 'replay');
   assert.equal((await ended.deps.store.readRecord('call-1')).reason, 'interviewer');
   ended.engine()({ type: 'ended', reason: 'timeout' });
@@ -640,7 +642,7 @@ test('setPaused forwards to the engine, publishes from the engine event, saves p
   assert.equal(record.pausedMs, 8000);
 });
 
-test('setPaused is ignored after the interviewer left', async () => {
+test('setPaused is ignored once the interviewer has ended the call', async () => {
   const forwarded = [];
   const emitted = {};
   const { service } = await liveCall({ deps: {
@@ -655,10 +657,10 @@ test('setPaused is ignored after the interviewer left', async () => {
   await service.answer();
   engine()({ type: 'paused', paused: true });
   engine()({ type: 'ended', reason: 'interviewer' });
-  assert.equal(service.getState().interviewerLeft, true);
-  assert.equal(service.getState().paused, false, 'the interviewer leaving clears the pause');
+  assert.equal(service.getState().paused, false, 'the interviewer ending the call clears the pause');
   service.setPaused(true);
   assert.deepEqual(forwarded, []);
+  await service.hangUp();
 });
 
 test('the call timer freezes while paused and does not jump afterwards', async () => {
@@ -1980,9 +1982,12 @@ test('model download bar keeps one total across both models when the store repor
   assert.equal([...totals][0] > 600 * 1000 * 1000, true, 'the total is both model sizes');
 });
 
-test('chat is ignored once the interviewer has left', async () => {
+test('chat is accepted without an answer while the interviewer is leaving, and ignored once they have left', async () => {
   const typed = [];
+  const clock = manualClock();
   const { service, engine } = await liveCall({ deps: {
+    random: () => 0,
+    clock,
     engineFactory: options => {
       engine.listener = options.onEvent;
       return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }), typed: text => typed.push(text) };
@@ -1992,8 +1997,15 @@ test('chat is ignored once the interviewer has left', async () => {
   await service.answer();
   service.sendChat('before');
   engine.listener({ type: 'ended', reason: 'interviewer' });
-  const state = service.sendChat('after');
-  assert.deepEqual(state.chat.map(item => item.text), ['before']);
+  // They are still on the line for 2 s: a real call lets you type, and nobody answers.
+  let state = service.sendChat('during');
+  assert.deepEqual(state.chat.map(item => item.text), ['before', 'during']);
+  assert.deepEqual(typed, ['before'], 'the interviewer sessions never get it');
+  const [leave] = clock.pending().filter(timer => timer.ms === 2000);
+  clock.setNow(clock.now() + 2000);
+  clock.fire(leave);
+  state = service.sendChat('after');
+  assert.deepEqual(state.chat.map(item => item.text), ['before', 'during']);
   assert.deepEqual(typed, ['before']);
 });
 
@@ -2461,6 +2473,10 @@ test('panel: a late timer that fires after the interviewers left does not add an
   timer.cleared = false;
   setup.clock.fire(timer);
   assert.deepEqual(setup.engineCalls.filter(call => call.startsWith('joined')), []);
+  assert.deepEqual(built.service.getState().participants.map(item => [item.id, item.status]), [['A', 'joined']], 'the lead is still leaving');
+  const leaving = setup.clock.pending().find(item => item.ms >= 2000 && item.ms <= 4000);
+  setup.clock.setNow(setup.clock.now() + 4000);
+  setup.clock.fire(leaving);
   assert.deepEqual(built.service.getState().participants.map(item => [item.id, item.status]), [['A', 'left']]);
 });
 
@@ -2479,7 +2495,8 @@ test('panel: speaker events set speakingId, which clears when the interviewer st
   engine({ type: 'speaker', speakerId: 'B' });
   engine({ type: 'ended', reason: 'interviewer' });
   assert.equal(built.service.getState().speakingId, null);
-  assert.equal(built.service.getState().participants.every(item => item.status === 'left'), true, 'every participant leaves with the interviewers');
+  for (const timer of setup.clock.pending().filter(item => item.ms >= 2000 && item.ms <= 4000)) setup.clock.fire(timer);
+  assert.equal(built.service.getState().participants.every(item => item.status === 'left'), true, 'every participant leaves after the interviewers');
 });
 
 test('panel: a caption keeps the speaker id the engine gives it', async () => {
@@ -2502,9 +2519,9 @@ test('solo: a default call is unchanged and records an empty panel', async () =>
   assert.equal(record.persona.voiceId, 'v1');
 });
 
-// Measured 2026-11-17: the acknowledgement on Opus took about 3.4 s to its first word, later than
-// the reply it is meant to come before. With its own small instructions Haiku does it in 0.65 s.
-test('the acknowledgement session runs on Haiku at low effort, the reply and the classifier on Opus, also after a restart', async () => {
+// Measured 2026-11-19 (25 turns of a real call): Haiku at low effort leaked content in about 5 of 25
+// reactions, Sonnet at low effort in 0 of 25, at about +0.1 s to the first word.
+test('the acknowledgement session runs on Sonnet at low effort, the reply and the classifier on Opus, also after a restart', async () => {
   const made = [];
   let restart;
   const { service } = await liveCall({ deps: {
@@ -2513,10 +2530,106 @@ test('the acknowledgement session runs on Haiku at low effort, the reply and the
   } });
   await service.start(ARGS);
   await service.answer();
-  assert.deepEqual(made, [{ model: 'haiku', effort: 'low' }, { model: 'opus', effort: 'low' }, { model: 'opus', effort: 'low' }]);
+  assert.deepEqual(made, [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }, { model: 'opus', effort: 'low' }]);
   await restart('opener', {});
   await restart('main', {});
-  assert.deepEqual(made.slice(3), [{ model: 'haiku', effort: 'low' }, { model: 'opus', effort: 'low' }]);
+  assert.deepEqual(made.slice(3), [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }]);
+});
+
+// Measured 2026-11-19: Opus starts its reply about 2.5 s later than Sonnet but was judged better blind; the reply's
+// model is one choice and the default stays Opus.
+test('mainModel picks the reply\'s model; the default and anything unknown is Opus', async () => {
+  assert.equal(DEFAULT_MAIN_REPLY_MODEL, 'opus');
+  for (const [mainModel, want] of [[undefined, 'opus'], ['sonnet', 'sonnet'], ['nonsense', 'opus']]) {
+    const made = [];
+    const { service } = await liveCall({ deps: {
+      ...(mainModel ? { mainModel } : {}),
+      sessionsFactory: config => { made.push(config); return { start: async () => ({ reply: 'READY' }), close() {} }; },
+      engineFactory: () => ({ start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }) }),
+    } });
+    await service.start(ARGS);
+    await service.answer();
+    assert.deepEqual(made[1], { model: want, effort: 'low' }, String(mainModel));
+    assert.deepEqual(MAIN_REPLY_MODELS[want], { model: want, effort: 'low' });
+  }
+});
+
+// Found 2026-11-19: the raw tracks (60 to 150 MB each for a 30-minute call) stayed for ever when a review failed or
+// the app quit during a call or its review, and nothing read them again.
+test('leftover raw audio of earlier calls is deleted once a recording exists or nothing can open the call, and rescued into call.m4a otherwise', async () => {
+  const tmp = syncFs.mkdtempSync(path.join(os.tmpdir(), 'practice-tidy-'));
+  const root = path.join(tmp, 'practice-calls');
+  const store = createCallStore({ rootDir: root });
+  const put = (id, files) => { syncFs.mkdirSync(path.join(root, id), { recursive: true }); for (const [name, body] of Object.entries(files)) syncFs.writeFileSync(path.join(root, id, name), body); };
+  const names = id => syncFs.readdirSync(path.join(root, id)).sort();
+  const record = JSON.stringify({ nodeId: 'n', startedAt: 1 });
+  put('call-done', { 'call.json': record, 'analysis.json': '{}', 'call.m4a': 'aac', 'candidate.wav': 'pcm', 'interviewer.wav': 'pcm', 'debug.jsonl': '{}' });
+  put('call-crashed', { 'candidate.wav': 'pcm', 'interviewer.wav': 'pcm', 'debug.jsonl': '{}' }); // quit mid-call: no record
+  put('call-unencoded', { 'call.json': record, 'candidate.wav': 'pcm', 'interviewer.wav': 'pcm' }); // quit during the review
+  put('call-mixed', { 'call.json': record, 'call.wav': 'mix' }); // quit between the mix and the encode
+  put('call-half', { 'call.json': record, 'candidate.wav': 'pcm' }); // only one track: nothing to mix
+  put('call-broken', { 'call.json': record, 'candidate.wav': 'pcm', 'interviewer.wav': 'pcm' });
+  const mixed = [];
+  const mixdown = async ({ outPath }) => { mixed.push(path.basename(path.dirname(outPath))); syncFs.writeFileSync(outPath, 'mix'); return { durationMs: 1000 }; };
+  const afconvert = async args => {
+    const out = args.at(-1);
+    if (out.includes('call-broken')) throw new Error('afconvert failed');
+    syncFs.writeFileSync(out, 'aac');
+  };
+  const service = createPracticeCallService({ store, userDataPath: tmp, mixdown, afconvert, logger: { warn() {}, info() {} } });
+  const { tidied } = await service.tidyLeftoverAudio();
+  assert.deepEqual(names('call-done'), ['analysis.json', 'call.json', 'call.m4a', 'debug.jsonl'], 'the record, review, recording and log stay');
+  assert.deepEqual(names('call-crashed'), ['debug.jsonl'], 'nothing in the app can open it: only its log is left, to age out with the others');
+  assert.deepEqual(names('call-unencoded'), ['call.json', 'call.m4a'], 'mixed and encoded first, then the raw files go');
+  assert.deepEqual(names('call-mixed'), ['call.json', 'call.m4a'], 'encoded from the mix that was already there');
+  assert.deepEqual(names('call-half'), ['call.json', 'candidate.wav'], 'half a call is left alone');
+  assert.deepEqual(names('call-broken'), ['call.json', 'call.wav', 'candidate.wav', 'interviewer.wav'], 'the encode failed: the only copy of the audio stays');
+  assert.deepEqual(mixed.sort(), ['call-broken', 'call-unencoded']);
+  assert.deepEqual(tidied.map(item => [item.callId, item.rescued]).sort(), [['call-crashed', false], ['call-done', false], ['call-mixed', true], ['call-unencoded', true]]);
+});
+
+test('only the newest 10 calls keep their recording: older ones keep record and review, say why, and get no rescue', async () => {
+  const tmp = syncFs.mkdtempSync(path.join(os.tmpdir(), 'practice-keep-'));
+  const root = path.join(tmp, 'practice-calls');
+  const store = createCallStore({ rootDir: root });
+  const put = (id, startedAt, files) => {
+    syncFs.mkdirSync(path.join(root, id), { recursive: true });
+    syncFs.writeFileSync(path.join(root, id, 'call.json'), JSON.stringify({ nodeId: 'n', startedAt, transcript: [] }));
+    for (const [name, body] of Object.entries(files)) syncFs.writeFileSync(path.join(root, id, name), body);
+  };
+  for (let index = 1; index <= 12; index += 1) put(`call-${String(index).padStart(2, '0')}`, index * 1000, { 'call.m4a': 'aac', 'analysis.json': '{"status":"ready"}' });
+  put('call-00', 500, { 'candidate.wav': 'pcm', 'interviewer.wav': 'pcm' }); // oldest of all, quit during its review
+  const encoded = [];
+  const service = createPracticeCallService({ store, userDataPath: tmp, logger: { warn() {}, info() {} },
+    mixdown: async ({ outPath }) => { syncFs.writeFileSync(outPath, 'mix'); return { durationMs: 1 }; },
+    afconvert: async args => { encoded.push(args.at(-1)); syncFs.writeFileSync(args.at(-1), 'aac'); } });
+  const { pruned, tidied } = await service.tidyLeftoverAudio();
+  assert.deepEqual(encoded, [], 'a call that will not keep a recording is not rescued first');
+  assert.deepEqual(tidied.map(item => [item.callId, item.rescued]), [['call-00', false]]);
+  assert.deepEqual(syncFs.readdirSync(path.join(root, 'call-00')).sort(), ['call.json']);
+  assert.deepEqual(pruned.map(item => item.callId).sort(), ['call-01', 'call-02']);
+  for (const id of ['call-01', 'call-02']) {
+    assert.deepEqual(syncFs.readdirSync(path.join(root, id)).sort(), ['analysis.json', 'call.json'], 'record and review stay');
+    assert.equal(JSON.parse(syncFs.readFileSync(path.join(root, id, 'call.json'), 'utf8')).recordingPruned, true);
+  }
+  for (let index = 3; index <= 12; index += 1) assert(syncFs.existsSync(path.join(root, `call-${String(index).padStart(2, '0')}`, 'call.m4a')), 'the newest ten keep theirs');
+  const replay = await service.getReplay('call-01');
+  assert.equal(replay.audioUrl, null);
+  assert.equal(replay.recordingPruned, true);
+  assert.equal(replay.recordingsKept, 10);
+  assert.equal((await service.getReplay('call-12')).recordingPruned, undefined);
+  assert.deepEqual((await service.tidyLeftoverAudio()).pruned, [], 'nothing more to do the second time');
+});
+
+test('tidying leftover audio never touches the call that is protected', async () => {
+  const tmp = syncFs.mkdtempSync(path.join(os.tmpdir(), 'practice-tidy-'));
+  const root = path.join(tmp, 'practice-calls');
+  const store = createCallStore({ rootDir: root });
+  syncFs.mkdirSync(path.join(root, 'call-live'), { recursive: true });
+  syncFs.writeFileSync(path.join(root, 'call-live', 'candidate.wav'), 'pcm');
+  assert.deepEqual((await store.leftoverAudio({ protect: 'call-live' })), []);
+  assert.deepEqual((await store.leftoverAudio()).map(item => [item.callId, item.hasRecord, item.hasRecording, item.raw.map(entry => entry.name)]), [['call-live', false, false, ['candidate.wav']]]);
+  assert.deepEqual(await store.deleteRawAudio('call-live', ['candidate.wav', 'call.json']), { deleted: ['candidate.wav'] }, 'only raw audio names are ever deleted');
 });
 
 // Seen in the built app: the lead and her colleague were both called Cohen.
@@ -3829,4 +3942,277 @@ test('topics: a topic asked on a call is counted under the posting key, and an u
   assert.equal((await failing.service.start(ARGS)).phase, 'ringing');
   assert.deepEqual(harness.built.find(item => item.kind === 'main').options.plan.map(item => item.id), ['g1', 'q1']);
   assert(warnings.some(text => text.includes('technical topics unavailable')));
+});
+
+test('the call writes a debug log: phases, setup steps, engine events, session messages, hang-up and notes', async () => {
+  const sent = [];
+  const { tmp, service, engine } = await liveCall({ deps: {
+    debugFs: nodeFs,
+    sessionsFactory: () => ({ start: async () => {}, turn: async message => { sent.push(message); return 'ok'; } }),
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  engine()({ type: 'timing', firstTokenMs: 410, key: 'sk-secret', pcm: new Uint8Array(8), path: '/etc/passwd' });
+  engine()({ type: 'opener', text: 'Right.', spoken: true, words: 1, ms: 700, outcome: 'spoken' });
+  service.sendChat('typed line');
+  await service.hangUp({ feedback: false });
+  const file = path.join(tmp, 'practice-calls', 'call-1', 'debug.jsonl');
+  const lines = (await readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const named = name => lines.filter(line => line.event === name);
+  assert.equal(named('start').length, 1);
+  assert(named('phase').some(line => line.data.phase === 'in-call'));
+  assert(named('setup-step').length > 0 && named('setup-timing').some(line => line.data.name === 'plan'));
+  assert(named('note').some(line => line.data.message.startsWith('voices drawn')));
+  const timing = named('engine').find(line => line.data.type === 'timing').data;
+  assert.equal(timing.firstTokenMs, 410);
+  assert(!('key' in timing) && !('pcm' in timing), 'secrets and audio are left out');
+  assert.equal(timing.path, '[path]');
+  assert.equal(named('engine').find(line => line.data.type === 'opener').data.outcome, 'spoken');
+  assert(named('user').some(line => line.data.action === 'chat' && line.data.text === 'typed line'));
+  assert(named('finish').some(line => line.data.reason === 'candidate'));
+  assert.equal(named('record-saved').length, 1);
+  assert(lines.every(line => typeof line.t === 'string' && 'ms' in line));
+  assert(lines.some(line => typeof line.ms === 'number'), 'the call clock runs once answered');
+  assert.equal((await nodeFs.stat(file)).mode & 0o077, 0);
+  assert(!JSON.stringify(lines).includes('key-should-never-be-logged'));
+});
+
+test('a call that failed in setup keeps its debug log and nothing else', async () => {
+  const { tmp, service } = await liveCall({ deps: { debugFs: nodeFs, planCall: async () => { throw new Error('planner exploded'); } } });
+  assert.equal((await service.start(ARGS)).phase, 'error');
+  await flush();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const dir = path.join(tmp, 'practice-calls', 'call-1');
+  assert.deepEqual(await nodeFs.readdir(dir), ['debug.jsonl']);
+  const text = await readFile(path.join(dir, 'debug.jsonl'), 'utf8');
+  assert(text.includes('planner exploded') && text.includes('"code":"plan-failed"'));
+});
+
+test('a service with no appendFile writes no debug log and still removes an abandoned folder', async () => {
+  const { tmp, service } = await liveCall({ deps: { planCall: async () => { throw new Error('planner exploded'); } } });
+  await service.start(ARGS);
+  await flush();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await assert.rejects(nodeFs.stat(path.join(tmp, 'practice-calls', 'call-1')));
+});
+
+// --- staggered departures, the record's thresholds and pause spans, the voice description ---
+
+const THREE_VOICES = ['lib-1', 'lib-2', 'lib-3', 'lib-4', 'lib-5'];
+const TWO_COLLEAGUES = [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design' }, { voice: 'V3', role: 'Director', focus: '' }];
+/** A started three-interviewer call (A, B, C all there from the start) whose random draws a test queues. */
+async function threeInterviewers({ draws = [], deps = {} } = {}) {
+  const queue = [];
+  const setup = panelHarness({ random: () => (queue.length ? queue.shift() : 0.9), voices: THREE_VOICES, cast: TWO_COLLEAGUES, deps });
+  const typed = [];
+  const makeEngine = setup.overrides.engineFactory;
+  setup.overrides.engineFactory = options => { const engine = makeEngine(options); engine.typed = text => typed.push(text); return engine; };
+  const built = await panelStart(setup);
+  await built.service.answer();
+  queue.push(...draws);
+  const departures = () => setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000);
+  return { setup, built, service: built.service, typed, queue, departures, ended: reason => setup.engineOptions[0].onEvent({ type: 'ended', reason }) };
+}
+const statuses = service => service.getState().participants.map(item => `${item.id}:${item.status}`);
+
+test('departures: each interviewer leaves on their own random delay of 2.0 to 4.0 s after the farewell, the notice only after the last', async () => {
+  const call = await threeInterviewers({ draws: [0.5, 0, 0.99] });
+  const { setup, service } = call;
+  const start = setup.clock.now();
+  const events = [];
+  service.onEvent?.(event => events.push(event));
+  call.ended('interviewer');
+  assert.deepEqual(call.departures().map(timer => timer.ms), [3000, 2000, 4000], 'A, B and C each drew their own delay, in steps of 0.1 s');
+  assert.deepEqual(statuses(service), ['A:joined', 'B:joined', 'C:joined']);
+  assert.equal(service.getState().interviewerLeft, false);
+  const [a, b, c] = call.departures();
+  setup.clock.setNow(start + 2000);
+  setup.clock.fire(b);
+  assert.deepEqual(statuses(service), ['A:joined', 'B:left', 'C:joined'], 'the shortest delay leaves first');
+  assert.equal(service.getState().interviewerLeft, false);
+  setup.clock.setNow(start + 3000);
+  setup.clock.fire(a);
+  assert.deepEqual(statuses(service), ['A:left', 'B:left', 'C:joined']);
+  assert.equal(service.getState().interviewerLeft, false, 'no notice while someone is still on the call');
+  setup.clock.setNow(start + 4000);
+  setup.clock.fire(c);
+  assert.deepEqual(statuses(service), ['A:left', 'B:left', 'C:left']);
+  assert.equal(service.getState().interviewerLeft, true, 'the notice follows the last departure');
+  assert.equal(service.getState().connectionLost, false);
+  assert.deepEqual(events.filter(event => event.type === 'participant-left').map(event => [event.id, event.atMs]), [['B', 2000], ['A', 3000], ['C', 4000]]);
+  assert.equal((await service.hangUp()).phase, 'replay');
+  const record = await call.built.deps.store.readRecord('call-1');
+  assert.equal(record.reason, 'interviewer');
+  assert.equal(record.persona.leftAtMs, 3000);
+  assert.deepEqual(record.panel.map(entry => [entry.id, entry.leftAtMs]), [['B', 2000], ['C', 4000]]);
+  assert.equal(record.interviewerLeftAtMs, 4000, 'the last departure');
+});
+
+test('departures: the delay is 2.0 to 4.0 s in steps of 0.1 s whatever the draw', async () => {
+  const delays = [];
+  for (const value of [0, 0.049, 0.05, 0.5, 0.95, 0.9999, 1, Number.NaN]) {
+    let draw = 0.9;
+    const setup = panelHarness({ random: () => draw, cast: [] });
+    const built = await panelStart(setup);
+    await built.service.answer();
+    draw = value;
+    setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' });
+    delays.push(setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000).map(timer => timer.ms)[0]);
+    await built.service.hangUp();
+  }
+  assert.deepEqual(delays, [2000, 2100, 2100, 3000, 3900, 4000, 4000, 2000]);
+});
+
+test('departures: while they leave nothing reaches a session, the chat takes a line without an answer, and the pad and pause are closed', async () => {
+  const call = await threeInterviewers({ draws: [0, 0, 0] });
+  call.ended('interviewer');
+  const before = call.setup.engineCalls.length;
+  const state = call.service.sendChat('thanks, bye');
+  assert.deepEqual(state.chat.map(item => [item.from, item.text]), [['candidate', 'thanks, bye']]);
+  assert.deepEqual(call.typed, [], 'the engine (and so every session) is never sent it');
+  call.service.setPaused(true);
+  assert.equal(call.service.getState().paused, false);
+  assert.equal(call.setup.engineCalls.length, before, 'no engine call of any kind');
+  await call.service.hangUp();
+});
+
+test('departures: a hang-up during the stagger finishes the call normally and cancels the pending departures', async () => {
+  const call = await threeInterviewers({ draws: [0, 0.5, 0.99] });
+  const start = call.setup.clock.now();
+  call.ended('interviewer');
+  const [a] = call.departures();
+  call.setup.clock.setNow(start + 2000);
+  call.setup.clock.fire(a);
+  assert.equal(call.service.getState().interviewerLeft, false);
+  const pending = call.departures();
+  assert.equal(pending.length, 2);
+  const state = await call.service.hangUp();
+  assert.equal(state.phase, 'replay');
+  assert.equal(call.departures().length, 0, 'no departure timer outlives the call');
+  assert.equal(call.setup.clock.pending().length, 0, 'no timer of any kind is left');
+  // A clock that ignores clearTimeout still changes nothing.
+  for (const timer of pending) { timer.cleared = false; call.setup.clock.fire(timer); }
+  assert.equal(call.service.getState().interviewerLeft, false);
+  const record = await call.built.deps.store.readRecord('call-1');
+  assert.equal(record.reason, 'interviewer', 'the interviewer ended it, so the candidate is not faulted');
+  assert.equal(record.persona.leftAtMs, 2000);
+  assert.equal(record.panel.every(entry => entry.leftAtMs === undefined), true, 'those still on the call have no departure');
+  assert.equal(record.interviewerLeftAtMs, undefined);
+});
+
+test('departures: closing the window during the stagger clears the departures too', async () => {
+  const call = await threeInterviewers({ draws: [0, 0, 0] });
+  call.ended('interviewer');
+  assert.equal(call.departures().length, 3);
+  await call.service.abandon();
+  assert.equal(call.departures().length, 0);
+  assert.equal(call.setup.clock.pending().length, 0);
+});
+
+test('departures: a lost connection drops everyone at once, with no timers', async () => {
+  const call = await threeInterviewers({ draws: [0.5, 0.5, 0.5] });
+  const start = call.setup.clock.now();
+  call.setup.clock.setNow(start + 7000);
+  call.ended('session-error');
+  assert.equal(call.departures().length, 0, 'nobody waits');
+  assert.deepEqual(statuses(call.service), ['A:left', 'B:left', 'C:left']);
+  const state = call.service.getState();
+  assert.equal(state.interviewerLeft, true);
+  assert.equal(state.connectionLost, true);
+  await call.service.hangUp();
+  const record = await call.built.deps.store.readRecord('call-1');
+  assert.equal(record.reason, 'session-error');
+  assert.equal(record.interviewerLeftAtMs, 7000);
+  assert.deepEqual([record.persona.leftAtMs, ...record.panel.map(entry => entry.leftAtMs)], [7000, 7000, 7000]);
+});
+
+test('departures: a colleague who had not joined yet is not on the call to leave', async () => {
+  const setup = panelHarness({ random: () => 0.1 });
+  const built = await panelStart(setup);
+  await built.service.answer();
+  setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' });
+  assert.equal(setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000).length, 1, 'only the lead');
+  await built.service.hangUp();
+});
+
+test('the record carries the engine thresholds, merged with the ones the service was given', async () => {
+  const plain = await startOf({ modelReady: true });
+  await plain.service.start(ARGS);
+  await plain.service.answer();
+  await plain.service.hangUp();
+  assert.deepEqual((await plain.deps.store.readRecord('call-1')).thresholds, DEFAULT_CALL_THRESHOLDS);
+  const tuned = await startOf({ modelReady: true, deps: { thresholds: { commitMs: 999 } } });
+  await tuned.service.start(ARGS);
+  await tuned.service.answer();
+  await tuned.service.hangUp();
+  assert.deepEqual((await tuned.deps.store.readRecord('call-1')).thresholds, { ...DEFAULT_CALL_THRESHOLDS, commitMs: 999 });
+});
+
+test('pause spans are recorded on the recording timeline, an open one closes at hang-up, and the replay carries them with pausedMs and activeMs', async () => {
+  const setup = panelHarness({ cast: [] });
+  const built = await panelStart(setup);
+  await built.service.answer();
+  const start = setup.clock.now();
+  const emit = setup.engineOptions[0].onEvent;
+  setup.clock.setNow(start + 5000);
+  emit({ type: 'paused', paused: true });
+  setup.clock.setNow(start + 6000);
+  emit({ type: 'paused', paused: false });
+  setup.clock.setNow(start + 8000);
+  emit({ type: 'paused', paused: true });
+  setup.clock.setNow(start + 8500);
+  await built.service.hangUp();
+  const record = await built.deps.store.readRecord('call-1');
+  const lead = record.recordingLeadMs;
+  assert.deepEqual(record.pauseSpans, [{ startMs: 5000 + lead, endMs: 6000 + lead }, { startMs: 8000 + lead, endMs: 8500 + lead }]);
+  assert.equal(record.pausedMs, 1500);
+  const replay = await built.service.getReplay('call-1');
+  assert.deepEqual(replay.pauseSpans, record.pauseSpans);
+  assert.equal(replay.pausedMs, 1500);
+  assert.equal(replay.activeMs, replay.durationMs - 1500);
+  assert.equal(replay.durationMs, record.durationMs);
+  const listed = await built.deps.store.list(record.nodeId);
+  assert.equal(listed.find(item => item.callId === 'call-1')?.pausedMs, 1500);
+});
+
+test('the replay says the call was typed only when its review did, and says nothing otherwise', async () => {
+  const built = await startOf({ modelReady: true });
+  await built.service.start(ARGS);
+  await built.service.answer();
+  await built.service.hangUp();
+  assert.equal((await built.service.getReplay('call-1')).analysis.metrics, undefined);
+  await built.deps.store.writeAnalysis('call-1', { callId: 'call-1', status: 'ready', metrics: { typedOnly: true } });
+  assert.deepEqual((await built.service.getReplay('call-1')).analysis.metrics, { typedOnly: true });
+});
+
+test('a call with no pause has empty pause spans and an active length equal to its length', async () => {
+  const built = await startOf({ modelReady: true });
+  await built.service.start(ARGS);
+  await built.service.answer();
+  await built.service.hangUp();
+  const replay = await built.service.getReplay('call-1');
+  assert.deepEqual(replay.pauseSpans, []);
+  assert.equal(replay.pausedMs, 0);
+  assert.equal(replay.activeMs, replay.durationMs);
+});
+
+test('the voice description sent to the planner has no repeats and is cut at a word under 300 characters', async () => {
+  const long = 'Professional American male voice for AI assistants, virtual assistants, customer support, business tools, SaaS apps, productivity workflows, chatbots, onboarding, help desks, explainer content, photo narration, audiobooks, documentaries and many other uses that go on and on for a very long while indeed';
+  const run = async (character, description) => {
+    const setup = panelHarness({ cast: [] });
+    const drawVoice = setup.overrides.voiceLibrary.drawVoice;
+    setup.overrides.voiceLibrary = { ...setup.overrides.voiceLibrary, drawVoice: async options => { const drawn = await drawVoice(options); return { ...drawn, voice: { ...drawn.voice, description } }; } };
+    setup.overrides.catalog = { pickPersonaVoice: options => ({ voiceId: options.voices[0].voiceId, name: PANEL_VOICES[options.voices[0].voiceId], character }) };
+    await panelStart(setup);
+    return setup.planner.calls[0].voices[0].description;
+  };
+  const text = await run({ role: 'Professional AI Assistant', mood: 'casual', copy: `${long.slice(0, 120)}` }, long);
+  assert.equal(text.length <= 300, true);
+  assert.equal(text.startsWith('Professional AI Assistant. casual. Professional American male voice'), true);
+  assert.equal(text.split('Professional American male voice').length, 2, 'the cut-off copy is dropped, the long text kept once');
+  assert.equal(text.endsWith('…'), true);
+  assert.equal(long.includes(text.slice(text.indexOf('. casual. ') + 10, -1)), true, 'it ends on a whole word of the source');
+  assert.equal(/\s…$/u.test(text), false);
+  // A short one is kept whole with one full stop, duplicates dropped.
+  assert.equal(await run({ a: 'Warm', b: 'warm', c: 'Calm and even' }, 'Calm and even.'), 'Warm. Calm and even.');
 });

@@ -14,19 +14,106 @@ export function formatTime(ms) {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-// Index of the transcript turn that contains ms (final turn stays current
-// until the end of the recording) or -1 when nothing covers it.
+const OVERLAY_WINDOW_MS = 1500;
+
+const startOf = turn => (typeof turn?.startMs === 'number' && Number.isFinite(turn.startMs) ? turn.startMs : null);
+const isOverlay = turn => Boolean(turn?.overlay) && (turn?.speaker ?? turn?.role) !== 'candidate';
+// A typed answer is stamped with its send time only (start and end are equal).
+const isTypedTurn = turn => (turn?.speaker ?? turn?.role) === 'candidate'
+  && (turn?.channel === 'chat' || (startOf(turn) !== null && Number.isFinite(turn?.endMs) && turn.endMs <= turn.startMs));
+
+// Index of the transcript turn that is current at ms (final turn stays current
+// until the end of the recording) or -1 when nothing covers it. A remark said
+// over another speaker has no length, so it counts only just after it starts.
+// A typed answer is current from the end of the turn before it until the next
+// turn starts, since its own timestamp is a single instant.
 export function turnAt(transcript, ms) {
   const list = Array.isArray(transcript) ? transcript : [];
   const at = asNumber(ms);
+  let overlayIndex = -1;
   let current = -1;
   for (let index = 0; index < list.length; index += 1) {
-    const startMs = list[index]?.startMs;
-    if (typeof startMs !== "number" || !Number.isFinite(startMs)) continue;
+    const turn = list[index];
+    const startMs = startOf(turn);
+    if (startMs === null) continue;
     if (startMs > at) break;
+    if (isOverlay(turn)) {
+      if (at - startMs < OVERLAY_WINDOW_MS) overlayIndex = index;
+      continue;
+    }
     current = index;
   }
+  if (overlayIndex >= 0) return overlayIndex;
+  // Not past a typed answer's send time yet, but already after the turn before it.
+  for (let index = 0; index < list.length; index += 1) {
+    const turn = list[index];
+    if (!isTypedTurn(turn) || startOf(turn) === null) continue;
+    let from = startOf(turn);
+    for (let before = index - 1; before >= 0; before -= 1) {
+      if (isOverlay(list[before]) || startOf(list[before]) === null) continue;
+      const end = Number(list[before].endMs);
+      from = Math.min(from, Number.isFinite(end) ? end : startOf(list[before]));
+      break;
+    }
+    let until = Infinity;
+    for (let after = index + 1; after < list.length; after += 1) {
+      if (isOverlay(list[after]) || startOf(list[after]) === null) continue;
+      until = startOf(list[after]);
+      break;
+    }
+    if (at >= from && at < until) return index;
+  }
   return current;
+}
+
+// ---------------------------------------------------------------------------
+// Paused time. A call held paused while the candidate typed is part of the
+// recording, so the player skips it and shows the length without it.
+
+// Sorted, non-overlapping spans clipped to the recording; bad entries dropped.
+export function normalizePauseSpans(spans, durationMs) {
+  const total = asNumber(durationMs, Infinity);
+  const list = (Array.isArray(spans) ? spans : [])
+    .map(span => ({ startMs: Math.max(0, asNumber(span?.startMs, NaN)), endMs: Math.min(total, asNumber(span?.endMs, NaN)) }))
+    .filter(span => Number.isFinite(span.startMs) && Number.isFinite(span.endMs) && span.endMs > span.startMs)
+    .sort((a, b) => a.startMs - b.startMs);
+  const merged = [];
+  for (const span of list) {
+    const last = merged[merged.length - 1];
+    if (last && span.startMs <= last.endMs) last.endMs = Math.max(last.endMs, span.endMs);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+// The span containing ms, or null.
+export function pauseSpanAt(spans, ms) {
+  const at = asNumber(ms);
+  return (Array.isArray(spans) ? spans : []).find(span => at >= span.startMs && at < span.endMs) || null;
+}
+
+// Where playback lands for ms: the end of the pause it falls in, else ms itself.
+export function skipPausedMs(spans, ms) {
+  const span = pauseSpanAt(spans, ms);
+  return span ? span.endMs : asNumber(ms);
+}
+
+// Recording time with the paused time before it taken out.
+export function activeTimeMs(spans, ms) {
+  const at = asNumber(ms);
+  let removed = 0;
+  for (const span of Array.isArray(spans) ? spans : []) {
+    if (span.startMs >= at) break;
+    removed += Math.min(span.endMs, at) - span.startMs;
+  }
+  return Math.max(0, at - removed);
+}
+
+// Active length: the payload's own figure, else the recording minus its spans.
+export function activeLengthMs(durationMs, spans, activeMs) {
+  const given = Number(activeMs);
+  if (Number.isFinite(given) && given > 0) return Math.min(given, asNumber(durationMs, given));
+  return activeTimeMs(spans, durationMs);
 }
 
  const MARKER_TONES = Object.freeze({
@@ -192,4 +279,13 @@ export function scrubberKeyTarget(key, modifiers, ms, durationMs, chapters) {
     default: return null;
   }
   return clampMsValue(target, total);
+}
+
+// What the past-calls list shows: the call's length without the stretches it was held paused.
+export function callLengthMs(call) {
+  const total = Math.max(0, asNumber(call?.durationMs));
+  const active = Number(call?.activeMs);
+  if (Number.isFinite(active) && active > 0) return total > 0 ? Math.min(active, total) : active;
+  const paused = asNumber(call?.pausedMs);
+  return paused > 0 ? Math.max(0, total - paused) : total;
 }

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Mic } from 'lucide-react';
+import { callLengthMs } from '../practice-call/replayModel.js';
 
 // The hub side of practice mode: starts the in-app local voice practice call and
 // lists past calls so a recorded call can be replayed with its feedback.
@@ -8,18 +9,22 @@ const KIND_LABELS = Object.freeze({ 'small-talk': 'Small talk', curveball: 'Curv
 const scoreTone = score => (typeof score !== 'number' ? 'text-white/50' : score >= 8 ? 'text-emerald-200' : score >= 5 ? 'text-amber-100' : 'text-red-200');
 const Score = ({ value }) => (typeof value === 'number' ? <span className={`text-[11px] font-semibold ${scoreTone(value)}`}>{value}/10</span> : null);
 const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) || 0) / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
+// Communication notes that need spoken answers to mean anything.
+const SPOKEN_ONLY_NOTES = new Set(['pace', 'pauses', 'confidence', 'filler', 'fillers']);
 const when = iso => { const date = new Date(iso || ''); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(); };
 
-export function FeedbackView({ feedback }) {
+export function FeedbackView({ feedback, typedOnly = false }) {
   if (!feedback) return null;
-  const planned = [...(feedback.planned || [])].sort((a, b) => (a.asked === b.asked ? (a.score ?? 11) - (b.score ?? 11) : a.asked ? -1 : 1));
-  const communication = Object.entries(feedback.communication || {}).filter(([, text]) => text);
+  const allPlanned = [...(feedback.planned || [])];
+  const unasked = allPlanned.filter(item => !item.asked);
+  const planned = allPlanned.filter(item => item.asked).sort((a, b) => (a.asked === b.asked ? (a.score ?? 11) - (b.score ?? 11) : a.asked ? -1 : 1));
+  const communication = Object.entries(feedback.communication || {}).filter(([key, text]) => text && !(typedOnly && SPOKEN_ONLY_NOTES.has(key)));
   return <div className="space-y-2" data-testid="practice-feedback">
     <p className="text-xs text-white/80"><span className="font-semibold">Overall</span> <Score value={feedback.overall?.score} />{feedback.receivedAt ? <span className="text-[10px] text-white/45"> · {when(feedback.receivedAt)}</span> : null}</p>
     <p className="text-[11px] text-white/75 whitespace-pre-wrap">{feedback.overall?.summary}</p>
     {feedback.priorities?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Work on first</p><ol className="list-decimal pl-4 text-[11px] text-amber-100 space-y-0.5">{feedback.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol></div>}
-    {planned.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="break-inside-avoid rounded-md border border-white/10 bg-black/20 p-1.5">
-      <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{item.question}{!item.asked && <span className="text-white/45"> · not asked</span>}</p>
+    {(planned.length > 0 || unasked.length > 0) && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="break-inside-avoid rounded-md border border-white/10 bg-black/20 p-1.5">
+      <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{item.question}</p>
       {item.askedAs && <p className="text-[10px] text-white/55">Asked as: {item.askedAs}</p>}
       <section className="practice-memorized" aria-label="Memorized answer"><p className="text-[10px] font-semibold uppercase text-white/40">Memorized answer</p>
         {item.covered && <p className="text-[11px] text-white/70">{item.covered}</p>}
@@ -29,7 +34,9 @@ export function FeedbackView({ feedback }) {
       {item.extension && <details className="practice-extension text-[11px] text-white/60"><summary className="cursor-pointer">Optional extension</summary>
         <p className="text-[10px] text-white/45">Say this only if you can back it with a real example.</p>
         <p>{item.extension}</p></details>}
-    </li>)}</ul></div>}
+    </li>)}</ul>
+      {unasked.length > 0 && <details data-testid="practice-unasked" className="mt-1.5 text-[11px] text-white/60"><summary className="cursor-pointer">{unasked.length === 1 ? '1 prepared question was not asked' : `${unasked.length} prepared questions were not asked`}</summary>
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">{unasked.map((item, index) => <li key={index}>{item.question}</li>)}</ul></details>}</div>}
     {feedback.moments?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Rest of the call</p><ul className="space-y-1">{feedback.moments.map((item, index) => <li key={index} className="text-[11px] text-white/75"><span className="text-violet-200">{KIND_LABELS[item.kind] || item.kind}</span> <Score value={item.score} /> · {item.prompt}{item.note ? <span className="text-white/60"> — {item.note}</span> : null}</li>)}</ul></div>}
     {communication.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Communication</p><ul className="space-y-0.5">{communication.map(([key, text]) => <li key={key} className="text-[11px] text-white/75"><span className="capitalize text-violet-200">{key}</span>: {text}</li>)}</ul></div>}
     {feedback.transcript?.length > 0 && <details className="text-[11px]"><summary className="cursor-pointer text-white/55">Transcript · {feedback.transcript.length} turns</summary><ol className="mt-1 max-h-64 space-y-1 overflow-y-auto">{feedback.transcript.map((turn, index) => <li key={index} className={turn.role === 'candidate' ? 'text-white/85' : 'text-white/60'}><span className="font-semibold">{turn.role === 'candidate' ? 'You' : 'Interviewer'}:</span> {turn.text}</li>)}</ol></details>}
@@ -111,7 +118,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
         <p className="text-[10px] font-semibold uppercase text-white/45">Past calls</p>
         {pastCalls.length === 0 ? <p className="text-[10px] text-white/40">No past calls yet.</p> : <ul className="mt-0.5 space-y-0.5">{pastCalls.map(call => {
           const id = call?.callId || call?.id;
-          const label = `${when(call?.startedAt) || 'Undated call'} · ${durationLabel(call?.durationMs)} · ${call?.persona?.name || 'Interviewer'}`;
+          const label = `${when(call?.startedAt) || 'Undated call'} · ${durationLabel(callLengthMs(call))} · ${call?.persona?.name || 'Interviewer'}`;
           return <li key={id || label} className="flex items-center justify-between gap-2 text-[11px] text-white/70">
             <span className="min-w-0 truncate">{label}</span>
             <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-white/5 disabled:opacity-40" onClick={() => openReplay(id)} disabled={!id} aria-label={`Replay ${call?.persona?.name || 'practice'} call from ${when(call?.startedAt) || 'unknown date'}`}>Replay</button>

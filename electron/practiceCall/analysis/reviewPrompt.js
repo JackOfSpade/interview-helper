@@ -83,17 +83,67 @@ function planEntries(plan) {
   return Array.isArray(cards) ? cards.filter(card => card && typeof card === 'object') : [];
 }
 
+function formatCard(card, head, extra = []) {
+  const parts = [head];
+  if (line(card.scope)) parts.push(`   scope: ${line(card.scope)}`);
+  if (line(card.headline)) parts.push(`   headline: ${line(card.headline)}`);
+  if (Array.isArray(card.bullets) && card.bullets.length) parts.push(`   points: ${card.bullets.map(line).filter(Boolean).join(' | ')}`);
+  if (line(card.example)) parts.push(`   example: ${line(card.example)}`);
+  if (line(card.answer) || line(card.preparedAnswer)) parts.push(`   prepared answer: ${line(card.answer) || line(card.preparedAnswer)}`);
+  return [...parts, ...extra].join('\n');
+}
+
+const questionOf = card => line(card?.question) || line(card?.prompt);
+
 function formatPlan(plan) {
   const entries = planEntries(plan);
   if (!entries.length) return '(no prepared answers were part of this call)';
-  return entries.map((card, index) => {
-    const parts = [`${index + 1}. ${line(card.question) || line(card.prompt) || '(question)'}`];
-    if (line(card.scope)) parts.push(`   scope: ${line(card.scope)}`);
-    if (line(card.headline)) parts.push(`   headline: ${line(card.headline)}`);
-    if (Array.isArray(card.bullets) && card.bullets.length) parts.push(`   points: ${card.bullets.map(line).filter(Boolean).join(' | ')}`);
-    if (line(card.example)) parts.push(`   example: ${line(card.example)}`);
-    if (line(card.answer) || line(card.preparedAnswer)) parts.push(`   prepared answer: ${line(card.answer) || line(card.preparedAnswer)}`);
-    return parts.join('\n');
+  return entries.map((card, index) => formatCard(card, `${index + 1}. ${questionOf(card) || '(question)'}`)).join('\n');
+}
+
+const numbers = value => (Array.isArray(value) ? value.filter(Number.isInteger) : []);
+
+/**
+ * The cards this call picked, in the plan's order, with what the engine says happened to each.
+ * `number` is the 1-based index into the prepared pool (the same number `pickedQuestions` and
+ * `askedQuestions` use); number 0 is the one unprepared question. Null when the record has no
+ * picked list (an older call): the review then falls back to the whole plan.
+ */
+export function pickedCards(callRecord, plan) {
+  const picked = numbers(callRecord?.pickedQuestions);
+  if (!picked.length) return null;
+  const pool = planEntries(plan);
+  const planned = Array.isArray(callRecord?.setup?.plan?.questions) ? callRecord.setup.plan.questions.filter(entry => entry && typeof entry === 'object') : [];
+  const unprepared = unpreparedText(callRecord);
+  const order = planned.length ? planned.map(entry => entry.number).filter(Number.isInteger).filter(number => number === 0 || picked.includes(number)) : [];
+  for (const number of picked) if (!order.includes(number)) order.push(number);
+  if (unprepared && !order.includes(0)) order.push(0);
+  const askedList = Array.isArray(callRecord?.askedQuestions) ? numbers(callRecord.askedQuestions) : null;
+  const answeredList = numbers(callRecord?.answeredQuestions);
+  const cards = [];
+  for (const number of order) {
+    const probes = (planned.find(entry => entry.number === number)?.probes ?? []).map(line).filter(Boolean);
+    if (number === 0) {
+      if (unprepared) cards.push({ number: 0, question: unprepared, probes, card: null, unprepared: true, asked: null, answered: null });
+      continue;
+    }
+    const card = pool[number - 1];
+    const question = questionOf(card);
+    if (!question) continue;
+    cards.push({ number, question, probes, card, unprepared: false, asked: askedList ? askedList.includes(number) : null, answered: answeredList.includes(number) });
+  }
+  return cards;
+}
+
+const yesNo = value => (value === null ? 'unknown' : value ? 'yes' : 'no');
+
+function formatPicked(cards) {
+  return cards.map(entry => {
+    if (entry.unprepared) {
+      return [`card 0 (the unprepared question, no prepared answer): ${entry.question}`, ...(entry.probes.length ? [`   interviewer's probes: ${entry.probes.join(' | ')}`] : [])].join('\n');
+    }
+    const status = `   engine: asked ${yesNo(entry.asked)}, answered ${entry.asked === false ? 'no' : yesNo(entry.answered)}`;
+    return formatCard(entry.card, `card ${entry.number}: ${entry.question}`, [status, ...(entry.probes.length ? [`   interviewer's probes for this card: ${entry.probes.join(' | ')}`] : [])]);
   }).join('\n');
 }
 
@@ -171,7 +221,16 @@ const RULES = [
   '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
   '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). Never fault the interviewer for asking about something the candidate has not done.',
-  '- Typed turns: a transcript turn marked (chat) was typed, not spoken. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure.',
+  '- Typed turns: a transcript turn marked (chat) was typed, not spoken. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure. Never critique typos, spelling, stray characters or missing punctuation in typed text as if they were speech; typed text is judged for content only.',
+].join('\n');
+
+const SCOPE_RULES = [
+  '- Scope: judge each answer against the question that was actually asked and the follow-ups the interviewer put to it. A prepared point the candidate was not asked about may appear only in the optional extension of that entry, never in improve and never as a gap or something they missed.',
+  '- Hedges: report a hedged statement as hedged. Quote the hedge ("perhaps", "maybe", "I might") and never upgrade it into a decision, a commitment or a fact the candidate did not state.',
+].join('\n');
+
+const PICKED_RULE = [
+  '- Planned questions: this call picked only the cards listed under PICKED QUESTIONS, and the card number is a card\'s identity. The planned list has exactly one entry per listed card, in the listed order, with the question copied exactly as written there. Take "asked" from the engine line of that card, never from a similar-sounding interviewer line; when it was asked, askedAs is the interviewer\'s own line that asked that card\'s question and the score and notes judge the answer to it. Follow-ups and every other interviewer line (small talk, a different topic, the closing) go into moments, never into another card\'s entry. Pool cards that were not picked are not part of this call: do not list or judge them. The unprepared question, when listed, is its own entry at the position listed.',
 ].join('\n');
 
 const PANEL_RULE = '- Panel: more than one interviewer was on this call. Say how the candidate handled that (addressing the right person, coping with a hand-over between interviewers or with a colleague who joined late), but only when the transcript shows it. Do not comment on it otherwise, and do not fault the candidate for how the interviewers dealt with each other.';
@@ -179,7 +238,7 @@ const PANEL_RULE = '- Panel: more than one interviewer was on this call. Say how
 const TYPED_ONLY_NOTE = [
   'The candidate answered only by typing in the chat; every candidate turn below is typed text, and no spoken answer was recorded. This is how the call went, not a technical failure.',
   'Judge the typed answers as the candidate\'s answers, for content, structure and relevance.',
-  'Delivery could not be measured because the call was typed. In the delivery section, say that plainly in the summary, and in pace, pauses, fillers and confidence say it could not be measured; leave out fillerCount and wordsPerMinute. Make no claim about pace, pauses, fillers, confidence or tone anywhere in the review.',
+  'Delivery was not measured because every answer was typed. In the delivery section write one summary line saying exactly that, and leave pace, pauses, fillers, confidence, interruptions, typedAnswers, fillerCount and wordsPerMinute out (empty strings for the text ones). In communication, leave pace, confidence and filler as empty strings; clarity and structure describe the content of the answers only. Make no claim about pace, pauses, fillers, confidence, tone, talk time or typos anywhere in the review.',
 ].join('\n');
 
  const REVIEW_SCREEN_CAP = 6000;
@@ -221,10 +280,18 @@ function unpreparedText(callRecord) {
 
 const UNPREPARED_NOTE = (text) => [
   `One question on this call was not one the candidate had prepared: "${text}"`,
-  'There is no prepared answer for it. Judge the candidate\'s answer to it on its own, as a test of adaptability: structure, relevance and composure. Never fault it for departing from prepared material. The other questions are the ones with prepared answers above.',
+  'There is no prepared answer for it. Judge it only if the transcript shows the interviewer actually reached it: then judge the candidate\'s answer on its own, as a test of adaptability (structure, relevance, composure) and never fault it for departing from prepared material. If the transcript never shows it being asked, say nothing about it and give it no score.',
 ].join('\n');
 
 const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written.';
+
+/** Active length: the call's length minus the time it was paused (the candidate typing). */
+function lengthLine(callRecord) {
+  const total = Number(callRecord.durationMs);
+  const paused = Number(callRecord.pausedMs);
+  if (!(paused > 0) || !Number.isFinite(total)) return `length: ${clock(callRecord.durationMs)}`;
+  return `length: ${clock(Math.max(0, total - paused))} active. The call was also paused for ${clock(paused)} while the candidate typed; that paused time is excluded from the length and from every rate. Transcript times run on the recording's clock and include the pauses, so large gaps between turns are pauses, not silence.`;
+}
 
 /** The one review prompt: timed transcript, plan, metrics, tone, Scribe words. */
 export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, wordsByTurn = {}, transcriptionError = null, correction = null } = {}) {
@@ -246,7 +313,7 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     focus ? 'judge the call against that requested focus: a stage, depth or topic the focus asked to skip or lighten is not a gap, so do not penalise the interviewer for leaving it out' : '',
     `started: ${startedText(callRecord.startedAt) || '(unknown)'}`,
     role ? `role: ${role}` : '',
-    `length: ${clock(callRecord.durationMs)}`,
+    lengthLine(callRecord),
     candidateEnded ? 'how the call ended: the candidate ended the call early, before the interviewer had wrapped up or said goodbye' : '',
     technicalEnd ? `how the call ended: a technical failure cut the call short (${reason}); the candidate did not end it and must not be faulted for it` : '',
     candidateEnded || technicalEnd ? `review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the closing questions of the candidate as a gap. Say once in the overall summary that the call ended early${technicalEnd ? ' because of a technical problem' : ''} and the review covers the call up to that point` : '',
@@ -259,14 +326,17 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const padText = String(snapshots.at(-1)?.text ?? '').trim();
   const hasPad = Boolean(padText);
   const unprepared = unpreparedText(callRecord);
+  const picked = pickedCards(callRecord, plan);
   const sections = [
-    [RULES, interviewers.length ? PANEL_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : ''].filter(Boolean).join('\n'),
+    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : ''].filter(Boolean).join('\n'),
     '--- CALL ---', header,
     ...(typedOnly ? ['--- HOW THE CANDIDATE ANSWERED ---', TYPED_ONLY_NOTE] : []),
-    '--- PLAN (prepared answers the candidate could draw on; the interviewers did not see them) ---', formatPlan(plan),
+    ...(picked
+      ? ['--- PICKED QUESTIONS (the planned questions of this call; the interviewers did not see the prepared answers) ---', formatPicked(picked)]
+      : ['--- PLAN (prepared answers the candidate could draw on; the interviewers did not see them) ---', formatPlan(plan)]),
     ...(unprepared ? ['--- THE UNPREPARED QUESTION ---', UNPREPARED_NOTE(unprepared)] : []),
     '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers),
-    '--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metrics),
+    ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metrics)]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript)] : []),
     ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP))] : []),
     ...(typedOnly ? [] : [

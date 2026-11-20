@@ -90,7 +90,7 @@ export default [
       assert.deepEqual(analysis.chapters.map(chapter => chapter.markers.map(marker => `${marker.kind}:${marker.atMs}`)), [
         [],
         ['moment:12000', 'pause:16000'],
-        ['filler:23000', 'interruption:24000', 'chat:31000'],
+        ['filler:23000', 'interruption:24000'],
         [],
       ]);
       const markers = analysis.chapters.flatMap(chapter => chapter.markers);
@@ -100,7 +100,7 @@ export default [
       assert.ok(markers.every(marker => marker.kind !== 'tone'), 'no tone markers: nothing records live tone notes');
       assert.ok(markers.some(marker => marker.kind === 'moment' && marker.atMs === 12000), 'flagged moment marker');
       assert.ok(markers.some(marker => marker.kind === 'filler' && marker.atMs === 23000), 'filler moment marker');
-      assert.ok(markers.some(marker => marker.kind === 'chat' && marker.atMs === 31000), 'typed chat marker');
+      assert.ok(!markers.some(marker => marker.kind === 'chat'), 'the candidate\'s own typed line is not a marker');
       assert.deepEqual(analysis.fillers, { total: 4, perMinute: 6, byAnswer: [0, 0, 1, 0] });
       assert.equal(feedback.callId, 'call-3_A');
       assert.equal(feedback.delivery.fillerCount, 4);
@@ -235,7 +235,7 @@ export default [
       assert.deepEqual(pauseTimes, [9500, 12000, 40000], "candidate-prosody pauses over 2 s, clamped to durationMs");
       assert.ok(!flat.some(marker => marker.kind === "pause" && marker.atMs === 17000), "metrics pauses are not a source");
       assert.deepEqual(flat.filter(marker => marker.kind === "interruption").map(marker => marker.label), ["Cut in before the question finished", "Talked over the interviewer"]);
-      assert.deepEqual(flat.filter(marker => marker.kind === "chat").map(marker => marker.atMs), [31000], "timed chat only, untimed skipped");
+      assert.deepEqual(flat.filter(marker => marker.kind === "chat").map(marker => marker.atMs), [], "the candidate's typed lines are never markers");
       assert.ok(chapters.at(-1).markers.some(marker => marker.atMs === 40000), "clamped marker belongs to the closing chapter");
     },
   },
@@ -295,7 +295,7 @@ export default [
         assert.equal(result.analysis.status, 'ready');
         assert.doesNotMatch(prompt, /Scribe pass failed/u, 'typing is not a transcription failure');
         assert.match(prompt, /answered only by typing/u);
-        assert.match(prompt, /Delivery could not be measured because the call was typed/u);
+        assert.match(prompt, /Delivery was not measured because every answer was typed/u);
         assert.match(prompt, /Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn/u);
         assert.doesNotMatch(prompt, /CANDIDATE PROSODY BY TURN/u);
         assert.doesNotMatch(prompt, /TONE TIMELINE/u);
@@ -419,10 +419,109 @@ export default [
       const named = buildReviewPrompt({ callRecord: { ...callRecord, unpreparedQuestion: { text: asked, askedBy: 'A' } }, plan, brief, metrics });
       assert.ok(named.includes(asked));
       assert.match(named, /There is no prepared answer for it/u);
-      assert.match(named, /adaptability: structure, relevance and composure/u);
-      assert.match(named, /Never fault it for departing from prepared material/u);
+      assert.match(named, /adaptability \(structure, relevance, composure\)/u);
+      assert.match(named, /never fault it for departing from prepared material/u);
       const viaPlan = buildReviewPrompt({ callRecord: { ...callRecord, setup: { plan: { questions: [{ number: 1 }, { number: 0, text: asked }] } } }, plan, brief, metrics });
       assert.ok(viaPlan.includes(asked));
+    },
+  },
+  {
+    name: 'practice call analysis: the unprepared note is judged only if the transcript shows it was reached',
+    async run() {
+      const named = buildReviewPrompt({ callRecord: { ...callRecord, unpreparedQuestion: { text: 'Which game system would you change?', askedBy: 'A' } }, plan, brief, metrics });
+      assert.match(named, /Judge it only if the transcript shows the interviewer actually reached it/u);
+      assert.match(named, /If the transcript never shows it being asked, say nothing about it and give it no score/u);
+    },
+  },
+  {
+    name: 'practice call analysis: chapter chat markers drop the candidate\'s typed lines and cut interviewer chat at a word with an ellipsis',
+    async run() {
+      const long = `${'word '.repeat(40)}end`;
+      const chapters = buildChapters({
+        transcript: [
+          { speaker: 'interviewer', text: 'Q?', startMs: 0, endMs: 1000 },
+          { speaker: 'candidate', text: 'My typed answer', startMs: 2000, endMs: 3000, channel: 'chat' },
+          { speaker: 'interviewer', text: long, startMs: 4000, endMs: 5000, channel: 'chat' },
+          { speaker: 'interviewer', text: 'Short note', startMs: 6000, endMs: 7000, channel: 'chat' },
+        ],
+        durationMs: 8000, reviewChapters: [{ questionTurnIndex: 0, title: 'Q' }],
+        moments: [{ turnIndex: 1, label: 'Flagged typed answer', kind: 'moment' }],
+      });
+      const flat = chapters.flatMap(chapter => chapter.markers);
+      assert.deepEqual(flat.map(marker => marker.label), ['Flagged typed answer', `Interviewer typed: ${'word '.repeat(24).trim()}…`, 'Interviewer typed: Short note']);
+      const cutLabel = flat[1].label.slice('Interviewer typed: '.length);
+      assert.ok(cutLabel.length <= 121 && cutLabel.endsWith('…') && !cutLabel.includes('wor…'), 'cut at a word boundary');
+    },
+  },
+  (() => {
+    const pool = Array.from({ length: 21 }, (_, at) => ({ id: `c${at + 1}`, question: `Pool question ${at + 1}?`, headline: `Headline ${at + 1}`, bullets: [`Point ${at + 1}`] }));
+    const record = {
+      ...callRecord, durationMs: 5_348_481, pausedMs: 4_766_985,
+      pickedQuestions: [1, 7, 17], askedQuestions: [1, 17], answeredQuestions: [1, 17],
+      unpreparedQuestion: { text: 'What action games have you played lately?', askedBy: 'A' },
+      setup: { plan: { questions: [
+        { number: 1, probes: ['Scope at the district'] }, { number: 7, probes: ['Why this role'] },
+        { number: 0, text: 'What action games have you played lately?', probes: [] }, { number: 17, probes: ['Unreal exposure'] },
+      ] } },
+    };
+    return {
+      name: 'practice call analysis: the review is told the picked cards, what was asked, probes, scope and hedge rules, and the active length',
+      async run() {
+        const prompt = buildReviewPrompt({ callRecord: record, plan: pool, brief, metrics });
+        const section = prompt.slice(prompt.indexOf('--- PICKED QUESTIONS'), prompt.indexOf('--- THE UNPREPARED QUESTION'));
+        assert.ok(section.indexOf('card 1: Pool question 1?') < section.indexOf('card 7:') && section.indexOf('card 7:') < section.indexOf('card 0') && section.indexOf('card 0') < section.indexOf('card 17:'), 'plan order, number 0 where the plan put it');
+        assert.match(section, /card 1: Pool question 1\?[\s\S]*engine: asked yes, answered yes[\s\S]*probes for this card: Scope at the district/u);
+        assert.match(section, /card 7: Pool question 7\?[\s\S]*engine: asked no, answered no/u);
+        assert.match(section, /card 17: Pool question 17\?[\s\S]*points: Point 17/u, 'plan numbers are 1-based pool indexes');
+        assert.doesNotMatch(prompt, /Pool question 2\?/u, 'unpicked cards are not in the prompt');
+        assert.doesNotMatch(prompt, /--- PLAN \(/u);
+        assert.match(prompt, /card number is a card's identity/u);
+        assert.match(prompt, /one entry per listed card, in the listed order, with the question copied exactly/u);
+        assert.match(prompt, /Follow-ups and every other interviewer line .* go into moments/u);
+        assert.match(prompt, /may appear only in the optional extension of that entry, never in improve and never as a gap/u);
+        assert.match(prompt, /Quote the hedge \("perhaps", "maybe"/u);
+        assert.match(prompt, /length: 09:41 active\. The call was also paused for 79:26/u);
+        assert.match(prompt, /paused time is excluded/u);
+        assert.doesNotMatch(prompt, /length: 89:08/u);
+        assert.match(prompt, /Never critique typos/u);
+      },
+    };
+  })(),
+  (() => {
+    const pool = [{ question: 'Alpha?' }, { question: 'Beta?' }, { question: 'Gamma?' }];
+    const picked = [
+      { number: 1, question: 'Alpha?', asked: true, unprepared: false }, { number: 3, question: 'Gamma?', asked: false, unprepared: false },
+      { number: 0, question: 'Unplanned?', asked: null, unprepared: true },
+    ];
+    const base = { overall: { score: 6, summary: 's' }, moments: [], communication: {}, priorities: [] };
+    const entry = (question, asked, extra = {}) => ({ question, asked, ...(asked ? { score: 5, covered: 'c' } : {}), ...extra });
+    const check = planned => checkReview({ feedback: { ...base, planned }, chapters: [], moments: [] }, transcript, picked);
+    return {
+      name: 'practice call analysis: checkReview holds planned to the picked cards (drop strays, fix order and asked, add or demand missing)',
+      async run() {
+        const fixed = check([entry('beta?', true), entry('  alpha?  ', true), entry('Unplanned?', true), entry('Alpha?', true)]);
+        assert.deepEqual(fixed.review.feedback.planned.map(item => [item.question, item.asked]), [['Alpha?', true], ['Gamma?', false], ['Unplanned?', true]], 'Beta dropped, Alpha first once, Gamma added as unasked');
+        assert.equal(fixed.review.feedback.planned[0].score, 5);
+        const forced = check([entry('Alpha?', true), entry('Gamma?', true, { askedAs: 'x', improve: 'y' })]);
+        assert.deepEqual(forced.review.feedback.planned[1], { question: 'Gamma?', asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' }, 'an unasked card keeps no judgement');
+        assert.equal(forced.review.feedback.planned.length, 2, 'the unprepared entry is not invented');
+        assert.match(check([entry('Gamma?', false)]).error, /no entry for card 1 \("Alpha\?"\), which the call asked/u);
+        assert.ok(checkReview({ feedback: { ...base, planned: [entry('Anything', true)] }, chapters: [], moments: [] }, transcript).review, 'without a picked list nothing is held back');
+        void pool;
+      },
+    };
+  })(),
+  {
+    name: 'practice call analysis: a typed-only call asks for one delivery line and empty pace, pauses, fillers and confidence, and no metrics',
+    async run() {
+      const typed = transcript.map(turn => (turn.speaker === 'candidate' ? { ...turn, channel: 'chat' } : turn));
+      const prompt = buildReviewPrompt({ callRecord: { ...callRecord, transcript: typed }, plan, brief, metrics: { typedOnly: true, candidateTalkMs: 0 } });
+      assert.match(prompt, /write one summary line saying exactly that/u);
+      assert.match(prompt, /leave pace, pauses, fillers, confidence, interruptions, typedAnswers, fillerCount and wordsPerMinute out \(empty strings for the text ones\)/u);
+      assert.match(prompt, /communication, leave pace, confidence and filler as empty strings/u);
+      assert.match(prompt, /typed text is judged for content only/u);
+      assert.doesNotMatch(prompt, /DETERMINISTIC METRICS/u);
+      assert.doesNotMatch(prompt, /candidateTalkMs/u);
     },
   },
 ];

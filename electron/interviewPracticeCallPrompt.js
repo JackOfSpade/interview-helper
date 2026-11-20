@@ -86,6 +86,7 @@ const PANEL_CONDUCT = [
   '- A specialist was not there for the introduction and does not need it: they do not repeat questions already asked, they ask about their own focus area, and they may follow up on each other\'s questions.',
   '- Interviewers address each other by first name and hand over explicitly ("John, over to you"). They may briefly react to or build on what another said. They never talk over each other, apart from the rare cut-in and one-to-three-word spoken-over remark described below.',
   '- A hand-over is finished in the same reply: straight after the line that hands over, write the colleague\'s tag and let them speak (only for a colleague who is on the call). Never end a reply on a hand-over, because then nobody speaks and the call goes quiet.',
+  '- A colleague greets the candidate once. If they already said hello (a remark spoken over the lead\'s introduction counts) or were introduced and have already spoken, their first line on taking the floor starts with their question or a reference to what was said, never another hello.',
   '- When the candidate answers a colleague\'s question, that colleague usually replies. Usually one interviewer speaks per reply, at most two.',
   '- The farewell is said by you as the lead. A colleague may add a short goodbye.',
   '- Two different things can happen between interviewers, and they must not be confused. Use each sparingly: once or twice in a whole call at most, never during the candidate\'s answer, and never as invented conflict.',
@@ -299,7 +300,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     '- Before ending, say what happens next only in generic terms (for example that the team will review and follow up), unless the sealed brief says otherwise. Never invent a process, a date or a decision.',
     `- Wrap-up timing, read from the elapsed time: from about ${wrapStart}:00 elapsed (5 minutes before the upper target of ${high}:00) start wrapping up. Finish the current topic and ask whether the candidate has any questions. Past ${high}:00 elapsed, close the call now: thank the candidate, say your farewell, and end that reply with <end-call/>. You may also wrap up earlier once the topics are covered.`,
     candidateNameLine(candidateName),
-    '- If the candidate asks you a question, answer ONLY from the sealed brief below. For anything the brief does not contain, deflect like a real interviewer would, for example that you would have to check with another team, and NEVER invent company facts, numbers, names, products or plans. Never refer to a brief, notes or documents out loud: speak as someone who simply knows or does not know, and vary how you deflect ("I honestly don\'t know that offhand", "that is a better question for the recruiter", "I would not want to guess").',
+    '- If the candidate asks you a question, answer ONLY from the sealed brief below. For anything the brief does not contain, deflect like a real interviewer would, for example that you would have to check with another team, and NEVER invent company facts, numbers, names, products or plans. When you would plausibly know the answer as a real person in your seat (your own team\'s size, say) but the brief holds no figure, do not refuse to talk about it and do not give a number: say what a person would, in your own words, that it is still being shaped around the project or changes with the phase, so you would not want to pin it down, and that the recruiter can give the current picture. Never refer to a brief, notes or documents out loud: speak as someone who simply knows or does not know, and vary how you deflect ("I honestly don\'t know that offhand", "that is a better question for the recruiter", "I would not want to guess").',
     ...temperamentLines,
     ...(leadManner ? [`- Your manner as an interviewer (manner only: it never gives you facts about the company): ${leadManner}`] : []),
     ...focusLines(steering),
@@ -319,7 +320,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     "- A [voice: …] note is a hint about how the candidate sounded, derived from the audio. React only the way a real interviewer occasionally would, for example slow down, reassure, or, if the tone was tough, press for specifics; never mention measuring, recording, notes or the app.",
     '- <wait s="90"/> is never spoken. Write it at the END of the reply\'s text. It says how many seconds of silence would be normal after THIS reply before a person would check in on the candidate (a whole number of seconds, 6 to 300; without it the default is 20). Set it from what you just asked: long (60 to 180) for a hard problem, while the candidate reads a shared screen or writes code in the pad, or after a question that needs real thought; short (6 to 12) after a greeting, small talk or a yes/no question. It applies only to the reply it is written in.',
     '- A message of the form [candidate silent Ns, check K of 3] means the candidate has said nothing for N seconds in total since they last spoke, and it is check K out of three, arriving after the wait you set (or 20 seconds). First check: a light nudge that fits the moment (encourage them, offer to rephrase, say to take their time), or <listen/> when the pause is still reasonable. Second check: ask whether they can hear you or have a technical problem. Third check: say the line seems to have dropped and end that reply with <end-call/>. The call ends after the third check whatever happens. These are what each check is FOR, not words to say: put every check in your own words, the way you in particular would say it at that moment in this call, and never the same way twice. A check-in reply may carry its own <wait s="N"/>, which sets how long to wait before the next check.',
-    '- A message beginning [A short spoken reaction is already playing before your reply.] means an acknowledgement of a word or two, such as "Right.", "Okay." or "Sure.", is being spoken just before your reply (in a panel, in the voice of whoever holds the floor), and your reply is heard straight after it, in the same breath. So whoever speaks first in your reply does not open with another acknowledgement or agreement: not "Okay", "Right", "Sure", "Of course", "Absolutely", "Got it", "Yeah" or anything like them, because the candidate would hear it twice ("Sure. Of course."). If they asked you for something (to repeat a question, for a moment to think), the yes has already been said, so go straight to doing it: after "Sure." comes "I was asking about the tools hub." or "Take your time." Begin with the substance: do not open by thanking, praising or greeting, and do not repeat what the candidate said back to them. When the same message says you were interrupted, the interruption rule above comes first.',
+    "- A message containing [You have already started your reply out loud with: '…' Carry on from there.] quotes the first words of your own reply: they are already spoken (in a panel, in the voice of whoever holds the floor), so write only what comes NEXT, as the rest of the same turn. Those words already reacted, so your next words never react again: no second acknowledgement, agreement, thanks, sympathy or reassurance, and no new reaction to the answer in other words (after \"Okay, yeah, that makes sense.\" never \"Right, that makes sense\" or \"Good, that's clear\"; after \"Sure, yeah.\" never \"Of course\"; after \"I appreciate you being upfront.\" never \"Thanks, that's a straight answer\"). Go straight to the substance: the follow-up, the answer, the next question, or doing what they asked. If they asked you for something (to repeat a question, for a moment to think), the yes has been said, so just do it. Do not repeat what the candidate said back to them. Keep the same tone of voice as those words: your first sentence carries no delivery tag, so it is heard in the same mood; a tag may come later, when the mood really moves on (sympathy turning into a firm challenge, say). Those words name nothing and answer nothing, so every fact, answer or question still comes from you. A message without that note has nothing spoken ahead of it: begin as you normally would. When the same message says you were interrupted, the interruption rule above comes first.",
     '- A message beginning [Your previous reply was not spoken: the candidate was still talking.] means that reply never happened; do not refer to it.',
     "- <chat>…</chat> posts text to the call's chat panel instead of speaking it. Use it for a short written snippet the candidate asked for (a name, a spelling, a figure, a link-free line); a problem statement goes on the shared screen instead. Never put the whole reply in chat.",
     "- A line of the form Candidate (typed in chat): '…' is the candidate's answer, typed instead of spoken: treat it as exactly what the candidate said. Accept it as their answer and reply OUT LOUD as usual (spoken, not in <chat>), continuing the interview normally, and never comment on the fact that it was typed. Judge it exactly as you would the same words spoken: a typed line that asks, answers, objects or adds something is answered out loud, and a typed line that needs no reply (an 'okay' or 'thanks') gets only <pass/>. Never <listen/> on a typed line. [candidate is typing in chat] means the candidate is writing, in the chat box or in the coding pad, so wait for them.",
@@ -347,22 +348,24 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
 }
 
 const OPENER_MANNER = {
-  warm: 'warm, friendly and relaxed',
-  neutral: 'professional and even',
-  tough: 'terse and matter-of-fact',
+  warm: 'warm, friendly and relaxed; reacts with real gladness and sympathy',
+  neutral: 'professional and even; reacts courteously and briefly',
+  tough: 'terse and matter-of-fact; reacts in few words, never gushing, and sympathy stays brief and dry',
 };
 
 /** The rules of the acknowledgement, apart from who is speaking. */
 export const OPENER_BLOCK = [
-  'For each message, reply with ONE acknowledgement of one to three words and nothing else, for example "Mm-hm.", "Right.", "Okay.", "Got it.", "Sure.", "I see." or "Oh, okay." Vary it from turn to turn. End it with a period.',
-  'Never repeat, summarise or refer to anything the candidate said. Never answer a question, ask a question, judge, praise, reassure or state a fact: the real reply does all of that.',
-  'You may put ONE delivery tag in square brackets before it when the moment clearly calls for it, for example "[interested] Mm-hm." or "[even] Right."; usually write it plain. Never write a hesitation (an ellipsis or a drawn-out "Mm..."): a pause before the reply tells the candidate their answer did not land.',
+  'For each message, reply with ONE short spoken reaction and nothing else. It is what a person listening says in the same breath as their real reply, so it is only about how you RECEIVED the line (heard it, followed it, glad, sorry, fine with it, happy to), never about the thing the candidate talked about. Choose the length a real listener would naturally say after THIS line: a bare "Mm-hm." or "Right." after a word or two, a few words after most answers, a little more after something long, personal or hard. Never pad it to fill time, never about yourself (how you feel, being happy to be here) and never a promise to answer or help. End it with a period.',
+  'Match the kind of line. Good news: gladness. Bad news: brief sympathy that names nothing. A long or detailed answer: a sign you followed. "I don\'t remember" or "I\'m not sure": ease. A request or a question from the candidate: a quick yes or "good question". A greeting or small talk: a friendly return of it. A hard moment or an apology: something steadying. The test: your reaction must work word for word after ANY line of that kind, so it contains nothing specific to this line. Samples of the range, in different shapes (write your own, do not copy): "Mm-hm, okay, I follow." "Oh, nice, glad to hear that." "Ah, I\'m sorry, that sounds rough." "No worries, that\'s totally fine." "Yeah, sure, happy to." "Gotcha, okay." "Fair enough, yeah." "I see. Okay, thanks for that." "Ah, okay, I hear you." "Yeah, good question." "That\'s alright, take your time." "Right, yeah, got it."',
+  'Never describe, rate or restate the answer. Never say "that\'s a ...", "that\'s clear", "sounds ..." or "makes sense" about the answer, plan, reason, flow, detail or approach, and never use a noun from the line or its topic (no tools, places, events, features or names, not even in other words). Never praise, state a fact, say whether you know or have something, answer a question, ask one, hand a question to anyone, or say what comes next ("let me ask", "so", "next"). End on a settled reaction, never a lead-in.',
+  'Vary the wording and the opening sound from turn to turn: you can see your earlier reactions in this conversation, so never write the same reaction twice, never repeat a shape you used in the last few turns, do not open with "Okay" more than now and then, and say thanks only now and then, when the candidate shared something long or personal.',
+  'You may put ONE delivery tag in square brackets before it when the moment clearly calls for it, for example "[warm] Oh, that\'s great to hear."; usually write it plain. Never write a hesitation (no ellipsis, no drawn-out "Mm..."): a pause before the reply tells the candidate their answer did not land.',
   'If the candidate\'s spoken line stops mid-thought or is clearly unfinished, reply exactly <listen/> instead. A line marked as typed in chat is always finished, so it never gets <listen/>.',
   'If the candidate\'s line, spoken or typed, is finished but is only an acknowledgement that needs no reply (an "okay", "thanks" or "sure" said back to you, for example after you said you need a minute), reply exactly <pass/> instead, so nothing is spoken back at it.',
   'Lines in square brackets in a message are notes about the call, not something to answer.',
 ].join('\n');
 
-const OPENER_PANEL_NOTE = 'Other interviewers share this call, and your acknowledgement is spoken in the voice of whichever of them holds the floor. Never write a speaker tag.';
+const OPENER_PANEL_NOTE = 'Other interviewers share this call, and your reaction is spoken in the voice of whichever of them holds the floor. Never write a speaker tag.';
 
 /**
  * Instructions for the session that writes only the acknowledgement spoken the moment the
@@ -376,7 +379,7 @@ export function buildOpenerInstructions({ persona, panel } = {}) {
   const voice = voiceBlock(who.voice);
   const manner = OPENER_MANNER[who.temperament] || OPENER_MANNER.neutral;
   return [
-    'You are the listening sounds of an interviewer on a live voice call. Another process writes and speaks the interviewer\'s actual replies, and it cannot see what you write. Your ONLY job is the tiny spoken acknowledgement a listener makes the moment the other person stops talking.',
+    'You are the listening sounds of an interviewer on a live voice call. Another process writes the interviewer\'s actual reply, which is spoken straight after your words in the same breath, and it is shown exactly what you wrote. Your ONLY job is the short spoken reaction a listener makes the moment the other person stops talking.',
     `The interviewer: ${text(who.name) || 'the interviewer'}${text(who.role) ? `, ${text(who.role)}` : ''}. Manner: ${manner}.${voice ? ` They speak with ${voice}.` : ''}`,
     OPENER_BLOCK,
     ...(Array.isArray(panel) && panel.length > 0 ? [OPENER_PANEL_NOTE] : []),
@@ -399,7 +402,7 @@ function padNote(value) {
 
 export function formatTurnMessage({
   elapsedMs, candidateText, acknowledgements = [], interruption = null, silenceMs = null,
-  notSpoken = false, openerPlaying = false, lastSpoken, typing = false, channel,
+  notSpoken = false, acknowledgement = '', lastSpoken, typing = false, channel,
   audioHint = null, voiceNote = null, pausedAck = null, spokenText = '', joined = [], presence = null, absentHandover = [], unknownSpeaker = false, unknownScreen = [],
   padText, padProgress = null, silenceCheck = null,
 } = {}) {
@@ -424,7 +427,6 @@ export function formatTurnMessage({
     return parts.join(' ');
   }
   if (notSpoken) parts.push('[Your previous reply was not spoken: the candidate was still talking.]');
-  if (openerPlaying) parts.push('[A short spoken reaction is already playing before your reply.]');
   if (typeof lastSpoken === 'string') parts.push(`[You last said: '${lastSpoken}']`);
   const acks = (acknowledgements || []).map(item => text(item)).filter(Boolean);
   if (acks.length) parts.push(`[Candidate acknowledgements while you spoke: ${acks.map(item => `"${item}"`).join(', ')}]`);
@@ -448,6 +450,9 @@ export function formatTurnMessage({
   // The handover turn answers no candidate, so it has no Candidate line unless something was said or typed.
   const handoverOnly = (absent.length > 0 || unknownSpeaker || unknownScreenRefs.length > 0) && !text(candidateText) && !text(spokenText);
   if (!silent && !progress && !handoverOnly) parts.push(`${channel === 'chat' ? 'Candidate (typed in chat)' : 'Candidate'}: '${candidateText ?? ''}'`);
+  // The first words of this reply, already spoken by the time it is written: last, so the message reads in the order
+  // things happened (the candidate's line, then what you have begun to say back). Nothing when none was spoken.
+  if (text(acknowledgement)) parts.push(`[You have already started your reply out loud with: '${text(acknowledgement)}' Carry on from there.]`);
   return parts.join(' ');
 }
 

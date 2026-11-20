@@ -19,6 +19,12 @@ export const overlap = (text, { kind = 'ack', atMsAfterPlaybackStart = 0, durati
   type: 'overlap', text, kind, atMsAfterPlaybackStart, durationMs,
 });
 
+/**
+ * The acknowledgement the fake opener writes (a scenario may carry its own `reaction`): a listener reaction of the
+ * length the live opener now writes, 8 words, about 2.6 s spoken at 330 ms a word. It names nothing, so any reply can follow it.
+ */
+export const ACK_REACTION = 'Okay, yeah, I follow you, thanks for that.';
+
 const GREETING = 'Hi, thanks for joining today. Tell me about a project you are proud of.';
 const LONG_REPLY = 'Interesting, that sounds like a substantial piece of work. Walk me through how you decided on the architecture and which trade-offs you weighed along the way. I would also like to hear how the team reacted to the change.';
 

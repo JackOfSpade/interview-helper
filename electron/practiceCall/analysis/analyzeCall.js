@@ -1,7 +1,7 @@
 import { promises as nodeFs } from 'node:fs';
 import path from 'node:path';
 import { validatePracticeFeedback } from '../../ipc/interviewQaPractice.js';
-import { buildReviewPrompt, candidateAnswerKinds, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
+import { buildReviewPrompt, candidateAnswerKinds, pickedCards, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
 import { prosodyByEntry } from '../audio/callMetrics.js';
 import { buildChapters } from './chapters.js';
 
@@ -50,14 +50,46 @@ export function wordsByAnswer(transcript, words) {
   return buckets;
 }
 
-/** Validate the review reply: feedback plus turn-index anchors inside the transcript. */
-export function checkReview(raw, transcript) {
+const sameText = (left, right) => String(left ?? '').replace(/\s+/g, ' ').trim().toLowerCase() === String(right ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * Hold feedback.planned to the cards the call picked: one entry per picked card in plan order, the
+ * question copied exactly, `asked` as the engine counted it. Entries that match no picked card (or
+ * repeat one) are dropped; a missing card the engine did not ask is added as unasked; a missing card
+ * that was asked is an error so the reviewer is told to redo it. The unprepared question is kept when
+ * the reviewer reported it and not invented when it did not.
+ */
+export function repairPlanned(planned, picked) {
+  const entries = list(planned);
+  const out = [];
+  for (const card of picked) {
+    const hit = entries.find(entry => sameText(entry.question, card.question));
+    if (!hit) {
+      if (card.unprepared) continue;
+      if (card.asked !== false) return { error: `feedback.planned has no entry for card ${card.number} ("${card.question}"), which the call asked; list one entry per picked card` };
+      out.push({ question: card.question, asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' });
+      continue;
+    }
+    const asked = card.unprepared || card.asked === null ? hit.asked : card.asked;
+    if (asked && !hit.asked) return { error: `feedback.planned marks card ${card.number} ("${card.question}") as not asked, but the call asked it; judge the answer to it` };
+    out.push(asked ? { ...hit, question: card.question, asked } : { question: card.question, asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' });
+  }
+  return { planned: out };
+}
+
+/** Validate the review reply: feedback plus turn-index anchors inside the transcript; `picked` (see pickedCards) holds planned to the picked cards. */
+export function checkReview(raw, transcript, picked = null) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'the review reply was not a JSON object' };
   let feedback;
   try {
     feedback = validatePracticeFeedback(raw.feedback);
   } catch (error) {
     return { error: `feedback: ${reason(error)}` };
+  }
+  if (Array.isArray(picked) && picked.length) {
+    const repaired = repairPlanned(feedback.planned, picked);
+    if (repaired.error) return { error: repaired.error };
+    feedback = { ...feedback, planned: repaired.planned };
   }
   if (!Array.isArray(raw.chapters)) return { error: 'chapters must be an array' };
   const chapters = [];
@@ -169,6 +201,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
     ...(metricsError ? { metricsError } : {}),
   });
 
+  const picked = pickedCards(callRecord, plan);
   let checked = null;
   let error = null;
   stage('review');
@@ -182,7 +215,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
       error = `the review call failed: ${reason(thrown)}`;
       continue;
     }
-    const checkedAttempt = checkReview(raw, transcript);
+    const checkedAttempt = checkReview(raw, transcript, picked);
     if (checkedAttempt.review) checked = checkedAttempt.review;
     else error = checkedAttempt.error;
   }

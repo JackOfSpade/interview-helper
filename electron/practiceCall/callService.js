@@ -6,6 +6,9 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { PRACTICE_AUDIO_MESSAGES } from '../interviewPracticeAudio.js';
 import { logNote, logWarn } from './logNote.js';
+import { createCallDebugLog } from './callDebugLog.js';
+import { RECORDINGS_KEPT } from './callStore.js';
+import { DEFAULT_CALL_THRESHOLDS } from '../interviewPracticeCallEngine.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list' });
@@ -39,6 +42,10 @@ const CALLBACK_PICKUP_MAX_MS = 5000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
+// An interviewer who stays on after the call is over leaves 2.0 to 4.0 s later, in steps of 0.1 s, each on their own draw.
+const LEAVE_MIN_MS = 2000;
+const LEAVE_STEP_MS = 100;
+const LEAVE_STEPS = 21;
 
 function practiceAudioMessage(code) {
   return PRACTICE_AUDIO_MESSAGES[code] || PRACTICE_AUDIO_MESSAGES['capture-failed'];
@@ -191,6 +198,19 @@ function temperamentFor({ request, brief } = {}) {
  */
 /** Counts of the General questions, which every job shares. */
 export const GENERAL_COUNTS_KEY = 'general';
+
+// The reply's model. Measured live 2026-11-19 (scripts/practice-probes/main-latency-breakdown.mjs, the real
+// instructions of call-mwnvhypn-666sq7, 12 turns in order, low effort): Opus waits p50 2.4 to 2.6 s for its
+// first stream event and reaches its first clause at p75 3.3 to 3.6 s; Sonnet starts at p50 0.65 s and has its
+// first clause at p75 0.76 s, first sentence 0.93 s. The earlier blind-judged benchmark (docs section 10) rated
+// Opus low 83% and Sonnet low 77%. Rechecked 2026-11-19 on the 26 real turns of that call, blind: Opus won 43 turn
+// votes to Sonnet's 22 (13 ties) and both whole-conversation judges preferred it (8.0 and 7.8 against 6.5); Sonnet
+// also numbered the planned questions in its own order instead of the plan's, which breaks question tracking.
+export const MAIN_REPLY_MODELS = Object.freeze({
+  opus: Object.freeze({ model: 'opus', effort: 'low' }),
+  sonnet: Object.freeze({ model: 'sonnet', effort: 'low' }),
+});
+export const DEFAULT_MAIN_REPLY_MODEL = 'opus';
 /** How a technical topic reads in the question pool: an instruction, since there is no fixed question. */
 export function technicalTopicQuestion(topic) {
   return `[Technical topic, not a fixed question] ${String(topic || '').trim()}. If you pick this, make up your own question or hands-on exercise on this topic, different from one you would have asked on an earlier call.`;
@@ -259,7 +279,14 @@ function errorState(code, message) {
  */
 export function createPracticeCallService(deps = {}) {
   if (!deps.store || typeof deps.store.ensure !== 'function') throw new TypeError('Practice call service requires a call store.');
-  const warn = message => logWarn(deps.logger, message);
+  // The model that writes the reply.
+  const mainReply = MAIN_REPLY_MODELS[deps.mainModel] ?? MAIN_REPLY_MODELS[DEFAULT_MAIN_REPLY_MODEL];
+  // The last background tidy of leftover raw audio (tidyLeftoverAudio), so a test or a shutdown can wait for it.
+  let tidying = Promise.resolve();
+  // The per-call debug log (callDebugLog.js): best effort, a no-op while no call has a folder.
+  let debug = null;
+  const dbg = (event, fields) => { try { debug?.log(event, fields); } catch { /* logging is best effort */ } };
+  const warn = message => { logWarn(deps.logger, message); dbg('warn', { message }); };
   const userDataPath = deps.userDataPath;
   if (typeof userDataPath !== 'string' || !userDataPath) throw new TypeError('Practice call service requires the user data path.');
   const clock = deps.clock ?? { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: handle => clearTimeout(handle) };
@@ -296,6 +323,7 @@ export function createPracticeCallService(deps = {}) {
   }
   const setPhase = phase => {
     if (!PHASES.includes(phase)) return;
+    dbg('phase', { from: state.phase, phase, elapsedMs: state.elapsedMs });
     state.phase = phase;
     if (phase !== 'precheck') state.setup = null;
     if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.speakingId = null; clearOver(); }
@@ -304,6 +332,7 @@ export function createPracticeCallService(deps = {}) {
   /** Names the setup step now running (and the planner's attempt) for the window's progress list. */
   const setSetupStep = (step, attempt = 1) => {
     if (!SETUP_STEPS.includes(step)) return;
+    dbg('setup-step', { step, attempt });
     state.setup = { step, attempt };
     publish();
   };
@@ -318,8 +347,17 @@ export function createPracticeCallService(deps = {}) {
   const onScreenMs = self => Math.max(0, Math.round(clock.now() - self.startedAt) - pausedTotalMs(self));
   function setPausedState(self, paused) {
     if (!self) return;
-    if (paused && !self.pausedSince) self.pausedSince = clock.now();
-    if (!paused && self.pausedSince) { self.pausedMs = (self.pausedMs || 0) + Math.max(0, Math.round(clock.now() - self.pausedSince)); self.pausedSince = 0; }
+    if (paused && !self.pausedSince) {
+      self.pausedSince = clock.now();
+      // The span sits on the recording's clock like the transcript (the lead is trimmed off at finish).
+      (self.pauseSpans ||= []).push({ startMs: callMs(self) });
+    }
+    if (!paused && self.pausedSince) {
+      const open = self.pauseSpans?.at(-1);
+      if (open && open.endMs === undefined) open.endMs = Math.max(open.startMs, callMs(self));
+      self.pausedMs = (self.pausedMs || 0) + Math.max(0, Math.round(clock.now() - self.pausedSince));
+      self.pausedSince = 0;
+    }
     state.paused = !!paused;
   }
   function startElapsedTimer() {
@@ -334,16 +372,51 @@ export function createPracticeCallService(deps = {}) {
     elapsedTimer = clock.setTimeout(tick, 1000);
   }
   function clearJoinTimers(self) {
-    for (const handle of self?.joinTimers || []) { try { clock.clearTimeout(handle); } catch { /* already fired */ } }
-    if (self) self.joinTimers = [];
+    for (const handle of [...(self?.joinTimers || []), ...(self?.leaveTimers || [])]) { try { clock.clearTimeout(handle); } catch { /* already fired */ } }
+    if (self) { self.joinTimers = []; self.leaveTimers = []; }
   }
   /** The interviewers shown on the call: the lead first, then each colleague who has joined. */
   function showParticipants(self) {
-    const status = self.interviewerLeft ? 'left' : 'joined';
-    const lead = self.persona ? [{ id: 'A', name: self.persona.name, role: self.persona.role, focus: '', status }] : [];
+    // Each interviewer leaves on their own once the call is over; everyone is gone when the line dropped.
+    const statusOf = id => (self.interviewerLeft || Number.isFinite(self.leftAt?.[id]) ? 'left' : 'joined');
+    const lead = self.persona ? [{ id: 'A', name: self.persona.name, role: self.persona.role, focus: '', status: statusOf('A') }] : [];
     state.participants = [...lead, ...(self.panel || []).filter(entry => entry.joined).map(entry => ({
-      id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, status,
+      id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, status: statusOf(entry.id),
     }))];
+  }
+  /** Each interviewer on the call at its end draws their own leaving delay: 2.0 to 4.0 s in steps of 0.1 s. */
+  function armDepartures(self) {
+    const random = deps.random ?? Math.random;
+    const ids = [...(self.persona ? ['A'] : []), ...(self.panel || []).filter(entry => entry.joined).map(entry => entry.id)];
+    self.leftAt = {};
+    self.leaveTimers = [];
+    const draws = ids.map(id => {
+      const value = Number(random());
+      const step = Number.isFinite(value) ? Math.min(LEAVE_STEPS - 1, Math.max(0, Math.floor(value * LEAVE_STEPS))) : 0;
+      return { id, delayMs: LEAVE_MIN_MS + step * LEAVE_STEP_MS };
+    });
+    dbg('departures', { delays: draws });
+    if (!draws.length) { everyoneLeft(self); return; }
+    for (const { id, delayMs } of draws) self.leaveTimers.push(clock.setTimeout(() => interviewerLeaves(self, id), delayMs));
+  }
+  function interviewerLeaves(self, id) {
+    if (call !== self || self.finished || self.interviewerLeft || Number.isFinite(self.leftAt?.[id])) return;
+    const atMs = Math.max(0, Math.round(clock.now() - self.startedAt));
+    self.leftAt[id] = atMs;
+    const everyone = [...(self.persona ? ['A'] : []), ...(self.panel || []).filter(entry => entry.joined).map(entry => entry.id)];
+    if (everyone.every(other => Number.isFinite(self.leftAt[other]))) everyoneLeft(self, atMs, false);
+    else showParticipants(self);
+    publish();
+    emitEvent({ type: 'participant-left', id, name: presenterNameOf(self, id), atMs });
+  }
+  /** The last interviewer is gone (or the line dropped): the notice, the full-stage candidate tile and the closed chat follow from this. */
+  function everyoneLeft(self, atMs = Math.max(0, Math.round(clock.now() - self.startedAt)), publishNow = true) {
+    self.interviewerLeft = true;
+    self.interviewerLeftAtMs = atMs;
+    state.interviewerLeft = true;
+    state.typing = false;
+    showParticipants(self);
+    if (publishNow) publish();
   }
   /** The name of whoever has the floor under this id: a colleague, else the lead. */
   function presenterNameOf(self, id) {
@@ -391,7 +464,7 @@ export function createPracticeCallService(deps = {}) {
     state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId) };
   }
   function joinColleague(self, entry) {
-    if (call !== self || self.finished || self.interviewerLeft || entry.joined) return;
+    if (call !== self || self.finished || self.interviewerEnded || self.interviewerLeft || entry.joined) return;
     entry.joined = true;
     entry.joinedAtMs = Math.max(0, Math.round(clock.now() - self.startedAt));
     // A session restarted later reads the panel from self.panel, so it sees this colleague as on the call.
@@ -412,6 +485,7 @@ export function createPracticeCallService(deps = {}) {
     // The window shows a plain message; the cause goes to the app log so a failed call can be diagnosed.
     warn(`[PracticeCall] ${code}: ${detail?.message || detail?.userMessage || 'no detail'}`);
     const message = cause?.userMessage || (code === 'voice-key-missing' ? 'The ElevenLabs key is not available on this computer.' : cause?.message);
+    dbg('fail', { code, message: detail?.message || detail?.userMessage || null, stack: typeof detail?.stack === 'string' ? detail.stack.split('\n').slice(0, 6).join('\n') : undefined });
     const failed = call;
     call = null;
     starting = false;
@@ -421,7 +495,7 @@ export function createPracticeCallService(deps = {}) {
       failed.finished = true;
       clearJoinTimers(failed);
       // A call that failed before it was answered has no record: its empty folder goes too.
-      cleanupCall(failed).catch(() => {}).then(() => (failed.inCall ? null : store.remove?.(failed.callId))).catch(() => {});
+      cleanupCall(failed).catch(() => {}).then(() => closeDebug(failed)).then(() => (failed.inCall ? null : store.remove?.(failed.callId))).catch(() => {});
     }
     state.error = errorState(code, message);
     setPhase('error');
@@ -739,6 +813,7 @@ export function createPracticeCallService(deps = {}) {
   function onHelperEvent(event) {
     const self = call;
     if (!self) return;
+    if (event?.type === 'vad' || event?.type === 'error' || event?.type === 'recording' || (event?.type === 'transcript' && event.final)) { const { type, ...fields } = event; dbg('helper', { type, ...fields }); }
     try { self.audioMirror?.helperEvent(event); } catch { /* track writer is best effort */ }
     // The recording's clock starts when capture starts, a few seconds after the helper is
     // launched. The newest helper time and when it arrived tell where that clock is now.
@@ -907,19 +982,56 @@ export function createPracticeCallService(deps = {}) {
     return found;
   }
 
-  /** The voice's own descriptors as one short line for the planner: the character fields, then the library's description. */
+  /**
+   * The voice's own descriptors as one short line for the planner: the character fields, then the library's description.
+   * A part that is only a cut-off copy of a longer one is dropped, and the line is cut at a word under the limit.
+   */
   function describeVoice(chosen, raw) {
     const character = chosen?.character;
     const parts = [
       ...(typeof character === 'string' ? [character] : character && typeof character === 'object' ? Object.values(character) : []),
       raw?.description,
-    ].filter(part => typeof part === 'string').map(part => part.trim().replace(/[.\s]+$/u, '')).filter(Boolean);
-    const joined = [...new Set(parts)].join('. ');
-    return joined ? `${joined}.`.slice(0, VOICE_DESCRIPTION_MAX) : '';
+    ].filter(part => typeof part === 'string').map(part => part.replace(/\s+/gu, ' ').trim().replace(/[.\s]+$/u, '')).filter(Boolean);
+    const kept = [];
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (parts.some(other => other !== part && other.length > part.length && other.toLowerCase().includes(lower))) continue;
+      if (kept.some(other => other.toLowerCase() === lower)) continue;
+      kept.push(part);
+    }
+    const joined = kept.length ? `${kept.join('. ')}.` : '';
+    if (joined.length <= VOICE_DESCRIPTION_MAX) return joined;
+    const room = joined.slice(0, VOICE_DESCRIPTION_MAX - 1);
+    const atWord = room.search(/\s\S*$/u);
+    return `${(atWord > 0 ? room.slice(0, atWord) : room).replace(/[\s.,;:!?-]+$/u, '')}…`;
   }
 
   /** Best-effort log line: info when the logger has it, else warn. A logging fault never reaches the call. */
-  function note(message) { logNote(deps.logger, message); }
+  function note(message) { logNote(deps.logger, message); dbg('note', { message }); }
+  /** Setup step durations: each mark logs the time since the previous one. */
+  function mark(self, name, extra) {
+    const at = clock.now();
+    dbg('setup-timing', { name, ms: Math.round(at - (self.markAt ?? self.startedAt)), ...(extra ?? {}) });
+    self.markAt = at;
+  }
+  /** The log of a finished call: everything queued is written, later lines are ignored. */
+  async function closeDebug(self) {
+    try { await self.debug?.close(); } catch { /* logging is best effort */ }
+  }
+  /** Logs what each interviewer session is sent. The engine owns the sessions, so the session's own turn is wrapped. */
+  function watchSession(kind, session) {
+    try {
+      if (!session || typeof session.turn !== 'function' || session.turn.watched) return session;
+      const original = session.turn;
+      const watched = function watchedTurn(message, options) {
+        dbg('session-turn', { kind, message });
+        return original.call(this, message, options);
+      };
+      watched.watched = true;
+      session.turn = watched;
+    } catch { /* a session that cannot be wrapped is simply not logged */ }
+    return session;
+  }
 
   /**
    * The careful planning step: one structured call that decides the cast, the questions, their order
@@ -960,6 +1072,7 @@ export function createPracticeCallService(deps = {}) {
     const attempts = Array.isArray(result.attempts) ? result.attempts : [];
     const ms = Number.isFinite(result.ms) ? Math.round(result.ms) : Math.round(clock.now() - startedAt);
     const plan = result.plan;
+    dbg('plan-attempts', { attempts });
     note(`plan ${JSON.stringify({
       ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, role: plan.lead?.role },
       // The one question that is not from the pool, as the planner wrote it.
@@ -1163,21 +1276,25 @@ export function createPracticeCallService(deps = {}) {
       gender: String(item.chosen?.gender ?? ''), age: String(item.chosen?.age ?? ''), accent: String(item.chosen?.accent ?? ''),
       description: describeVoice(item.chosen, item.raw),
     }));
+    mark(self, 'voices', { drawn: drawnVoices.length });
     note(`voices drawn ${JSON.stringify(drawnVoices.map(voiceView))}`);
     self.promptBrief = promptBrief(self.brief);
     const targetMinutes = deps.targetMinutes ?? [25, 30];
     // The plan decides the cast, the questions and the problems before any interviewer session exists.
     const planned = await planInterview(self, { drawnVoices, targetMinutes });
     if (!planned) return snapshot();
+    mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
     setSetupStep('voice');
     const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament });
     if (!settled) return snapshot();
+    mark(self, 'cast');
     const { persona, factory } = settled;
     // Warm the unsaved library voice up before the call can ring, so its first real line is not
     // the slow one. A voice that does not answer is a failed call, not a second pick. Only the
     // voices the plan chose are warmed: the lead here, each colleague beside the session starts.
     const warmed = await warmUpVoice({ factory, clock });
     if (call !== self || self.finished) return snapshot();
+    mark(self, 'voice-warm-up', { warmed: !!warmed });
     if (!warmed) {
       return fail('voice-warmup-failed', {
         userMessage: 'The interviewer voice did not respond. Try starting the call again.',
@@ -1217,6 +1334,7 @@ export function createPracticeCallService(deps = {}) {
     self.recordingClosedPromise = closed;
     const started = await helper.start({ recordingPath: candidatePath });
     self.helperStartedAt = clock.now();
+    mark(self, 'audio-helper', { ok: started?.ok !== false });
     // R4: a refused helper start is a failed call, not a silent one.
     if (started && started.ok === false) {
       const code = typeof started.code === 'string' && started.code ? started.code : 'capture-failed';
@@ -1238,6 +1356,7 @@ export function createPracticeCallService(deps = {}) {
     });
     setSetupStep('sessions');
     await createSessions(self);
+    mark(self, 'sessions');
     if (call !== self || self.finished) { await closeWarmSessions(self); return snapshot(); }
     self.timings.precheckMs = Math.round(clock.now() - self.startedAt);
     if (deps.readyGate === false) { ring(self); return snapshot(); }
@@ -1331,11 +1450,14 @@ export function createPracticeCallService(deps = {}) {
     const sessionsFactory = await resolve('sessionsFactory');
     const prompts = await resolve('prompts');
     // The real factory is async (it resolves to the session); a stand-in may return one directly.
-    // The reply and the interruption classifier run on Opus at low effort. The acknowledgement is
-    // one to three words from a small instruction, where Haiku at low effort is five times
-    // faster to its first word (about 0.65 s against 3.4 s) and kept the rules on 20 of 20 turns.
-    const SESSION_MODELS = { opener: { model: 'haiku', effort: 'low' }, main: { model: 'opus', effort: 'low' }, classifier: { model: 'opus', effort: 'low' } };
-    const create = async kind => sessionsFactory(SESSION_MODELS[kind] || SESSION_MODELS.main);
+    // The reply and the interruption classifier run on Opus at low effort. The acknowledgement is a
+    // 4-to-9-word reaction to how the line was received, from a small instruction with no content.
+    // Live probe (25 turns of a real call, 2026-11-19): Haiku at low effort leaked content in about
+    // 5 of 25 reactions ("that's a clear reason"), Sonnet at low effort in 0 of 25, at about +0.1 s
+    // to the first word; with Sonnet the whole reaction took 794 ms at p95.
+    // The reply's model is MAIN_REPLY_MODELS[mainModel] (see there for what each costs in time).
+    const SESSION_MODELS = { opener: { model: 'sonnet', effort: 'low' }, main: { model: mainReply.model, effort: mainReply.effort }, classifier: { model: 'opus', effort: 'low' } };
+    const create = async kind => watchSession(kind, await sessionsFactory(SESSION_MODELS[kind] || SESSION_MODELS.main));
     const created = await Promise.all([create('opener'), create('main'), create('classifier')]);
     let opener = created[0];
     const classifier = created[2];
@@ -1367,6 +1489,7 @@ export function createPracticeCallService(deps = {}) {
     // voice does not answer cannot speak, so they are left out rather than heard in the lead's voice.
     const warmed = await Promise.all((self.panel || []).map(entry => warmUpVoice({ factory: entry.factory, clock })));
     await Promise.all([mainReady, openerReady, classifierReady]);
+    dbg('session-start', { ms: Math.round(clock.now() - (self.markAt ?? self.startedAt)), mainModel: mainReply.model, instructionChars: { main: self.instructions.main?.length ?? 0, opener: self.instructions.opener?.length ?? 0 } });
     if (warmed.some(ok => !ok)) {
       const gone = new Set((self.panel || []).filter((entry, at) => !warmed[at]).map(entry => entry.key));
       self.panel = self.panel.filter((entry, at) => warmed[at]);
@@ -1410,10 +1533,12 @@ export function createPracticeCallService(deps = {}) {
       return kind === 'opener' ? prompts.buildOpenerInstructions(options) : prompts.buildInterviewerInstructions(options);
     };
     self.restartSession = async (kind, { transcriptText } = {}) => {
+      const restartedAt = clock.now();
       const next = await create(kind);
       const base = kind === 'opener' ? self.instructions.opener : kind === 'classifier' ? CLASSIFIER_INSTRUCTIONS : self.instructions.main;
       const earlier = typeof transcriptText === 'string' ? transcriptText.trim() : '';
       await next.start({ instructions: earlier ? instructionsWithHistory(kind, earlier) : base });
+      dbg('session-restart', { kind, ms: Math.round(clock.now() - restartedAt), historyChars: earlier.length });
       self.sessions = { ...self.sessions, [kind]: next };
       // The engine adopts what this returns as the session of that kind, so it must be the new
       // session itself: handed the whole map, the next turn after any restart had nothing to call.
@@ -1424,6 +1549,8 @@ export function createPracticeCallService(deps = {}) {
 
   function onEngineEvent(event) {
     if (!event || typeof event !== 'object') return;
+    // Every engine event, whatever its type, so a new type needs no code here.
+    { const { type, ...fields } = event; dbg('engine', { type, ...fields }); }
     if (event.type === 'phase') {
       const self = call;
       if (self) {
@@ -1564,20 +1691,27 @@ export function createPracticeCallService(deps = {}) {
       // A reply that failed twice is the interviewer's side dropping out: the same thing on screen, with its own wording.
       if ((event.reason === 'interviewer' || event.reason === 'session-error') && call && !call.finished && call.inCall) {
         if (event.reason === 'session-error') { call.connectionLost = true; state.connectionLost = true; }
-        call.interviewerLeft = true;
+        // The call is over for the interviewers from here: the engine has ended, so no line, silence check or
+        // typed message reaches a session. The farewell has finished playing when 'ended' arrives.
+        call.interviewerEnded = true;
         call.interviewerPlaying = false;
         cancelPendingShare(call);
         setPausedState(call, false);
         // The interviewer gave up on a silent line: kept with the call so the replay and review can say so.
         if (event.cause === 'silence') call.endedBySilence = true;
-        state.interviewerLeft = true;
         state.speaking = null;
         state.speakingId = null;
         clearOver();
         clearJoinTimers(call);
-        showParticipants(call);
-        state.typing = false;
-        publish();
+        if (event.reason === 'session-error') {
+          // A dropped line drops everyone at once.
+          const droppedAt = Math.max(0, Math.round(clock.now() - call.startedAt));
+          call.leftAt = Object.fromEntries([...(call.persona ? ['A'] : []), ...(call.panel || []).filter(entry => entry.joined).map(entry => entry.id)].map(id => [id, droppedAt]));
+          everyoneLeft(call, droppedAt);
+        } else {
+          armDepartures(call);
+          publish();
+        }
         return;
       }
       finishCall(event.reason || 'ended').catch(() => {});
@@ -1600,12 +1734,16 @@ export function createPracticeCallService(deps = {}) {
     state.modelDownload = null;
     setPausedState(self, false);
     state.elapsedMs = onScreenMs(self);
+    dbg('abandon', { failure: failure?.code ?? null, stay });
+    // The log is on disk before the folder is cleared, so it is what the folder keeps.
+    try { await self.debug?.flush(); } catch { /* best effort */ }
     try { await store.remove?.(self.callId); } catch { /* nothing to delete */ }
     if (failure) {
       // A call lost before it was answered because of an error says so; only a plain decline ends quietly.
       if (call === self) call = null;
       state.error = failure;
       setPhase('error');
+      await closeDebug(self);
       return snapshot();
     }
     if (stay) {
@@ -1614,12 +1752,14 @@ export function createPracticeCallService(deps = {}) {
       call = null;
       state.missed = 'expired';
       setPhase('missed');
+      await closeDebug(self);
       return snapshot();
     }
     setPhase('replay');
     const replay = await getReplay(self.callId).catch(() => null);
     if (call === self) call = null;
     emitReplay(replay);
+    await closeDebug(self);
     return snapshot();
   }
 
@@ -1648,11 +1788,10 @@ export function createPracticeCallService(deps = {}) {
         ...(deps.thresholds ? { thresholds: deps.thresholds } : {}),
       });
       // The call clock starts when the call is answered; the setup time stays in timings.precheckMs.
-      try {
-        deps.logger?.info?.(`[PracticeCall] rooms ${JSON.stringify([{ id: 'A', amount: self.persona.roomAmount ?? null, room: self.persona.room ?? null }, ...panel.map(entry => ({ id: entry.id, amount: entry.roomAmount ?? null, room: entry.room ?? null }))])}`);
-      } catch { /* logging is best effort */ }
+      note(`rooms ${JSON.stringify([{ id: 'A', amount: self.persona.roomAmount ?? null, room: self.persona.room ?? null }, ...panel.map(entry => ({ id: entry.id, amount: entry.roomAmount ?? null, room: entry.room ?? null }))])}`);
       const answeredAt = clock.now();
       self.startedAt = answeredAt;
+      self.debug?.startCallClock(answeredAt);
       // How far into the recording the answer falls, read off the helper's own clock. Counting
       // from the helper's launch instead put the lead about 2.5 s too long (measured in the
       // built app), so that is only the fallback before any helper time has arrived.
@@ -1673,7 +1812,7 @@ export function createPracticeCallService(deps = {}) {
   let finishTask = null;
   // Set while a finished call waits for the candidate to say whether they want feedback.
   let settleFeedback = null;
-  const chooseFeedback = wants => { const settle = settleFeedback; settleFeedback = null; if (settle) settle(!!wants); };
+  const chooseFeedback = wants => { dbg('feedback-choice', { wants: !!wants, pending: !!settleFeedback }); const settle = settleFeedback; settleFeedback = null; if (settle) settle(!!wants); };
   function finishCall(requestedReason = 'candidate', options = {}) {
     if (!call || call.finished) return Promise.resolve(snapshot());
     const task = runFinishCall(requestedReason, options);
@@ -1686,9 +1825,10 @@ export function createPracticeCallService(deps = {}) {
     if (!call || call.finished) return snapshot();
     const self = call;
     // A call the interviewer's side dropped out of keeps that as its reason, so the review does not fault the candidate for it.
-    const reason = self.interviewerLeft ? (self.connectionLost ? 'session-error' : 'interviewer') : requestedReason;
+    const reason = (self.interviewerLeft || self.interviewerEnded) ? (self.connectionLost ? 'session-error' : 'interviewer') : requestedReason;
     // 'ask' leaves the choice to the candidate, on the screen after the call.
     const asks = analyze === 'ask' && self.inCall;
+    dbg('finish', { requestedReason, reason, analyze, inCall: self.inCall, interviewerLeft: !!self.interviewerLeft });
     let wantsAnalysis = asks ? true : !!analyze;
     state.feedbackRequested = wantsAnalysis;
     // R7: everything below reads `self`, never the shared `call` handle.
@@ -1711,6 +1851,9 @@ export function createPracticeCallService(deps = {}) {
       // The warm Claude sessions are finished with once the engine stops.
       closeWarmSessions(self).catch(() => {});
       state.elapsedMs = engineState.elapsedMs || onScreenMs(self);
+      // The engine's elapsed time leaves pauses out already: the length the ended screen shows.
+      state.pausedMs = pausedTotalMs(self);
+      state.activeMs = state.elapsedMs;
       setPhase('ended');
       try { await self.helper?.stop?.(); } catch { /* audio owner already stopped */ }
       let recordingWait;
@@ -1761,11 +1904,15 @@ export function createPracticeCallService(deps = {}) {
       const record = {
         callId: self.callId, nodeId: self.args.nodeId, startedAt: self.startedAt, endedAt: Date.now(), durationMs,
         pausedMs: self.pausedMs || 0,
+        // Each pause on the call's own timeline (the same clock as the transcript), for the replay's active length.
+        pauseSpans: pauseSpansOf(self, endOnTimelineMs, trimmedMs),
+        ...(Number.isFinite(self.interviewerLeftAtMs) ? { interviewerLeftAtMs: self.interviewerLeftAtMs } : {}),
         ...(self.endedBySilence ? { endedBy: 'silence' } : {}),
-        persona: self.persona ? { ...self.persona } : null,
+        persona: self.persona ? { ...self.persona, ...(Number.isFinite(self.leftAt?.A) ? { leftAtMs: self.leftAt.A } : {}) } : null,
         panel: (self.panel || []).map(entry => ({
           id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, joins: entry.joins,
           joinedAtMs: entry.joinedAtMs, voiceId: entry.voiceId, room: entry.room ?? null, ...(Number.isFinite(entry.roomAmount) ? { roomAmount: entry.roomAmount } : {}), stability: entry.stability,
+          ...(Number.isFinite(self.leftAt?.[entry.id]) ? { leftAtMs: self.leftAt[entry.id] } : {}),
         })),
         pickedQuestions: Array.isArray(self.picked) ? self.picked.slice() : [],
         // What the planning step decided and which drawn voices it used, so a setup that went wrong can be read back.
@@ -1776,13 +1923,14 @@ export function createPracticeCallService(deps = {}) {
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
         pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
-        toneSamples: onCallClock(self.toneSamples.slice()), candidateProsody: onCallClock(candidateProsody), voiceBaseline, recordingLeadMs: leadMs - trimmedMs, thresholds: deps.thresholds ?? null, reason,
+        toneSamples: onCallClock(self.toneSamples.slice()), candidateProsody: onCallClock(candidateProsody), voiceBaseline, recordingLeadMs: leadMs - trimmedMs, thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...(deps.thresholds || {}) }, reason,
         ...(self.missedCall ? { returnedCall: self.missedCall.how } : {}),
         // Until the candidate chooses, the record reads as a call left without feedback: that is what it is if the window closes now.
         ...(wantsAnalysis && !asks ? {} : { feedbackSkipped: true }),
       };
       self.record = record;
       await store.writeRecord(self.callId, record);
+      dbg('record-saved', { durationMs, transcriptEntries: (record.transcript || []).length, reason, finalizeError: finalizeError?.message ?? null });
       // A call with no answer from the candidate has nothing to review, so there is nothing to ask.
       const nothingSaid = !(engineState.transcript || []).some(entry => entry?.speaker === 'candidate' && !entry.acknowledgement);
       if (asks && !nothingSaid) {
@@ -1791,6 +1939,7 @@ export function createPracticeCallService(deps = {}) {
         wantsAnalysis = await new Promise(resolveChoice => { settleFeedback = resolveChoice; });
         state.feedbackChoice = null;
         state.feedbackRequested = wantsAnalysis;
+        dbg('feedback-decided', { wantsAnalysis });
       }
       if (asks && wantsAnalysis) { delete record.feedbackSkipped; await store.writeRecord(self.callId, record); }
       // What was asked and answered feeds the next call's choice, whether or not feedback was requested.
@@ -1808,7 +1957,8 @@ export function createPracticeCallService(deps = {}) {
         }
       }
       // The window shows these steps while the review is prepared.
-      const setStage = stage => { state.analysisStage = stage; publish(); };
+      const reviewStartedAt = clock.now();
+      const setStage = stage => { dbg('analysis-stage', { stage, ms: Math.round(clock.now() - reviewStartedAt) }); state.analysisStage = stage; publish(); };
       state.analysisStage = 'recording';
       setPhase('analyzing');
       let audio = false;
@@ -1854,6 +2004,7 @@ export function createPracticeCallService(deps = {}) {
           deps: { ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage },
         });
         const report = produced?.analysis && typeof produced.analysis === 'object' ? produced.analysis : produced;
+        dbg('analysis-produced', { ms: Math.round(clock.now() - reviewStartedAt), status: report?.status ?? null, error: report?.error ?? null });
         const raw = produced?.feedback ?? (report && typeof report === 'object' ? report.feedback : null);
         feedback = raw && typeof raw === 'object' ? { ...raw, callId: raw.callId || self.callId } : null;
         analysis = report && typeof report === 'object'
@@ -1868,7 +2019,8 @@ export function createPracticeCallService(deps = {}) {
       if (wantsAnalysis) {
       setStage('saving');
       const stored = { callId: self.callId, createdAt: Date.now(), ...analysis };
-      try { await store.writeAnalysis(self.callId, stored); analysisWritten = true; } catch { /* record still replays */ }
+      try { await store.writeAnalysis(self.callId, stored); analysisWritten = true; } catch (error) { dbg('analysis-write-failed', { message: error?.message }); }
+      dbg('analysis-saved', { status: stored.status, written: analysisWritten });
       self.analysis = stored;
       if (feedback) {
         try {
@@ -1926,7 +2078,76 @@ export function createPracticeCallService(deps = {}) {
       return snapshot();
     } finally {
       finishing = false;
+      // The call's log is complete: written out, then the logs of older calls beyond the newest ten are pruned.
+      await closeDebug(self);
+      try { await store.pruneDebugLogs?.({ protect: self.callId }); } catch { /* left for the next call */ }
+      // Raw audio left by earlier calls, in the background; the call that just ended keeps its own until the next one.
+      tidying = tidyLeftoverAudio(self.callId).catch(() => {});
     }
+  }
+
+  /**
+   * Raw audio (the two tracks recorded during a call and their uncompressed mix, about 60 to 150 MB each for a
+   * 30-minute call) is left behind when a review failed or the app quit during a call or its review. Nothing reads it
+   * again, so it would pile up for ever. For every call but `protect` and the live one: with a finished recording,
+   * or with no call record (nothing in the app can open that call), the raw files are deleted; with a record but no
+   * recording, call.m4a is made from them first, and they are deleted only once it exists. Records, reviews,
+   * recordings and debug logs are never touched here.
+   */
+  async function tidyLeftoverAudio(protect) {
+    let found;
+    let recent;
+    try {
+      found = await store.leftoverAudio?.({ protect });
+      // A call outside the newest RECORDINGS_KEPT will not keep a recording, so there is nothing to rescue for it.
+      recent = new Set(((await store.recordedCallsNewestFirst?.()) ?? []).slice(0, RECORDINGS_KEPT));
+    } catch { return { tidied: [], pruned: [] }; }
+    const tidied = [];
+    for (const item of found || []) {
+      if (call && call.callId === item.callId) continue; // a call that started meanwhile is recording into it
+      const names = item.raw.map(entry => entry.name);
+      const rescue = !item.hasRecording && item.hasRecord && recent.has(item.callId);
+      try {
+        if (rescue) {
+          const mixedPath = path.join(item.dir, 'call.wav');
+          if (!names.includes('call.wav')) {
+            if (!names.includes('candidate.wav') || !names.includes('interviewer.wav')) continue; // half a call: left alone
+            const mixdown = await resolve('mixdown');
+            await mixdown({ candidatePath: path.join(item.dir, 'candidate.wav'), interviewerPath: path.join(item.dir, 'interviewer.wav'), outPath: mixedPath, fs: audioFs });
+          }
+          const afconvert = await resolve('afconvert');
+          await afconvert(['-f', 'm4af', '-d', 'aac', '-b', '64000', mixedPath, path.join(item.dir, 'call.m4a')]);
+          if (!(await store.hasAudio(item.callId))) continue;
+        }
+        if (call && call.callId === item.callId) continue;
+        // The mix a rescue just made is raw audio too.
+        const { deleted } = await store.deleteRawAudio(item.callId, [...new Set([...names, 'call.wav'])]);
+        if (deleted.length) {
+          tidied.push({ callId: item.callId, deleted, rescued: rescue });
+          logNote(deps.logger, `leftover audio of ${item.callId}: ${rescue ? 'recording made, ' : ''}deleted ${deleted.join(', ')}`);
+        }
+      } catch (error) {
+        logWarn(deps.logger, `[PracticeCall] leftover audio of ${item.callId} kept: ${error?.message || error}`);
+      }
+    }
+    // Then only the newest RECORDINGS_KEPT calls keep their recording (never the one just finished or a live one).
+    let pruned = [];
+    try {
+      if (!(call && !call.finished)) ({ pruned } = (await store.pruneRecordings?.({ keep: RECORDINGS_KEPT, protect })) ?? { pruned: [] });
+      for (const item of pruned) logNote(deps.logger, `recording of ${item.callId} removed: only the newest ${RECORDINGS_KEPT} calls keep theirs`);
+    } catch (error) {
+      logWarn(deps.logger, `[PracticeCall] old recordings not pruned: ${error?.message || error}`);
+    }
+    return { tidied, pruned };
+  }
+
+  /** The pauses as {startMs, endMs} on the call's timeline; one still open ends at the end of the call. */
+  function pauseSpansOf(self, endOnTimelineMs, trimmedMs) {
+    return (self.pauseSpans || []).map(span => {
+      const startMs = Math.max(0, Math.round(span.startMs - trimmedMs));
+      const endMs = Math.max(startMs, Math.round((span.endMs ?? endOnTimelineMs) - trimmedMs));
+      return { startMs, endMs };
+    });
   }
 
   async function getReplay(callId = state.callId) {
@@ -1939,7 +2160,13 @@ export function createPracticeCallService(deps = {}) {
     return {
       callId,
       audioUrl: hasAudio ? `practice-call://${callId}/call.m4a` : null,
+      // The recording was removed because only the newest calls keep theirs.
+      ...(!hasAudio && record.recordingPruned === true ? { recordingPruned: true, recordingsKept: RECORDINGS_KEPT } : {}),
       durationMs: Number(record.durationMs) || 0,
+      // Pauses on the audio timeline, and the call's length without them.
+      pauseSpans: Array.isArray(record.pauseSpans) ? record.pauseSpans : [],
+      pausedMs: Number(record.pausedMs) || 0,
+      activeMs: Math.max(0, (Number(record.durationMs) || 0) - (Number(record.pausedMs) || 0)),
       transcript: record.transcript || [],
       // Who was on the call, so the replay can name each speaker.
       persona: record.persona ? { name: record.persona.name, role: record.persona.role } : null,
@@ -1948,7 +2175,7 @@ export function createPracticeCallService(deps = {}) {
       screens: Array.isArray(record.screens) ? record.screens : [],
       pad: record.pad && typeof record.pad === 'object' ? record.pad : { lang: '', snapshots: [] },
       feedback: analysis?.feedback ?? null,
-      analysis: { status, ...(analysis?.error ? { error: analysis.error } : {}), ...(analysis?.tooShort ? { tooShort: true } : {}) },
+      analysis: { status, ...(analysis?.error ? { error: analysis.error } : {}), ...(analysis?.tooShort ? { tooShort: true } : {}), ...(analysis?.metrics?.typedOnly === true ? { metrics: { typedOnly: true } } : {}) },
     };
   }
 
@@ -1959,11 +2186,16 @@ export function createPracticeCallService(deps = {}) {
     try {
       state = freshState();
       call = null;
+      debug = null;
       const { steering: rawSteering, ...request } = plainArgs(args);
       const callId = newId();
+      // A call with no folder (the store could not make one) has no debug log; the app log still has its warnings.
       const dir = await store.ensure(callId);
+      debug = createCallDebugLog({ fs: deps.debugFs ?? fs, dir, now: () => clock.now() });
+      dbg('start', { callId, args: request, steering: typeof rawSteering === 'string' ? rawSteering : '' });
+      try { await store.pruneDebugLogs?.({ protect: callId }); } catch { /* an old log left for the next call */ }
       const self = { callId, dir, args: { ...request }, steering: '', startedAt: clock.now(), timings: { answers: [], precheckMs: 0 }, toneSamples: [], finished: false, inCall: false, record: null,
-        screens: [], padRecord: { lang: '', snapshots: [], lastText: '' } };
+        screens: [], padRecord: { lang: '', snapshots: [], lastText: '' }, debug };
       call = self;
       state.callId = callId;
       state.elapsedMs = 0;
@@ -2011,13 +2243,16 @@ export function createPracticeCallService(deps = {}) {
   return Object.freeze({
     channels: CALL_CHANNELS,
     start,
+    // Run after every call by itself; exposed so it can be run (and waited for) on its own.
+    tidyLeftoverAudio: () => tidyLeftoverAudio(call?.callId ?? null),
+    whenTidied: () => tidying,
     agreeModelDownload: async () => {
       if (!call || state.phase !== 'consent') return snapshot();
       return downloadModels();
     },
     ready,
-    answer: async () => (state.phase === 'ringing' || state.phase === 'connecting' ? connectCall() : snapshot()),
-    decline: () => missCall('declined'),
+    answer: async () => (dbg('user', { action: 'answer', phase: state.phase }), state.phase === 'ringing' || state.phase === 'connecting' ? connectCall() : snapshot()),
+    decline: () => (dbg('user', { action: 'decline' }), missCall('declined')),
     callBack,
     cancelCallBack,
     // The candidate's answer to "feedback on this call?", asked after the call. Resolves when the call is fully wrapped up.
@@ -2029,6 +2264,7 @@ export function createPracticeCallService(deps = {}) {
     // whoever asks again gets the state after the recording and record are saved.
     // feedback: true or false decides now; 'ask' saves the call and asks on the screen after it.
     hangUp: async options => {
+      dbg('user', { action: 'hang-up', feedback: options?.feedback ?? null });
       if (finishTask) {
         // Asked to end without feedback (the app is quitting) while the choice is still open: that is the choice.
         if (options?.feedback === false) chooseFeedback(false);
@@ -2039,10 +2275,12 @@ export function createPracticeCallService(deps = {}) {
     // The window was closed without choosing how to leave. Nobody is there to read a review, so none
     // is written: the recording and transcript are saved and nothing more is spent on transcription or Claude.
     abandon: async () => {
+      dbg('user', { action: 'window-closed' });
       chooseFeedback(false);
       return call && !call.finished ? finishCall('window-closed', { analyze: false }) : snapshot();
     },
     setMuted: muted => {
+      dbg('user', { action: 'mute', muted: !!muted });
       state.muted = !!muted;
       try { call?.audioMirror?.mute(!!muted); } catch { /* mute is best effort */ }
       publish();
@@ -2055,10 +2293,15 @@ export function createPracticeCallService(deps = {}) {
       if (state.paused) return snapshot();
       const value = typeof text === 'string' ? text.trim() : '';
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
+      dbg('user', { action: 'chat', text: value });
       state.chat.push({ from: 'candidate', text: value, atMs: Math.round(clock.now() - (call?.startedAt || clock.now())) });
-      try { call?.engine?.typed?.(value); } catch { /* engine already ended */ }
-      // A typed message carries the pad text along, so it counts as sent.
-      if (call && state.pad.open) snapshotPad(call, undefined);
+      // While the interviewers are still leaving the line is typed into as in a real call: the message shows
+      // in the chat, nobody answers it, and the interviewer sessions are never sent it.
+      if (!call?.interviewerEnded) {
+        try { call?.engine?.typed?.(value); } catch { /* engine already ended */ }
+        // A typed message carries the pad text along, so it counts as sent.
+        if (call && state.pad.open) snapshotPad(call, undefined);
+      }
       publish();
       return snapshot();
     },
@@ -2068,7 +2311,7 @@ export function createPracticeCallService(deps = {}) {
     updatePad: text => {
       // A pad that has just closed still takes text: the window sends its last keystrokes as it closes.
       // One that was never opened in this call takes nothing.
-      if (!call || call.finished || !call.inCall || state.interviewerLeft || (!state.pad.open && !call.padOpened)) return snapshot();
+      if (!call || call.finished || !call.inCall || call.interviewerEnded || state.interviewerLeft || (!state.pad.open && !call.padOpened)) return snapshot();
       const value = typeof text === 'string' ? text.slice(0, PAD_MAX) : '';
       state.pad.text = value;
       try { call.engine?.setPadText?.(value); } catch { /* engine already ended */ }
@@ -2082,7 +2325,8 @@ export function createPracticeCallService(deps = {}) {
     },
     // Hidden pause (the P key): the engine holds its silence check-ins and the call clock.
     setPaused: paused => {
-      if (!call || call.finished || !call.inCall || state.interviewerLeft) return snapshot();
+      if (!call || call.finished || !call.inCall || call.interviewerEnded || state.interviewerLeft) return snapshot();
+      dbg('user', { action: 'pause', paused: !!paused });
       try { call.engine?.setPaused?.(!!paused); } catch { /* engine already ended */ }
       return snapshot();
     },

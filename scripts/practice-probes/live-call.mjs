@@ -27,6 +27,49 @@ const t00 = performance.now();
 const log = (kind, data = {}) => fs.appendFileSync(logPath, `${JSON.stringify({ t: +((performance.now() - t00) / 1000).toFixed(2), kind, ...data })}\n`);
 const say = line => fs.appendFileSync(talkPath, `${line}\n`);
 
+// What the candidate would hear: every interviewer PCM chunk placed on the call clock where the player
+// would play it (after the chunk before it in the same utterance, never before it arrived), so a reply
+// that is late to arrive leaves the same silence it leaves on a real call. Written as interviewer.wav
+// and, per typed message, clips/turn-NN.wav from just before the message was sent (marked by a soft
+// click) to the end of what was said in answer. Mono 16-bit at 24 kHz; 44.1 kHz audio is resampled.
+const EAR_RATE = 24000;
+const ear = { chunks: [], sends: [] };
+function earPlace(u, pcm, nowMs) {
+  const input = new Int16Array(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.length - (pcm.length % 2)));
+  const ratio = u.rate / EAR_RATE;
+  const out = new Int16Array(Math.floor(input.length / ratio));
+  for (let i = 0; i < out.length; i += 1) {
+    const x = i * ratio; const a = Math.floor(x); const b = Math.min(input.length - 1, a + 1);
+    out[i] = Math.round(input[a] + (input[b] - input[a]) * (x - a));
+  }
+  const startMs = Math.max(u.earHead ?? 0, nowMs);
+  u.earHead = startMs + (out.length / EAR_RATE) * 1000;
+  ear.chunks.push({ startMs, samples: out });
+}
+function earWrite(dir) {
+  const endMs = Math.max(0, ...ear.chunks.map(c => c.startMs + (c.samples.length / EAR_RATE) * 1000)) + 500;
+  const mix = new Float32Array(Math.ceil((endMs / 1000) * EAR_RATE));
+  for (const c of ear.chunks) { const at = Math.round((c.startMs / 1000) * EAR_RATE); for (let i = 0; i < c.samples.length && at + i < mix.length; i += 1) mix[at + i] += c.samples[i]; }
+  const pcmOf = (from, to, clickAt) => {
+    const a = Math.max(0, Math.round((from / 1000) * EAR_RATE)); const b = Math.min(mix.length, Math.round((to / 1000) * EAR_RATE));
+    const buf = Buffer.alloc((b - a) * 2);
+    for (let i = a; i < b; i += 1) {
+      let v = mix[i];
+      if (clickAt !== undefined) { const k = i - Math.round((clickAt / 1000) * EAR_RATE); if (k >= 0 && k < 480) v += 3000 * Math.sin((2 * Math.PI * 1000 * k) / EAR_RATE) * (1 - k / 480); }
+      buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), (i - a) * 2);
+    }
+    return Buffer.concat([wavHeader(buf.length, EAR_RATE), buf]);
+  };
+  fs.writeFileSync(path.join(dir, 'interviewer.wav'), pcmOf(0, endMs));
+  fs.mkdirSync(path.join(dir, 'clips'), { recursive: true });
+  ear.sends.forEach((send, index) => {
+    const next = ear.sends[index + 1]?.atMs ?? endMs;
+    const said = ear.chunks.filter(c => c.startMs >= send.atMs && c.startMs < next);
+    const last = said.length ? Math.max(...said.map(c => c.startMs + (c.samples.length / EAR_RATE) * 1000)) : send.atMs + 3000;
+    fs.writeFileSync(path.join(dir, 'clips', `turn-${String(index + 1).padStart(2, '0')}.wav`), pcmOf(send.atMs - 400, Math.min(next, last + 600), send.atMs));
+  });
+}
+
 function createFakeHelper({ onEvent }) {
   let t0 = 0; let fd = null; let tick = null; let written = 0; let stopped = false;
   const utter = new Map();
@@ -65,6 +108,7 @@ function createFakeHelper({ onEvent }) {
     pushAudio(id, pcm) {
       const u = utter.get(id); if (!u) return false;
       u.bytes += pcm.length;
+      try { earPlace(u, pcm, performance.now() - t00); } catch (error) { log('ear-error', { message: String(error?.message || error) }); }
       if (u.started === null) {
         u.started = performance.now();
         emit({ type: 'playback', utteranceId: id, state: 'started', positionMs: 0, atMs: at() });
@@ -195,6 +239,7 @@ async function finish() {
     // The one question that is not from the prepared pool, as the planner wrote it and who asked it.
     const record = await store.readRecord(state.callId).catch(() => null);
     if (record?.unpreparedQuestion) { log('unprepared-question', record.unpreparedQuestion); say(`      unprepared question> ${record.unpreparedQuestion.text}`); }
+    try { earWrite(outDir); fs.writeFileSync(path.join(outDir, 'clips', 'index.txt'), ear.sends.map((send, index) => `turn-${String(index + 1).padStart(2, '0')}.wav  you typed: ${send.text}`).join('\n') + '\n'); } catch (error) { log('ear-error', { message: String(error?.stack || error) }); }
     log('finished', { phase: state.phase });
   } finally { setTimeout(() => process.exit(0), 1500); }
 }
@@ -211,7 +256,7 @@ setInterval(async () => {
       else if (text === '#hangup-nofeedback') { log('cmd', { text }); await service.hangUp({ feedback: false }); }
       else if (text.startsWith('#pad\n')) { log('cmd', { text: '#pad', chars: text.length - 5 }); say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CANDIDATE (pad): ${text.slice(5).replace(/\n/g, ' / ')}`); service.updatePad(text.slice(5)); }
       else if (text === '#typing') { log('cmd', { text }); service.setTyping(true); clearInterval(globalThis.typingBeat); globalThis.typingBeat = setInterval(() => service.setTyping(true), 3000); }
-      else { say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CANDIDATE (chat): ${text}`); log('send', { name, chars: text.length }); clearInterval(globalThis.typingBeat); service.setTyping(false); service.sendChat(text); }
+      else { say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CANDIDATE (chat): ${text}`); log('send', { name, chars: text.length }); ear.sends.push({ atMs: performance.now() - t00, text }); clearInterval(globalThis.typingBeat); service.setTyping(false); service.sendChat(text); }
     } catch (error) { log('inbox-error', { name, message: String(error?.message || error) }); }
   }
 }, 300);

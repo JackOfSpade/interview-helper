@@ -23,6 +23,9 @@ export function mergeEvent(current, event) {
     const known = Array.isArray(current?.participants) ? current.participants : [];
     if (!known.some(item => item?.id === event.id)) next.participants = [...known, { id: event.id, name: event.name || '', role: '', focus: '', status: 'joined' }];
   }
+  if (event.type === 'participant-left' && event.id && Array.isArray(current?.participants)) {
+    next.participants = current.participants.map(item => (item?.id === event.id ? { ...item, status: 'left' } : item));
+  }
   if (event.type === 'speaker' && event.speakerId) next.speakingId = event.speakerId;
   if (event.kind === 'typing') next.typing = !!event.typing;
   return next;

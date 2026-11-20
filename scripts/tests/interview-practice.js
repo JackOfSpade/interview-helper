@@ -138,7 +138,8 @@ export default [
         const view = window.document.querySelector('[data-testid="practice-feedback"]');
         const memorized = [...view.querySelectorAll('section[aria-label="Memorized answer"]')];
         const extensions = [...view.querySelectorAll('details.practice-extension')];
-        assert.equal(memorized.length, 2, 'every planned question gets a memorized-answer section');
+        assert.equal(memorized.length, 1, 'every asked question gets a memorized-answer section; the unasked one is collapsed into one line');
+        assert.ok(view.querySelector('details[data-testid="practice-unasked"]')?.textContent.includes('Why Discord?'), 'an unasked question is listed inside the collapsed line');
         assert.equal(extensions.length, 1, 'only the question with extension material gets the optional section');
         assert.ok(memorized[0].textContent.includes('Hit the headline and the example.'));
         assert.ok(extensions[0].textContent.includes('Mention the on-call rotation you ran.'));

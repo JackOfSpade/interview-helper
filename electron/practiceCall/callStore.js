@@ -3,6 +3,12 @@ import path from 'node:path';
 
 const CALL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const AUDIO_FILES = Object.freeze(['call.m4a', 'candidate.wav', 'interviewer.wav']);
+const DEBUG_FILE = 'debug.jsonl';
+// Recorded during the call (the two tracks) and made after it (the mix), before call.m4a is encoded from the mix.
+const RAW_AUDIO_FILES = Object.freeze(['candidate.wav', 'interviewer.wav', 'call.wav']);
+export const DEBUG_LOGS_KEPT = 10;
+// Only this many calls keep their recording (the owner's call, 2026-11-19); older ones keep the record and review.
+export const RECORDINGS_KEPT = 10;
 
 function storeError(code, message) {
   const error = new Error(`Practice call store: ${message}`);
@@ -114,12 +120,127 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     return file;
   }
 
-  /** R8: an abandoned call never reached 'in-call', so its directory is removed whole. */
+  /**
+   * R8: an abandoned call never reached 'in-call', so its record, tracks and temp files are removed.
+   * Its debug log stays (the folder with it), so a failed setup can still be diagnosed; the log is
+   * pruned with the others once newer calls push it out of the newest ten.
+   */
   async function remove(callId) {
     const dir = await dirOf(callId);
     if (!dir) return { removed: false };
-    await fs.rm(dir, { recursive: true, force: true });
-    return { removed: true };
+    const kept = await lstatOrNull(fs, path.join(dir, DEBUG_FILE));
+    if (!kept || !kept.isFile() || kept.isSymbolicLink()) {
+      await fs.rm(dir, { recursive: true, force: true });
+      return { removed: true };
+    }
+    for (const name of await fs.readdir(dir)) {
+      if (name !== DEBUG_FILE) await fs.rm(path.join(dir, name), { recursive: true, force: true });
+    }
+    return { removed: true, keptDebugLog: true };
+  }
+
+  /**
+   * Deletes debug.jsonl of every call folder except the newest `keep` by start time (a folder with no
+   * call.json is ordered by its own change time) and `protect`. Nothing else is ever touched; an
+   * emptied folder (a failed setup that kept only its log) is removed.
+   */
+  async function pruneDebugLogs({ keep = DEBUG_LOGS_KEPT, protect = null } = {}) {
+    const calls = [];
+    for (const callId of await api.knownCallIds()) {
+      const dir = path.join(rootDir, callId);
+      const record = await readJson(callId, 'call.json');
+      let at = typeof record?.startedAt === 'number' ? record.startedAt : null;
+      if (at === null) { const entry = await lstatOrNull(fs, dir); at = entry?.mtimeMs ?? 0; }
+      calls.push({ callId, dir, at });
+    }
+    calls.sort((left, right) => right.at - left.at);
+    const deleted = [];
+    for (const item of calls.slice(Math.max(0, keep))) {
+      if (item.callId === protect) continue;
+      const file = path.join(item.dir, DEBUG_FILE);
+      const entry = await lstatOrNull(fs, file);
+      if (!entry || entry.isSymbolicLink() || !entry.isFile()) continue;
+      try { await fs.unlink(file); deleted.push(item.callId); } catch { /* left for the next prune */ }
+      try {
+        if (!(await fs.readdir(item.dir)).length) await fs.rmdir(item.dir);
+      } catch { /* a folder with other files stays */ }
+    }
+    return { deleted };
+  }
+
+  /**
+   * Raw audio a finished call no longer needs, by call folder (all but `protect`): the two tracks recorded during
+   * the call and the uncompressed mix. They are the only copy of the audio until call.m4a exists, so each entry says
+   * whether the folder has a record and a finished recording; the caller decides what to keep.
+   */
+  async function leftoverAudio({ protect = null } = {}) {
+    const found = [];
+    for (const callId of await api.knownCallIds()) {
+      if (callId === protect) continue;
+      const dir = path.join(rootDir, callId);
+      const raw = [];
+      for (const name of RAW_AUDIO_FILES) {
+        const entry = await lstatOrNull(fs, path.join(dir, name));
+        if (entry?.isFile() && !entry.isSymbolicLink()) raw.push({ name, bytes: entry.size || 0 });
+      }
+      if (!raw.length) continue;
+      found.push({ callId, dir, raw, hasRecord: (await readJson(callId, 'call.json')) !== null, hasRecording: await api.hasAudio(callId) });
+    }
+    return found;
+  }
+
+  /** Deletes the named raw audio files of one call; anything else in the folder is never touched. */
+  async function deleteRawAudio(callId, names) {
+    const dir = await dirOf(callId);
+    if (!dir) return { deleted: [] };
+    const deleted = [];
+    for (const name of names) {
+      if (!RAW_AUDIO_FILES.includes(name)) continue;
+      const file = path.join(dir, name);
+      const entry = await lstatOrNull(fs, file);
+      if (!entry || entry.isSymbolicLink() || !entry.isFile()) continue;
+      try { await fs.unlink(file); deleted.push(name); } catch { /* left for the next tidy */ }
+    }
+    return { deleted };
+  }
+
+  /** Call ids with a record, newest first by start time. */
+  async function recordedCallsNewestFirst() {
+    const calls = [];
+    for (const callId of await api.knownCallIds()) {
+      const record = await readJson(callId, 'call.json');
+      if (record) calls.push({ callId, at: typeof record.startedAt === 'number' ? record.startedAt : 0 });
+    }
+    return calls.sort((left, right) => right.at - left.at).map(item => item.callId);
+  }
+
+  /**
+   * Deletes the audio (deleteRecording) of every recorded call except the newest `keep` by start time and `protect`,
+   * and marks its record `recordingPruned`, so its replay can say why there is nothing to play. The record, the review
+   * and the debug log stay.
+   */
+  async function pruneRecordings({ keep = RECORDINGS_KEPT, protect = null } = {}) {
+    const pruned = [];
+    for (const callId of (await recordedCallsNewestFirst()).slice(Math.max(0, keep))) {
+      if (callId === protect) continue;
+      const { deleted } = await api.deleteRecording(callId);
+      if (!deleted.length) continue;
+      const record = await readJson(callId, 'call.json');
+      if (record && record.recordingPruned !== true) await writeJson(callId, 'call.json', { ...record, recordingPruned: true });
+      pruned.push({ callId, deleted });
+    }
+    return { pruned };
+  }
+
+  /** Count and size of the debug logs on disk, for the data-folder listing. */
+  async function debugLogStats() {
+    let count = 0;
+    let bytes = 0;
+    for (const callId of await api.knownCallIds()) {
+      const entry = await lstatOrNull(fs, path.join(rootDir, callId, DEBUG_FILE));
+      if (entry?.isFile() && !entry.isSymbolicLink()) { count += 1; bytes += entry.size || 0; }
+    }
+    return { count, bytes };
   }
 
   async function readJson(callId, name) {
@@ -132,14 +253,21 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
       callId,
       startedAt: typeof record?.startedAt === 'number' ? record.startedAt : null,
       durationMs: typeof record?.durationMs === 'number' ? record.durationMs : 0,
+      ...(typeof record?.pausedMs === 'number' && record.pausedMs > 0 ? { pausedMs: record.pausedMs } : {}),
       persona: record?.persona ? { name: record.persona.name, role: record.persona.role } : null,
       hasAudio: false,
       analysisStatus: analysis?.status === 'ready' || analysis?.status === 'failed' ? analysis.status : 'missing',
     };
   }
 
-  return Object.freeze({
+  const api = Object.freeze({
     rootDir,
+    pruneDebugLogs,
+    debugLogStats,
+    leftoverAudio,
+    deleteRawAudio,
+    pruneRecordings,
+    recordedCallsNewestFirst,
     ensure,
     remove,
     callDir: dirOf,
@@ -202,6 +330,7 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
       return { deleted };
     },
   });
+  return api;
 }
 
 export const PRACTICE_CALL_AUDIO_FILES = AUDIO_FILES;

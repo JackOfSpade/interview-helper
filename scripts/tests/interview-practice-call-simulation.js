@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
+import { DEFAULT_CALL_THRESHOLDS, JOIN_PAUSE_MS } from '../../electron/interviewPracticeCallEngine.js';
 import {
   runScenario, runSweep, chooseBest, formatSweep, createLognormal, mulberry32, PHASE0, percentile,
-  createVirtualClock, createFakeHelper, DEFAULT_SMART_TURN_ACCURACY,
+  createVirtualClock, createFakeHelper, DEFAULT_SMART_TURN_ACCURACY, OPENER_WHOLE, ACK_MS_PER_WORD, MAIN_FIRST_SENTENCE, VOICE_LATER_LINE_MS,
 } from '../interview-practice-simulate.mjs';
-import { getScenario, SCENARIOS, AMI_PAUSES } from '../fixtures/interview-practice-call-scenarios.mjs';
+import { getScenario, SCENARIOS, AMI_PAUSES, ACK_REACTION } from '../fixtures/interview-practice-call-scenarios.mjs';
 
 // Synthetic data only: scenarios, latencies and candidates are simulated, never recorded.
 
@@ -374,6 +374,110 @@ test('runSweep keeps the ear off when no ear option is given', async () => {
   const sweep = await runSweep({ seeds: 1, speculateMs: [600], commitMs: [1200], voiceGateMs: [0], listenAccuracy: [1.0] });
   assert.equal(sweep.rows.length, 1);
   assert.equal(sweep.rows[0].ear, false);
+});
+
+const ACK_MARKER = `[You have already started your reply out loud with: '${ACK_REACTION}' Carry on from there.]`;
+const LONG_REACTION = 'Okay, yeah, I follow you, and thanks for walking me through that.'; // 12 words, ends with a full stop
+const MEASURED = { mainSpec: MAIN_FIRST_SENTENCE, laterLineMs: VOICE_LATER_LINE_MS };
+
+test('the opener runs first: every reply to a finished answer carries the exact acknowledgement, which is also the first thing spoken', () => eachSeed('ack-mid-sentence', (result, label) => {
+  const replies = result.mainMessages.filter(message => message.includes("Candidate: '"));
+  assert(replies.length >= 2, label);
+  assert(replies.every(message => message.endsWith(ACK_MARKER) && message.indexOf("Candidate: '") < message.indexOf(ACK_MARKER)), `${label}: ${replies.join(' | ')}`);
+  const spokenFirst = result.voice.slice(1).filter(rec => rec.texts.length > 1).map(rec => rec.texts[0]); // slice(1): the greeting has none
+  assert(spokenFirst.length >= 1 && spokenFirst.every(text => text === ACK_REACTION), label);
+  const opener = result.events.filter(event => event.type === 'opener');
+  assert(opener.length >= 1 && opener.every(event => event.outcome === 'spoken' && event.spoken && event.words === 8 && event.ms > 0 && event.text === ACK_REACTION), label);
+}));
+
+test('the acknowledgement is spoken at about 330 ms a word and the reply gap is measured against it', async () => {
+  const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 2 });
+  assert(result.ackGaps.length >= 1);
+  for (const gap of result.ackGaps) {
+    assert.equal(gap.ackMs, 8 * ACK_MS_PER_WORD);
+    assert(Number.isFinite(gap.gapMs));
+  }
+});
+
+test('a slow opener hits the deadline: it is aborted, nothing is spoken for it and the main message has no marker', async () => {
+  const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 1, openerSpec: { p50: 4000, p95: 5000 } });
+  const opener = result.events.filter(event => event.type === 'opener');
+  assert(opener.length >= 1 && opener.every(event => event.outcome === 'timeout' && !event.spoken && event.ms === DEFAULT_CALL_THRESHOLDS.openerDeadlineMs));
+  assert(result.mainMessages.filter(message => message.includes("Candidate: '")).every(message => !message.includes('already started your reply')));
+  assert(result.voice.every(rec => !rec.texts.includes(ACK_REACTION)));
+  assert.equal(result.ackGaps.length, 0);
+});
+
+test('the opener sample is the measured whole-text time, not the old first-word figure', () => {
+  assert.deepEqual({ ...OPENER_WHOLE }, { p50: 650, p95: 800 });
+});
+
+test('a long acknowledgement with a fast reply: the reply starts after a natural pause, not at once, and nothing stalls', async () => {
+  for (const reaction of [ACK_REACTION, LONG_REACTION]) {
+    const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 2, reaction });
+    assert(result.ackGaps.length >= 1);
+    for (const gap of result.ackGaps) {
+      assert.equal(gap.pauseMs, JOIN_PAUSE_MS['.'], 'the pause for an acknowledgement that ends in a full stop (the fake voice leaves no tail)');
+      assert.equal(gap.stallMs, 0, 'the reply was ready in time: the only silence is the pause');
+      assert.equal(gap.gapMs, JOIN_PAUSE_MS['.']);
+    }
+    const joined = result.voice.filter(rec => result.ackGaps.some(gap => gap.utteranceId === rec.utteranceId));
+    assert(joined.length >= 1 && joined.every(rec => rec.gaps.length === 1 && rec.gaps[0] === JOIN_PAUSE_MS['.']), 'the engine asked the voice for one gap');
+    assert(joined.every(rec => rec.deliveries[1].pauseMs === JOIN_PAUSE_MS['.']), 'the silence sits ahead of the reply\'s first sentence');
+  }
+});
+
+test('a short acknowledgement with a slow reply: a plain silence while the reply is written, and no gap asked of the voice', async () => {
+  const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 2, reaction: 'Mm-hm.', ...MEASURED });
+  assert(result.ackGaps.length >= 1);
+  for (const gap of result.ackGaps) {
+    assert.equal(gap.pauseMs, 0);
+    assert(gap.stallMs > 0 && gap.gapMs === gap.stallMs, 'the silence is only the wait for the reply');
+  }
+  assert(result.voice.every(rec => rec.gaps.length === 0), 'the acknowledgement was over before the reply, so there was nothing to part');
+});
+
+test('a sweep row counts a deliberate join pause apart from a stall: 8 words with a fast reply leave a pause and no audible gap', async () => {
+  const sweep = await runSweep({ seeds: [1, 2], speculateMs: [500], commitMs: [1200], voiceGateMs: [1200], listenAccuracy: [1] });
+  const [row] = sweep.rows;
+  assert(row.ackGapCount > 0);
+  assert.equal(row.ackGapP50Ms, JOIN_PAUSE_MS['.'], 'the silence is the join pause');
+  assert.equal(row.ackPauseRate, 1);
+  assert.equal(row.ackGapPositiveRate, 0, 'the main reply was ready before the 2.6 s acknowledgement ended');
+  assert.equal(row.ackGapOver200Rate, 0, 'a pause of about 450 ms is intended, not an audible failure');
+  assert(formatSweep(sweep).includes('gapP95'));
+  // The same engine with a two-word reaction (0.66 s) cannot cover the reply's generation: that is a real stall.
+  const short = await runSweep({ seeds: [1, 2], speculateMs: [500], commitMs: [1200], voiceGateMs: [1200], listenAccuracy: [1], run: { reaction: 'Got it,' } });
+  assert(short.rows[0].ackGapPositiveRate > 0.3, JSON.stringify(short.rows[0]));
+  assert.equal(short.rows[0].ackPauseRate, 0, 'no pause is left when the acknowledgement is nearly over');
+});
+
+test('with the measured main first-sentence time, a 12-word acknowledgement leaves only the join pause and a short one leaves a long silence', async () => {
+  assert.deepEqual({ ...MAIN_FIRST_SENTENCE }, { p50: 2965, p95: 3789 });
+  const options = { seeds: 10, speculateMs: [500], commitMs: [1200], voiceGateMs: [1200], listenAccuracy: [1] };
+  const long = (await runSweep({ ...options, run: { ...MEASURED, reaction: LONG_REACTION } })).rows[0];
+  const short = (await runSweep({ ...options, run: { ...MEASURED, reaction: 'Got it.' } })).rows[0];
+  assert(long.ackGapCount > 20);
+  assert(long.ackGapOver200Rate < 0.1, JSON.stringify(long));
+  assert(long.ackGapP95Ms <= JOIN_PAUSE_MS['.'] + 200, 'the silence stays about the join pause');
+  assert(short.ackGapOver200Rate > 0.9, JSON.stringify(short));
+});
+
+test('the fake opener writes the reaction it is given, the opener event carries no target and every acknowledgement is told apart from the reply', async () => {
+  const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 3, reaction: LONG_REACTION, ...MEASURED });
+  const events = result.events.filter(event => event.type === 'opener' && event.spoken);
+  assert(events.length >= 2);
+  for (const event of events) assert(event.words === 12 && !('targetWords' in event) && event.text === LONG_REACTION);
+  assert(result.openerMessages.every(message => !message.includes('Say about')), 'the opener is never told a length');
+  assert(result.ackGaps.length >= 1);
+});
+
+test('a long acknowledgement is spoken as written, with no word cap, and the reply carries its exact words', async () => {
+  const long = `${LONG_REACTION} And I really do appreciate you taking the time to explain it all.`;
+  const result = await runScenario(getScenario('ack-mid-sentence'), { seed: 1, reaction: long });
+  const opener = result.events.filter(event => event.type === 'opener');
+  assert(opener.length >= 1 && opener.every(event => event.spoken && event.words > 12));
+  assert(result.mainMessages.filter(message => message.includes("Candidate: '")).every(message => message.includes(`already started your reply out loud with: '${long}'`)));
 });
 
 export default suite;

@@ -6,7 +6,7 @@ import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
 import { clampScreen } from './screenMarkup.js';
 import { firstNameOf, participantsOf, roleLine } from './persona.js';
-import { playJoinChime } from './ringtone.js';
+import { playJoinChime, playLeaveChime } from './ringtone.js';
 import { formatTime } from './replayModel.js';
 import { shouldTogglePause } from './pauseKey.js';
 
@@ -19,6 +19,8 @@ const roundClass = tone => `grid h-10 w-10 place-items-center rounded-full trans
 const flatClass = active => `grid h-10 w-10 place-items-center rounded-full transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#8ab4f8] ${active ? 'bg-[#8ab4f8]/20 text-[#8ab4f8]' : 'text-[#e8eaed] hover:bg-white/10'}`;
 
 const TOAST_MS = 4000;
+// How long a tile that just left takes to fade out before it is removed (matches .pc-leave).
+const LEAVE_MS = 300;
 
 function SpeakingBadge({ small = false }) {
   return <span aria-hidden="true" className={`pc-bars absolute flex items-center justify-center gap-[3px] rounded-full bg-[#1a73e8] ${small ? 'right-2 top-2 h-5 w-5' : 'right-3 top-3 h-7 w-7'}`}><i /><i /><i /></span>;
@@ -149,13 +151,36 @@ export default function InCall({ state, api }) {
   // A colleague heard over the speaker rings at the same time as the main speaker.
   const isSpeaking = (item, index) => !interviewerLeft && ((typeof state?.overSpeakingId === 'string' && item.id === state.overSpeakingId) || (panelCall || typeof state?.speakingId === 'string' ? item.id === state?.speakingId : index === 0 && state?.speaking === 'interviewer'));
   const leadName = participants[0]?.name || 'Interviewer';
+  // Someone who left is taken off the stage: their tile fades out for LEAVE_MS, then is gone.
+  const isGone = item => interviewerLeft || item.status === 'left';
+  const goneKey = participants.filter(isGone).map(item => item.id).join('\u0000');
+  const [knownGoneKey, setKnownGoneKey] = useState(goneKey);
+  const [leavingIds, setLeavingIds] = useState([]);
+  if (knownGoneKey !== goneKey) {
+    const before = knownGoneKey ? knownGoneKey.split('\u0000') : [];
+    const fresh = goneKey ? goneKey.split('\u0000').filter(id => !before.includes(id)) : [];
+    setKnownGoneKey(goneKey);
+    setLeavingIds(fresh.length ? [...leavingIds, ...fresh] : leavingIds.filter(id => goneKey.split('\u0000').includes(id)));
+  }
+  // One soft chime each time someone leaves (a dropped line takes everyone at once: one chime).
+  useEffect(() => {
+    if (leavingIds.length) playLeaveChime(typeof window === 'undefined' ? null : window);
+  }, [leavingIds]);
+  useEffect(() => {
+    if (!leavingIds.length) return undefined;
+    const timer = setTimeout(() => setLeavingIds([]), LEAVE_MS);
+    return () => clearTimeout(timer);
+  }, [leavingIds]);
+  const shown = participants.filter(item => !isGone(item) || leavingIds.includes(item.id));
+  // Nobody left to look at: the candidate's own tile takes the whole stage.
+  const alone = participants.length > 0 && participants.every(isGone);
   const captionLabel = caption => {
     if (caption.speaker === 'candidate') return 'You';
     const who = caption.speakerId ? participants.find(item => item.id === caption.speakerId) : null;
     return firstNameOf(who) || (panelCall ? '' : firstNameOf(participants[0])) || 'Interviewer';
   };
   const sidePanelOpen = panel !== null;
-  const layout = tileLayout(participants.length, sidePanelOpen);
+  const layout = tileLayout(shown.length, sidePanelOpen);
   // Interviewer messages that arrive while the panel is closed leave a dot on the chat button.
   const chat = Array.isArray(state?.chat) ? state.chat : [];
   const [seenChat, setSeenChat] = useState(0);
@@ -174,28 +199,29 @@ export default function InCall({ state, api }) {
   // With the chat panel open and four or more interviewers the bar runs out of room (seen in the
   // built app: five named chips left one letter of "… is presenting"). The chips then show the
   // picture only, with the name on hover, so the line that says who is presenting stays readable.
-  const tightBar = sidePanelOpen && participants.length >= 4;
+  const tightBar = sidePanelOpen && shown.length >= 4;
   const renderTile = (item, index, compact) => {
-    const speaking = isSpeaking(item, index);
-    const gone = interviewerLeft || item.status === 'left';
+    const gone = isGone(item);
+    const speaking = !gone && isSpeaking(item, index);
+    const position = shown.indexOf(item);
     const name = item.name || 'Interviewer';
     const presentingNow = index === presenterIndex;
     // While something is shared, the question and the code are what the candidate needs to see.
     // The interviewers have no video, so each shrinks to a chip in the bar above the stage:
     // picture, first name, and the blue ring when they speak.
     if (compact) {
-      return <section key={item.id || index} aria-label={name} title={name} data-speaking={speaking ? 'true' : 'false'} data-left={gone ? 'true' : 'false'} data-presenting={presentingNow ? 'true' : undefined} data-chip="true" data-chip-tight={tightBar ? 'true' : undefined}
-        className={`${freshIds.includes(item.id) ? 'pc-rise ' : ''}flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[#3c4043] pl-1 outline outline-2 -outline-offset-2 transition-[outline-color] duration-200 ${tightBar ? 'pr-1' : 'pr-3'} ${speaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
-        <Avatar person={item} className={`h-6 w-6 shrink-0 text-[11px] transition-opacity duration-300 ${gone ? 'opacity-30' : ''}`} />
+      return <section key={item.id || index} aria-label={name} title={name} data-speaking={speaking ? 'true' : 'false'} data-presenting={presentingNow ? 'true' : undefined} data-chip="true" data-chip-tight={tightBar ? 'true' : undefined}
+        className={`${gone ? 'pc-leave ' : freshIds.includes(item.id) ? 'pc-rise ' : ''}flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[#3c4043] pl-1 outline outline-2 -outline-offset-2 transition-[outline-color] duration-200 ${tightBar ? 'pr-1' : 'pr-3'} ${speaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
+        <Avatar person={item} className="h-6 w-6 shrink-0 text-[11px]" />
         <p className={tightBar ? 'sr-only' : 'text-xs font-medium text-white'}>{firstNameOf(item) || name}{speaking && <span className="sr-only"> speaking</span>}</p>
       </section>;
     }
     // In the grid the candidate's own picture floats over the bottom right corner, so with three
     // or more tiles the last tile carries its name at the top instead of under that picture.
-    const labelTop = !compact && participants.length >= 3 && index === participants.length - 1;
-    return <section key={item.id || index} aria-label={name} data-speaking={speaking ? 'true' : 'false'} data-left={gone ? 'true' : 'false'} data-presenting={presentingNow ? 'true' : undefined}
-      className={`${freshIds.includes(item.id) ? 'pc-rise ' : ''}relative grid min-h-0 place-items-center overflow-hidden rounded-xl bg-[#3c4043] outline outline-[3px] -outline-offset-[3px] transition-[outline-color] duration-200 ${compact ? 'min-w-0 flex-1 basis-0 md:max-h-32' : layout.tile(index)} ${speaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
-      <Avatar person={item} className={`${compact ? 'h-10 w-10 text-sm' : layout.avatar} transition-[box-shadow,opacity] duration-300 ${speaking ? 'shadow-[0_0_0_10px_rgba(138,180,248,0.18)]' : ''} ${gone ? 'opacity-30' : ''}`} />
+    const labelTop = !compact && shown.length >= 3 && position === shown.length - 1;
+    return <section key={item.id || index} aria-label={name} data-speaking={speaking ? 'true' : 'false'} data-presenting={presentingNow ? 'true' : undefined}
+      className={`${gone ? 'pc-leave ' : freshIds.includes(item.id) ? 'pc-rise ' : ''}relative grid min-h-0 place-items-center overflow-hidden rounded-xl bg-[#3c4043] outline outline-[3px] -outline-offset-[3px] transition-[outline-color] duration-200 ${compact ? 'min-w-0 flex-1 basis-0 md:max-h-32' : layout.tile(position)} ${speaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
+      <Avatar person={item} className={`${compact ? 'h-10 w-10 text-sm' : layout.avatar} transition-[box-shadow,opacity] duration-300 ${speaking ? 'shadow-[0_0_0_10px_rgba(138,180,248,0.18)]' : ''}`} />
       {speaking && <SpeakingBadge small={compact} />}
       <p data-label-top={labelTop ? 'true' : undefined} className={`absolute truncate font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)] ${compact ? 'bottom-1.5 left-2 right-2 text-xs' : labelTop ? 'left-4 right-14 top-3 text-sm' : 'bottom-3 left-4 right-4 text-sm'}`}>{name}{speaking && <span className="sr-only"> speaking</span>}{item.role && !compact && <span className="block truncate text-xs font-normal text-[#e8eaed]/80">{item.role}</span>}</p>
     </section>;
@@ -217,8 +243,8 @@ export default function InCall({ state, api }) {
                     <MonitorUp size={14} className="shrink-0" aria-hidden="true" /><span className="truncate">{`${presenterName} is presenting`}</span>
                   </p>
                   : <span className="min-w-0 flex-1" />}
-                <div data-strip="true" data-tiles={participants.length} className="flex shrink-0 items-center gap-1.5">
-                  {participants.map((item, index) => renderTile(item, index, true))}
+                <div data-strip="true" data-tiles={shown.length} className="flex shrink-0 items-center gap-1.5">
+                  {participants.map((item, index) => (shown.includes(item) ? renderTile(item, index, true) : null))}
                 </div>
                 {!cameraOn && <p data-chip="you" aria-hidden="true" className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[#3c4043] pl-1 text-xs font-medium text-white ${tightBar && !muted ? 'pr-1' : 'pr-3'}`}>
                   <span className="grid h-6 w-6 place-items-center rounded-full bg-[#00796b] text-[9px]">You</span>{muted ? <MicOff size={12} /> : tightBar ? null : 'You'}
@@ -230,20 +256,20 @@ export default function InCall({ state, api }) {
                   onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}
               </div>
             </div>
-            : <div data-layout="grid" data-tiles={participants.length} className={`grid h-full gap-3 ${layout.grid}`}>
-              {participants.map((item, index) => renderTile(item, index, false))}
+            : <div data-layout="grid" data-tiles={shown.length} className={`grid h-full gap-3 ${layout.grid}`}>
+              {participants.map((item, index) => (shown.includes(item) ? renderTile(item, index, false) : null))}
             </div>}
-          {interviewerLeft && <p role="status" aria-label={panelCall ? 'Everyone left' : `${leadName} left`} className="pc-rise absolute bottom-16 left-4 z-10 rounded-lg bg-[#202124]/90 px-4 py-2.5 text-sm text-white shadow-lg">{connectionLost
+          {interviewerLeft && <p role="status" aria-label={panelCall ? 'Everyone left' : `${leadName} left`} className="pc-rise absolute bottom-16 left-4 z-20 rounded-lg bg-[#202124]/90 px-4 py-2.5 text-sm text-white shadow-lg">{connectionLost
             ? (panelCall ? "Everyone else lost their connection. You're the only one here." : `${leadName} lost their connection. You're the only one here.`)
             : (panelCall ? "Everyone left the call. You're the only one here." : `${leadName} left the call. You're the only one here.`)}</p>}
           {joinToast && <p key={joinToast.key} role="status" aria-label="Participant joined" data-testid="join-toast" className="pc-rise absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full bg-[#202124]/90 px-4 py-2 text-sm text-white shadow-lg">{joinToast.name} joined</p>}
-          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'}
-            className={`absolute z-10 grid aspect-video place-items-center ${presenting ? (cameraOn ? 'bottom-2 right-2 w-32' : 'hidden') : 'bottom-3 right-3 w-[22%] min-w-36 max-w-60'} overflow-hidden rounded-xl bg-[#4a4e51] shadow-[0_2px_10px_rgba(0,0,0,0.45)]`}>
+          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'} data-self={alone && !presenting ? 'full' : 'corner'}
+            className={`absolute z-10 grid place-items-center ${presenting ? (cameraOn ? 'bottom-2 right-2 aspect-video w-32' : 'hidden') : alone ? 'pc-expand inset-0' : 'bottom-3 right-3 aspect-video w-[22%] min-w-36 max-w-60'} overflow-hidden rounded-xl bg-[#4a4e51] shadow-[0_2px_10px_rgba(0,0,0,0.45)]`}>
             {cameraOn && <video ref={videoRef} autoPlay playsInline muted aria-label="Local camera preview" className="h-full w-full -scale-x-100 object-cover" />}
-            {!cameraOn && <div className="grid h-12 w-12 place-items-center rounded-full bg-[#00796b] text-base font-medium text-white" aria-hidden="true">You</div>}
+            {!cameraOn && <div className={`grid place-items-center rounded-full bg-[#00796b] font-medium text-white ${alone && !presenting ? 'h-28 w-28 text-3xl' : 'h-12 w-12 text-base'}`} aria-hidden="true">You</div>}
             {!cameraOn && <span className="sr-only">Camera off</span>}
             {muted && <span aria-hidden="true" className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full bg-[#202124]/70 text-white"><MicOff size={13} /></span>}
-            <p className="absolute bottom-1.5 left-2 text-xs font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">You</p>
+            <p className={`absolute font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)] ${alone && !presenting ? 'bottom-3 left-4 text-sm' : 'bottom-1.5 left-2 text-xs'}`}>You</p>
           </section>
         </div>
         {notice && <p role="alert" data-testid="call-notice" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-xs text-[#fdd663]">{notice}</p>}
