@@ -35,6 +35,16 @@ test('the prompt carries the career text, listing, role, name, notes, pad and th
   assert(prompt.trim().endsWith('Your reply:'));
 });
 
+test('the prompt keeps the candidate in character and lets it make up what the documents do not cover', () => {
+  const prompt = draftAnswerPrompt(CONTEXT);
+  assert(prompt.includes('Stay in character the whole time.'));
+  assert(prompt.includes('never mention documents, notes'));
+  assert(prompt.includes('make up plausible, specific details'));
+  assert(prompt.includes('consistent with the documents'));
+  assert(!/do not invent/iu.test(prompt), 'no rule against inventing detail');
+  assert(!/say so plainly/iu.test(prompt), 'no rule telling it to admit the documents lack an answer');
+});
+
 test('a closed pad, an empty conversation and a missing name still make a prompt', () => {
   const prompt = draftAnswerPrompt({ ...CONTEXT, pad: { open: false, text: 'hidden' }, transcript: [], candidateName: '' });
   assert(!prompt.includes('hidden'));

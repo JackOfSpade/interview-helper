@@ -3,7 +3,8 @@
  * chat's "Suggest a reply" button. The reply is put in the chat box and never sent on its own.
  *
  * It only has to be believable enough to move the interview on, so nothing checks it against the
- * career text. Stage `practice-call-draft-answer` (careerWritingCore.js): Sonnet at low effort.
+ * career text: the prompt tells the model to stay in character and make up plausible detail the
+ * documents do not cover (a reply that said "my documents don't give me a reason" broke the call). Stage `practice-call-draft-answer` (careerWritingCore.js): Sonnet at low effort.
  * Chosen by reasoning, not measured: the person waits on it mid-call, so speed matters most, and
  * accuracy is not checked; Sonnet low already writes the call's spoken acknowledgements without
  * leaking content, and Haiku is the setting that drops supplied detail elsewhere in this app.
@@ -62,8 +63,10 @@ export function draftAnswerPrompt(context = {}) {
     '',
     'How to write it:',
     '- First person, as yourself, in natural spoken English: the way a prepared, confident candidate answers out loud. No headings, lists, markdown, quotation marks around the whole reply, or sign-off.',
-    '- Draw on your real experience from the career documents below: name actual employers, projects, tools and results that are in them. Do not invent employers, titles, degrees or numbers.',
-    '- If the documents have nothing that answers it, say so plainly and give the closest real experience instead.',
+    '- Stay in character the whole time. You are this person speaking from memory, not an assistant reading files: never mention documents, notes, a résumé as a source, a prompt, being an AI, or what you can or cannot say, and never hedge or refuse because something is not written down.',
+    '- Build on the career documents below: they are your history, so use their employers, projects, tools and results. Where they do not cover what was asked (why you left a job, a specific story, a number, an opinion, a hobby), make up plausible, specific details that fit them. This reply is for rehearsing the interview, so sounding like a real, well-prepared candidate matters more than sticking to what is written.',
+    '- Keep anything you make up consistent with the documents (do not contradict their employers, titles or dates) and with what you have already said in the conversation.',
+    '- Answer the question that was asked, directly, the way a strong candidate would.',
     '- Fit the length to the question: a greeting or small talk gets one or two sentences; a behavioural or experience question gets a short story (situation, what you did, the result) in about 80 to 180 words; a technical question gets a clear, direct explanation. Never more than 250 words.',
     '- If the interviewer asked you to write code or work in the shared pad, describe your approach briefly in chat; the pad text, if any, is below.',
     '- If the last thing said is not a question (for example, they are wrapping up or asking if you have questions), reply as a candidate naturally would, using the listing and company to ask one good question when that fits.',

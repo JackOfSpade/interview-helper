@@ -308,7 +308,11 @@ listing text of the prepared application, the brief, the submitted résumé and
 cover letter, the prepared Q&A answers, the open pad and the last 40 turns of
 the conversation (`electron/practiceCall/draftAnswer.js`, `draftAnswer` in
 `callService.js`, window channel `draft-answer`). Nothing checks it against
-the career text: it only has to move the interview on for manual testing.
+the career text: it only has to move the interview on for manual testing. The
+prompt keeps the candidate in character (never mentioning documents, notes or
+what it can say) and has it make up plausible detail the documents do not
+cover, consistent with them and with the conversation (2026-11-20, after a
+reply said "my documents don't give me" a reason).
 Stage `practice-call-draft-answer`, Sonnet at low effort, chosen by reasoning
 and not measured (the person waits on it mid-call and accuracy is not
 checked). While it is being written the candidate counts as typing, so the
