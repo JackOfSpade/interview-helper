@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const PREFIX = 'practice-call-window:';
 const MAX_CHAT = 2000;
 const MAX_PAD = 20000;
+const MAX_EVENT_LINE = 600;
 
 function fail(message) { throw new TypeError(`practiceCallAPI: ${message}`); }
 function booleanArg(value, name) { if (typeof value !== 'boolean') fail(`${name} expects a boolean`); return value; }
@@ -49,6 +50,8 @@ const practiceCallAPI = Object.freeze({
   deleteRecording: () => invoke('delete-recording'),
   openMicrophoneSettings: () => invoke('open-microphone-settings'),
   close: () => invoke('close'),
+  // One line of the window's own event log (clicks, errors, console warnings) for the call's debug log.
+  logEvent: line => invoke('log-event', typeof line === 'string' ? line.slice(0, MAX_EVENT_LINE) : ''),
 });
 
 contextBridge.exposeInMainWorld('practiceCallAPI', practiceCallAPI);

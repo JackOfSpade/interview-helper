@@ -139,4 +139,33 @@ test('debug log counts and sizes are available for the data folder listing', asy
   assert.deepEqual(await store.debugLogStats(), { count: 3, bytes: 9 });
 });
 
+test('recentDiagnostics returns the newest calls with a debug log: the log text and the record as states and counts only', async () => {
+  const { store, rootDir } = await seedCalls(5);
+  await store.writeRecord('call-4', {
+    nodeId: 'n', startedAt: Date.now(), durationMs: 61_000, reason: 'candidate', persona: { name: 'Private Name' }, panel: [{ name: 'Other' }],
+    transcript: [{ speaker: 'interviewer', text: 'SECRET QUESTION' }, { speaker: 'candidate', text: 'SECRET ANSWER' }],
+    pickedQuestions: [1, 2], askedQuestions: [1], answeredQuestions: [1], steering: 'SECRET STEERING', feedbackSkipped: true,
+    timings: { setupLeadMs: 1200, answers: [1, 2], label: 'x' },
+  });
+  await store.writeAnalysis('call-4', { status: 'failed', error: 'feedback.planned has no entry for card 1 ("SECRET QUESTION")', chapters: [], feedback: null });
+  await writeFile(path.join(rootDir, 'call-4', 'debug.jsonl'), '{"event":"phase"}\n{"event":"warn"}\n');
+  const calls = await store.recentDiagnostics({ limit: 2 });
+  assert.deepEqual(calls.map(call => call.callId), ['call-4', 'call-3'], 'newest first, limited');
+  const [newest] = calls;
+  assert.equal(newest.text, '{"event":"phase"}\n{"event":"warn"}\n');
+  assert.equal(newest.hasAudio, true);
+  assert.deepEqual(newest.record, {
+    durationMs: 61_000, pausedMs: null, reason: 'candidate', endedBy: null, returnedCall: null, transcriptEntries: 2, candidateTurns: 1, interviewers: 2,
+    answeredQuestions: 1, setupAttempts: null, timings: { setupLeadMs: 1200 }, pickedQuestions: 2, askedQuestions: 1, feedbackSkipped: true, recordingPruned: false,
+  });
+  assert.equal(newest.analysis.status, 'failed');
+  assert.equal(newest.analysis.hasFeedback, false);
+  assert.doesNotMatch(JSON.stringify(newest.record), /SECRET|Private Name/u, 'no transcript, persona or steering text');
+  // A long log is read from its end, starting at a whole line.
+  await writeFile(path.join(rootDir, 'call-4', 'debug.jsonl'), `${'{"event":"old"}\n'.repeat(100)}{"event":"last"}\n`);
+  const [cut] = await store.recentDiagnostics({ limit: 1, maxBytes: 40 });
+  assert.equal(cut.truncated, true);
+  assert.deepEqual(cut.text.trim().split('\n').map(line => JSON.parse(line).event), ['old', 'last']);
+});
+
 export default cases;

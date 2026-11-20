@@ -7,8 +7,9 @@ import path from 'node:path';
 import {
   BUG_REPORT_COPY_CHANNEL, BUG_REPORT_DESCRIPTION_MAX, BUG_REPORT_MAX_AGE_MS, BUG_REPORT_RETENTION, BUG_REPORT_SAVE_CHANNEL,
   buildBugReportMarkdown, buildBugReportPointer, createBugReportService, createBugReportStore, interviewRows, listDataFolder,
-  normalizeBugReportPayload, redactReportText, registerBugReportHandlers, validateBugReportDescription,
+  callTimeline, debugLineForReport, normalizeBugReportPayload, redactReportText, registerBugReportHandlers, validateBugReportDescription,
 } from '../../electron/interviewApp/bugReport.js';
+import { callControlName } from '../../src/practice-call/callEventLog.js';
 import { controlName, eventLogSnapshot, installEventCapture, logEvent, resetEventLogForTest } from '../../src/utils/eventLog.js';
 import { buildMacApplication, readConfiguredMacSigningConfig, selectBuildTarget } from '../build-macos.mjs';
 
@@ -301,6 +302,123 @@ const tests = [
       for (let index = 0; index < 320; index += 1) logEvent('note', `x${index}`);
       assert.deepEqual([eventLogSnapshot().events.length, eventLogSnapshot().eventsDropped], [300, events.length + 20]);
       resetEventLogForTest();
+    },
+  },
+  {
+    name: 'practice calls: each recent call\'s debug log is a timeline with content reduced to sizes; notes, warnings and errors keep their text',
+    async run() {
+      const line = (up, ms, event, data) => JSON.stringify({ t: '2026-11-20T10:00:00.000Z', up, ms, event, ...(data ? { data } : {}) });
+      const debugText = [
+        line(5, null, 'start', { callId: 'call-1', args: { nodeId: 'n', canonicalJobUrl: 'https://jobs.hidden.test/1' }, steering: 'SECRET STEERING' }),
+        line(900, null, 'setup-timing', { name: 'voices', ms: 880 }),
+        line(1000, null, 'phase', { from: 'precheck', phase: 'ringing', elapsedMs: 0 }),
+        line(5000, 10, 'session-turn', { kind: 'main', message: 'SECRET PROMPT TO THE INTERVIEWER' }),
+        line(6000, 1000, 'engine', { type: 'caption', text: 'SECRET CAPTION', speaker: 'A', name: 'Private Interviewer' }),
+        line(7000, 2000, 'helper', { type: 'transcript', final: true, text: 'SECRET SPOKEN ANSWER', segmentId: 4 }),
+        line(8000, 3000, 'user', { action: 'chat', text: 'SECRET CHAT' }),
+        line(8100, 3100, 'window', { line: '[2026-11-20T10:00:08.000Z] click "Hang up"' }),
+        line(9000, 4000, 'warn', { message: '[PracticeCall] session restarted: timeout at /Users/someone/Library/x.js' }),
+        line(9500, 4500, 'fail', { code: 'precheck-failed', message: 'helper exited 1', stack: 'Error: helper exited 1\n at /Users/someone/app.js:1:1' }),
+        line(12000, null, 'analysis-review-reply', { attempt: 1, ms: 52000, outcome: 'rejected', error: 'feedback.planned has no entry for card 1 ("SECRET QUESTION"), which the call asked', keys: ['feedback', 'chapters'] }),
+        line(13000, null, 'analysis-done', { status: 'ready', ms: 61000, chapters: 4 }),
+        '{not json',
+      ].join('\n');
+      const markdown = await buildBugReportMarkdown({ payload: {}, now: Date.parse('2026-11-20T10:05:00.000Z'), sources: sources({
+        practiceCalls: () => ({
+          logStats: { count: 2, bytes: 4096 },
+          calls: [
+            { callId: 'call-1', startedAt: Date.parse('2026-11-20T10:00:00.000Z'), bytes: debugText.length, text: debugText, hasAudio: true,
+              record: { durationMs: 300_000, reason: 'candidate', transcriptEntries: 12, candidateTurns: 6, interviewers: 2, pickedQuestions: 5, askedQuestions: 4, answeredQuestions: 3, feedbackSkipped: false, timings: { setupLeadMs: 4200 } },
+              analysis: { status: 'failed', error: 'feedback.planned marks card 2 ("SECRET OTHER QUESTION") as not asked', chapters: 0, hasFeedback: false } },
+            { callId: 'call-0', startedAt: null, bytes: 0, text: null, record: null, analysis: null },
+          ],
+          windowEvents: { events: ['[2026-11-20T10:00:01.000Z] screen in-call', '[2026-11-20T10:00:02.000Z] ERROR console: failed "SECRET QUOTE"'], eventsDropped: 3 },
+        }),
+      }) });
+      const section = markdown.slice(markdown.indexOf('## Practice calls'), markdown.indexOf('## Messages on screen'));
+      assert.ok(markdown.indexOf('## Practice calls') > markdown.indexOf('## Data folder'));
+      for (const secret of ['SECRET', 'Private Interviewer', 'jobs.hidden.test', '/Users/someone']) assert.ok(!section.includes(secret), `${secret} stays out of the report`);
+      for (const needle of [
+        '- Debug logs on disk: 2 · 4,096 bytes',
+        '### Call 1 (newest): started 2026-11-20T10:00:00.000Z (300s ago)',
+        'length 300s · ended candidate · 12 transcript entries (6 the candidate\'s) · 2 interviewer(s) · questions picked 5, asked 4, answered 3 · feedback skipped no · recording kept',
+        '- Timings: setupLeadMs 4200',
+        '- Review: failed · 0 chapter(s) · feedback no · error: feedback.planned marks card 2 ("…") as not asked',
+        'lines by event:',
+        '1 unreadable line(s)',
+        'setup-timing {"name":"voices","ms":880}',
+        'phase {"from":"precheck","phase":"ringing","elapsedMs":0}',
+        'session-turn {"kind":"main","message":"‹32 chars›"}',
+        'engine {"type":"caption","text":"‹14 chars›","speaker":"A","name":"‹19 chars›"}',
+        'user {"action":"chat","text":"‹11 chars›"}',
+        'window {"line":"[2026-11-20T10:00:08.000Z] click \\"Hang up\\""}',
+        '+8.1s call 3.1s window',
+        'ERROR console: failed "…"',
+        'warn {"message":"[PracticeCall] session restarted: timeout at <local-path>"}',
+        'fail {"code":"precheck-failed","message":"helper exited 1"',
+        'analysis-review-reply {"attempt":1,"ms":52000,"outcome":"rejected","error":"feedback.planned has no entry for card 1 (\\"…\\"), which the call asked","keys":["feedback","chapters"]}',
+        'analysis-done {"status":"ready","ms":61000,"chapters":4}',
+        '### Call 2: started unknown',
+        '- Record: none',
+        '- The debug log could not be read.',
+        '### Call window events (2, 3 older dropped)',
+        'screen in-call',
+      ]) assert.ok(section.includes(needle), `the practice call section shows ${needle}`);
+      assert.ok(section.includes('start {"callId":"‹6 chars›","args":{"nodeId":"‹1 chars›","canonicalJobUrl":"‹26 chars›"},"steering":"‹15 chars›"}'));
+      // No call at all, or no practice call service, still writes the section.
+      const empty = await buildBugReportMarkdown({ payload: {}, sources: sources({ practiceCalls: () => ({ calls: [] }) }) });
+      assert.match(empty, /## Practice calls[\s\S]*- No practice call has a debug log\.[\s\S]*### Call window events \(0\)/u);
+    },
+  },
+  {
+    name: 'practice calls: text is shown only under known code keys, and quoted questions are dropped whole',
+    async run() {
+      const shaped = (event, data) => debugLineForReport(JSON.stringify({ up: 1500, event, data })).text;
+      // A cut-off reply of one word is still interviewer speech.
+      assert.equal(shaped('engine', { type: 'interrupted', heardText: 'Salesforce.' }), '+1.5s engine {"type":"interrupted","heardText":"‹11 chars›"}');
+      assert.equal(shaped('engine', { type: 'pad', open: true, lang: 'python' }), '+1.5s engine {"type":"pad","open":true,"lang":"python"}');
+      assert.equal(shaped('x', { tags: ['Google', 'Meta'], map: { 'What is your SECRET?': 1, ok: 2 } }), '+1.5s x {"tags":["‹6 chars›","‹4 chars›"],"map":{"ok":2,"‹other keys›":1}}');
+      // A note ending in JSON is shaped field by field, escaped quotes and all.
+      const plan = shaped('note', { message: `plan ${JSON.stringify({ ms: 60000, kind: 'panel', unprepared: [{ text: 'Explain "SECRET" in Acme Corp' }] })}` });
+      assert.ok(!plan.includes('SECRET') && !plan.includes('Acme'), plan);
+      assert.ok(plan.includes('\\"kind\\":\\"panel\\"') && plan.includes('\\"text\\":\\"‹29 chars›\\"'), plan);
+      // analyzeCall sets a question in «» so it goes whole, whatever quotes it holds.
+      const rejected = shaped('analysis-review-reply', { outcome: 'rejected', error: 'feedback.planned marks card 2 («What does "SECRET" mean») as not asked' });
+      assert.ok(rejected.includes('card 2 («…») as not asked') && !rejected.includes('SECRET'), rejected);
+      const single = shaped('warn', { message: "review quoted 'SECRET project' wrongly; it's fine" });
+      assert.ok(single.includes("quoted '…' wrongly; it's fine"), single);
+      const escaped = shaped('warn', { message: 'bad reply: {"q":"a \\"SECRET\\" b"}' });
+      assert.ok(!escaped.includes('SECRET'), escaped);
+    },
+  },
+  {
+    name: 'practice calls: a long call keeps every important line and the newest routine lines',
+    async run() {
+      const lines = [];
+      for (let index = 0; index < 2000; index += 1) lines.push(JSON.stringify({ up: index, ms: index, event: 'engine', data: { type: 'timing', n: index } }));
+      lines.splice(10, 0, JSON.stringify({ up: 10, event: 'warn', data: { message: 'early warning' } }));
+      lines.push(JSON.stringify({ up: 3000, event: 'analysis-done', data: { status: 'ready' } }));
+      const timeline = callTimeline(lines.join('\n'), 100);
+      assert.equal(timeline.lines.length, 100);
+      assert.equal(timeline.dropped, 1902);
+      assert.ok(timeline.lines.some(text => text.includes('early warning')), 'an early warning survives');
+      assert.ok(timeline.lines.at(-1).includes('analysis-done'));
+      assert.ok(timeline.lines.at(-2).includes('"n":1999'), 'the newest routine lines are kept');
+      assert.deepEqual(timeline.counts, { engine: 2000, warn: 1, 'analysis-done': 1 });
+      assert.equal(debugLineForReport('[]'), null);
+      assert.equal(debugLineForReport('{"event":"x"}').text, '+? x');
+    },
+  },
+  {
+    name: 'practice calls: the call window names a pressed control only from a fixed set of names',
+    async run() {
+      const control = (label, text = '') => ({ getAttribute: name => (name === 'aria-label' ? label : null), textContent: text });
+      assert.equal(callControlName(control('Hang up')), 'Hang up');
+      assert.equal(callControlName(control(null, "I'm ready")), "I'm ready");
+      assert.equal(callControlName(control('Seek to Tell me about a SECRET project at 01:02')), 'Seek to a moment');
+      assert.equal(callControlName(control('Current chapter: SECRET. Show chapters')), 'Show chapters');
+      assert.equal(callControlName(control(null, 'SECRET transcript turn')), '(a control)');
+      assert.equal(callControlName(control('SECRET')), '(a control)');
     },
   },
   {

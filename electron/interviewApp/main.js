@@ -29,7 +29,7 @@ import { interviewAppDataRoots } from './dataRoots.js';
 import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
 import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
-import { BUG_REPORT_DIRECTORY, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
+import { BUG_REPORT_DIRECTORY, REPORT_CALLS, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { attachContextMenu } from './contextMenu.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
@@ -389,6 +389,16 @@ if (!app.requestSingleInstanceLock()) {
           activeTasks: () => snapshotActiveNodeTasks(),
           handoffs: () => getNonApiAiHandoffLifecycleSnapshot(),
           dataFolder: () => listDataFolder(roots.data),
+          // The newest calls' debug logs (content reduced to sizes in bugReport.js) and the call window's events.
+          practiceCalls: async () => {
+            const store = practiceCallController?.store;
+            if (!store) return { calls: [], windowEvents: practiceCallController?.windowEvents?.() ?? null, logStats: null };
+            const [calls, logStats] = await Promise.all([
+              store.recentDiagnostics?.({ limit: REPORT_CALLS }) ?? [],
+              store.debugLogStats?.().catch(() => null) ?? null,
+            ]);
+            return { calls, windowEvents: practiceCallController.windowEvents?.() ?? null, logStats };
+          },
           logs: () => getRecentLogs(500),
         },
       }),

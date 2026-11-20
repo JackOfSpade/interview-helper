@@ -10,8 +10,10 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'ready', 'answer', 'decline', 'call-back', 'cancel-call-back', 'hang-up', 'leave', 'choose-feedback', 'set-muted', 'send-chat',
-  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
+  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close', 'log-event',
 ]);
+// The call window's own event lines kept for bug reports (newest last), in memory only.
+const WINDOW_EVENTS_KEPT = 300;
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
 const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing']);
@@ -69,6 +71,8 @@ export function createPracticeCallController(deps = {}) {
   const registerIpc = deps.registerIpc !== false;
   const getOwner = deps.getOwner ?? (() => null);
   let win = null;
+  const windowEvents = [];
+  let windowEventsDropped = 0;
   let current = null;
   // R10: the mode is read when the window closes, so it must follow window reuse.
   let winMode = null;
@@ -187,6 +191,14 @@ export function createPracticeCallController(deps = {}) {
     // Off unless the app passes it in: a unit suite must never open System Settings.
     async [WINDOW_PREFIX + 'open-microphone-settings']() { return typeof deps.openMicrophoneSettings === 'function' ? Boolean(await deps.openMicrophoneSettings()) : false; },
     async [WINDOW_PREFIX + 'close']() { if (windowAlive()) win.close(); return null; },
+    async [WINDOW_PREFIX + 'log-event'](line) {
+      if (typeof line !== 'string' || !line) return null;
+      const text = line.slice(0, 600);
+      windowEvents.push(text);
+      if (windowEvents.length > WINDOW_EVENTS_KEPT) { windowEvents.shift(); windowEventsDropped += 1; }
+      try { service.logWindowEvent?.(text); } catch { /* diagnostics only */ }
+      return null;
+    },
   };
   if (registerIpc) {
     ipcMain.handle('practice-call:start', guardCanvas(async args => {
@@ -257,6 +269,8 @@ export function createPracticeCallController(deps = {}) {
 
   return Object.freeze({
     service, store, openWindow, shutdown,
+    /** The call window's recent event lines (all windows since the app started), for bug reports. */
+    windowEvents: () => ({ events: [...windowEvents], eventsDropped: windowEventsDropped }),
     getWindow: () => (windowAlive() ? win : null),
     dispose() {
       if (registerIpc) {

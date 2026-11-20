@@ -113,6 +113,56 @@ export default [
       assert.deepEqual(leftovers, [], 'no temp file is left behind');
     } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
   } },
+  { name: 'practice call analysis: every step is reported to onEvent with sizes, durations and errors, never content', async run() {
+    const dir = await tempDir();
+    try {
+      let tick = 0;
+      const events = [];
+      let replies = 0;
+      const result = await analyzeCall({ callDir: dir, callRecord, plan, brief, deps: {
+        clock: () => (tick += 100),
+        onEvent: (name, fields) => events.push([name, fields]),
+        transcribe: () => ({ words }),
+        metrics: () => metrics,
+        // The first reply anchors a chapter nowhere; the retry is accepted.
+        callText: () => ((replies += 1) === 1 ? { ...review, chapters: [{ questionTurnIndex: 99, title: 'Nowhere' }] } : review),
+      } });
+      assert.equal(result.analysis.status, 'ready');
+      assert.deepEqual(events.map(([name]) => name), ['begin', 'answers', 'transcription', 'metrics', 'words-by-answer', 'picked', 'review-request', 'review-reply', 'review-request', 'review-reply', 'done']);
+      const byName = name => events.filter(([event]) => event === name).map(([, fields]) => fields);
+      assert.deepEqual(byName('transcription')[0], { ms: 100, words: 3 });
+      assert.equal(byName('review-request')[0].attempt, 1);
+      assert.equal(byName('review-request')[1].correction, true, 'the retry carries the correction');
+      assert.ok(byName('review-request')[0].promptChars > 1000);
+      const [rejected, accepted] = byName('review-reply');
+      assert.equal(rejected.outcome, 'rejected');
+      assert.match(rejected.error, /chapters: 99 is not a transcript turn index/u);
+      assert.equal(accepted.outcome, 'accepted');
+      assert.equal(accepted.keptChapters, 2);
+      assert.equal(byName('done')[0].status, 'ready');
+      const text = JSON.stringify(events.filter(([name]) => name !== 'review-reply'));
+      assert.doesNotMatch(text, /checkout systems|Calm and specific|Motivation|Discord/u, 'no transcript, feedback, chapter or brief text');
+    } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+  } },
+  { name: 'practice call analysis: a failing transcription, metrics and review call are each reported, and a throwing listener changes nothing', async run() {
+    const dir = await tempDir();
+    try {
+      const events = [];
+      const result = await analyzeCall({ callDir: dir, callRecord, plan, brief, deps: {
+        onEvent: (name, fields) => { events.push([name, fields]); throw new Error('listener broke'); },
+        transcribe: () => { throw Object.assign(new Error('scribe down'), { status: 503 }); },
+        metrics: () => { throw new Error('metrics broke'); },
+        callText: () => { throw new Error('claude down'); },
+      } });
+      assert.equal(result.analysis.status, 'failed');
+      const fields = name => events.find(([event]) => event === name)?.[1];
+      assert.deepEqual([fields('transcription').failed, fields('transcription').error, fields('transcription').status], [true, 'scribe down', 503]);
+      assert.equal(fields('metrics').error, 'metrics broke');
+      assert.deepEqual(events.filter(([name]) => name === 'review-reply').map(([, value]) => value.outcome), ['call-failed', 'call-failed']);
+      assert.equal(fields('done').status, 'failed');
+      assert.match(fields('done').error, /claude down/u);
+    } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+  } },
   { name: 'practice call analysis: Scribe failure still reviews, and the prompt says the words are missing', async run() {
     const dir = await tempDir();
     try {
@@ -505,7 +555,7 @@ export default [
         const forced = check([entry('Alpha?', true), entry('Gamma?', true, { askedAs: 'x', improve: 'y' })]);
         assert.deepEqual(forced.review.feedback.planned[1], { question: 'Gamma?', asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' }, 'an unasked card keeps no judgement');
         assert.equal(forced.review.feedback.planned.length, 2, 'the unprepared entry is not invented');
-        assert.match(check([entry('Gamma?', false)]).error, /no entry for card 1 \("Alpha\?"\), which the call asked/u);
+        assert.match(check([entry('Gamma?', false)]).error, /no entry for card 1 \(«Alpha\?»\), which the call asked/u);
         assert.ok(checkReview({ feedback: { ...base, planned: [entry('Anything', true)] }, chapters: [], moments: [] }, transcript).review, 'without a picked list nothing is held back');
         void pool;
       },

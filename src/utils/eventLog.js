@@ -7,6 +7,7 @@
 const MAX_LINES = 300;
 const MAX_LINE_CHARS = 500;
 const lines = [];
+const listeners = new Set();
 let dropped = 0;
 
 function describe(value) {
@@ -17,12 +18,21 @@ function describe(value) {
 
 export function logEvent(kind, ...details) {
   const text = details.map(describe).join(' ').replace(/\s+/gu, ' ').trim();
-  lines.push(`[${new Date().toISOString()}] ${kind}${text ? ` ${text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS - 1)}…` : text}` : ''}`);
+  const line = `[${new Date().toISOString()}] ${kind}${text ? ` ${text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS - 1)}…` : text}` : ''}`;
+  lines.push(line);
   if (lines.length > MAX_LINES) { lines.shift(); dropped += 1; }
+  for (const listener of listeners) { try { listener(line); } catch { /* a listener cannot break recording */ } }
+}
+
+/** Calls `listener(line)` for every later line (the practice call window forwards them). Returns a function that stops it. */
+export function onEventLine(listener) {
+  if (typeof listener !== 'function') return () => {};
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 export const eventLogSnapshot = () => ({ events: [...lines], eventsDropped: dropped });
-export function resetEventLogForTest() { lines.length = 0; dropped = 0; }
+export function resetEventLogForTest() { lines.length = 0; dropped = 0; listeners.clear(); }
 
 /** What a pressed control is called: its accessible name, else its visible text. */
 export function controlName(element) {
@@ -31,8 +41,11 @@ export function controlName(element) {
   return text.length > 60 ? `${text.slice(0, 59)}…` : text;
 }
 
-/** Starts recording in this window. Returns a function that stops it. */
-export function installEventCapture(target = window) {
+/**
+ * Starts recording in this window. Returns a function that stops it. `nameControl(control)` names a
+ * pressed control instead of the default (a window whose buttons can carry private text passes one).
+ */
+export function installEventCapture(target = window, { nameControl = null } = {}) {
   if (!target || target.__interviewEventCapture) return () => {};
   const onError = event => logEvent('ERROR', event?.error || event?.message || 'error');
   const onRejection = event => logEvent('ERROR unhandled rejection:', event?.reason ?? 'unknown');
@@ -41,7 +54,10 @@ export function installEventCapture(target = window) {
     if (!control) return;
     // Entries of the interview list are named after the interview; record the action, not the name.
     const inList = control.closest?.('[aria-label="Interviews"][role="listbox"]');
-    logEvent('click', inList ? '(an interview in the list)' : `"${controlName(control)}"`);
+    if (inList) { logEvent('click', '(an interview in the list)'); return; }
+    let name;
+    try { name = typeof nameControl === 'function' ? nameControl(control) : controlName(control); } catch { name = '(a control)'; }
+    logEvent('click', `"${name}"`);
   };
   target.addEventListener('error', onError);
   target.addEventListener('unhandledrejection', onRejection);

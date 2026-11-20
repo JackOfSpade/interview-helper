@@ -41,8 +41,44 @@ optional description and two actions, modelled on Infinite Canvas.
 - **What a report holds** (`electron/interviewApp/bugReport.js`): versions, open
   windows, each interview as states and counts, the Claude worker and its
   tasks, usage pauses, requests still running, AI step counts, the top level of
-  the data folder (names and sizes), status and error messages on screen, the
-  window's events and the main process log of this run.
+  the data folder (names and sizes), the newest practice calls (below), status
+  and error messages on screen, the window's events and the main process log of
+  this run.
+- **Practice calls (built 2026-11-20; unit-tested only, not yet seen in the
+  built app).** The section covers the newest 3 calls that have a `debug.jsonl`
+  (`callStore.recentDiagnostics`, the last 2 MB of each log). For each call it
+  gives the record as states and counts (length, how it ended, transcript
+  entries, interviewers, questions picked, asked and answered, feedback skipped,
+  recording kept or pruned, numeric timings), the review's status, chapter
+  count and error, and then the call's whole timeline: phases, setup steps,
+  planner attempts, engine and audio helper events, messages to the interviewer
+  sessions, the candidate's actions, the call window's events and each step of
+  the feedback review. Each line keeps its event name, numbers and booleans.
+  Text is shown only under a fixed list of code keys (`type`, `phase`,
+  `status`, `outcome`, `action`, `lang`...) and only when it has no spaces;
+  every other string becomes its length (`‹32 chars›`) and a map keyed by text
+  shows only how many keys it has. Notes, warnings, failures and errors keep
+  their text, redacted like the log, with quoted spans dropped whole («», double
+  quotes with escapes, curly and single quotes). A rejected review names its
+  question in «» for this. A note ending in JSON (`plan {...}`) has that JSON
+  shaped like event data. A call with more than 1,500 lines drops engine, helper
+  and session-turn lines oldest first. Also logged since 2026-11-20: the
+  recording step (`recording`: mixdown and encode durations, mixed length,
+  `call.m4a` size, and a warning when the encoder left no file), a call whose
+  wrap-up throws (`finish-failed` with the phase and stack, and a warning;
+  every caller drops that error), the practice history update
+  (`history-registry`), the end of the wrap-up (`wrapped-up`), a failed
+  analysis write (with its error code), and in the window, a recording that
+  fails to load or play. The plan summary note now gives the lengths of roles
+  and of the unprepared question instead of their text, and a planner problem
+  no longer quotes a panel member's role.
+  Then the last 300 lines of the practice call and replay windows' own events.
+- **Feedback generation is logged step by step** (`analyzeCall` `onEvent`, into
+  the call's `debug.jsonl` as `analysis-*`): the transcript and answer counts,
+  the transcription (words, duration, error and HTTP status), the metrics, the
+  picked cards, each review request (attempt, prompt size, model) and reply
+  (accepted with what was kept, rejected with the validation error, or the call
+  failing), and the result. Failures and rejected reviews also go to the app log.
 - **What it leaves out:** interview names, job links, file names of career
   data, career text, questions, answers, posting text and recordings. Log and
   event lines lose URL queries, local paths, credentials and opaque ids.
@@ -52,7 +88,13 @@ optional description and two actions, modelled on Infinite Canvas.
 - There are no filter codes: a report here is small enough to read whole.
 - Only the main window can ask for a report (`interview-app:copy-bug-report`,
   `interview-app:save-bug-report`). The cue card and practice call windows have
-  no button and their events are not recorded.
+  no button. The practice call window records its own clicks, screens, errors and
+  console warnings (`src/practice-call/callEventLog.js`) and sends each line over
+  `practice-call-window:log-event`; the main process adds it to the call's debug
+  log and keeps the last 300 in memory. A pressed control there is named only
+  from a fixed list (seek and chapter buttons, whose labels hold call content,
+  become "Seek to a moment" and "Show chapters"; anything else is "(a
+  control)"). The cue card's events are not recorded.
 
 ## Saving (2026-11-19)
 

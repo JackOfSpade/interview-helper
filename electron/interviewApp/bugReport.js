@@ -253,6 +253,170 @@ function mainLogSection({ logs }) {
   ].join('\n');
 }
 
+// ── Practice calls ───────────────────────────────────────────────────────────
+// Each call writes `debug.jsonl` (practiceCall/callDebugLog.js): phases, setup steps, engine and
+// audio helper events, the candidate's actions, the call window's own events and every step of the
+// feedback review. Those lines carry call content (captions, chat, what the interviewer was told), so
+// a report keeps only the shape of each line: event names, numbers, booleans, short codes and the
+// length of every other text. Notes, warnings and failures keep their text (redacted, quotes removed).
+
+export const REPORT_CALLS = 3;
+const MAX_CALL_LINES = 1500;
+// Text is shown only under these keys, and only as a short code (no spaces); every other string,
+// whatever its key, becomes its length. An allow-list, so a new event field never leaks by default.
+const CODE_KEYS = new Set([
+  'type', 'kind', 'phase', 'from', 'state', 'status', 'reason', 'requestedReason', 'outcome', 'code', 'action', 'speaker',
+  'speakerId', 'model', 'mainModel', 'effort', 'lang', 'stage', 'step', 'channel', 'mode', 'how', 'level', 'failure', 'voice',
+  'askedBy', 'skipped', 'feedback', 'missed', 'source', 'track', 'keys', 'interviewKind', 'endedBy', 'returnedCall', 'gate',
+]);
+// Keys an event uses for its own step names rather than content.
+const NAME_KEYS = Object.freeze({ 'setup-timing': new Set(['name']) });
+// Events whose message is diagnostic text (also in the app log), kept redacted.
+const MESSAGE_EVENTS = new Set(['note', 'warn', 'fail', 'window']);
+// High-volume events dropped first when a call has more lines than a report shows.
+const ROUTINE_EVENTS = new Set(['engine', 'helper', 'session-turn']);
+// Error text is diagnostic, but a rejected review names the question it is about.
+const ERROR_KEY = /^(?:error|errors|stack|metricsError|finalizeError|transcriptionError)$/u;
+const SHORT_CODE = /^[A-Za-z0-9_.+-]{1,48}$/u;
+
+// Quoted text is dropped whole: «» (how analyzeCall names a question, see quoteQuestion), double quotes
+// with escapes, curly quotes and single-quoted spans.
+const unquoted = value => String(value)
+  .replace(/«[^»]*»?/gu, '«…»')
+  .replace(/"(?:\\.|[^"\\\n])*"?/gu, '"…"')
+  .replace(/“[^”\n]*”?|‘[^’\n]*’?/gu, '"…"')
+  .replace(/(^|[\s(=:,[])'[^'\n]{2,}'(?=$|[\s),.;:\]])/gu, '$1\'…\'');
+// A click line names its control from a fixed set (src/practice-call/callEventLog.js), so its quotes stay.
+const windowLine = value => (/^\[[^\]]*\] click "[^"\n]*"$/u.test(String(value)) ? String(value) : unquoted(value));
+
+function shapeValue(value, key, depth) {
+  if (value === null || value === undefined) return value ?? null;
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (ERROR_KEY.test(key)) return reportLine(unquoted(value), 300);
+    return CODE_KEYS.has(key) && SHORT_CODE.test(value) ? value : `‹${value.length} chars›`;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= 3) return `‹${value.length} item(s)›`;
+    // Items of a list are judged by the list's own key (`keys: ['feedback', ...]`).
+    const items = value.slice(0, 12).map(item => shapeValue(item, key, depth + 1));
+    if (value.length > 12) items.push(`‹${value.length - 12} more›`);
+    return items;
+  }
+  if (typeof value === 'object') {
+    if (depth >= 3) return '‹…›';
+    const out = {};
+    let other = 0;
+    for (const [name, item] of Object.entries(value).slice(0, 30)) {
+      // A key is shown only when it reads as a field name; a map keyed by text is counted instead.
+      if (/^[A-Za-z][A-Za-z0-9_-]{0,40}$/u.test(name)) out[name] = shapeValue(item, name, depth + 1);
+      else other += 1;
+    }
+    if (other) out['‹other keys›'] = other;
+    return out;
+  }
+  return null;
+}
+
+/**
+ * A note, warning, failure or window line. A note that ends in JSON (`plan {...}`, `voices drawn [...]`)
+ * has that JSON shaped like any event's data; other text is redacted with quoted spans dropped.
+ */
+function messageText(event, value) {
+  if (event === 'window') return reportLine(windowLine(value), 500);
+  const json = event === 'note' ? String(value).match(/^([^{["]{1,80}?)\s*([[{][\s\S]*)$/u) : null;
+  if (json) {
+    try { return reportLine(`${unquoted(json[1])} ${JSON.stringify(shapeValue(JSON.parse(json[2]), '', 0))}`, 900); } catch { /* not JSON: plain text */ }
+  }
+  return reportLine(unquoted(value), 500);
+}
+
+/** One debug.jsonl line as a report line: `+up [ms] event data`, content reduced to sizes. */
+export function debugLineForReport(raw) {
+  let line;
+  try { line = JSON.parse(raw); } catch { return null; }
+  if (!line || typeof line !== 'object' || typeof line.event !== 'string') return null;
+  const event = code(line.event, /^[A-Za-z0-9_.:-]{1,60}$/u) || 'event';
+  const stamp = `+${Number.isFinite(line.up) ? `${(line.up / 1000).toFixed(1)}s` : '?'}${Number.isFinite(line.ms) ? ` call ${(line.ms / 1000).toFixed(1)}s` : ''}`;
+  let data = '';
+  if (line.data && typeof line.data === 'object') {
+    const shaped = {};
+    for (const [key, value] of Object.entries(line.data)) {
+      shaped[key] = MESSAGE_EVENTS.has(event) && typeof value === 'string' && /^(?:message|line|stack)$/u.test(key)
+        ? messageText(event, value)
+        : NAME_KEYS[event]?.has(key) && typeof value === 'string' && SHORT_CODE.test(value) ? value : shapeValue(value, key, 0);
+    }
+    try { data = JSON.stringify(shaped); } catch { data = '‹unreadable›'; }
+  }
+  return { event, routine: ROUTINE_EVENTS.has(event), text: reportLine(`${stamp} ${event}${data ? ` ${data}` : ''}`, 900) };
+}
+
+/** A call's timeline for the report: every line when it fits, else routine lines dropped oldest first. */
+export function callTimeline(text, max = MAX_CALL_LINES) {
+  const parsed = String(text || '').split('\n').filter(Boolean).map(debugLineForReport);
+  const lines = parsed.filter(Boolean);
+  const unreadable = parsed.length - lines.length;
+  const counts = {};
+  for (const entry of lines) counts[entry.event] = (counts[entry.event] || 0) + 1;
+  let kept = lines;
+  let dropped = 0;
+  if (lines.length > max) {
+    const important = lines.filter(entry => !entry.routine).length;
+    let routineRoom = Math.max(0, max - important);
+    const keep = new Array(lines.length).fill(false);
+    // The newest routine lines are nearest to where something went wrong; keep those.
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (!lines[index].routine) keep[index] = true;
+      else if (routineRoom > 0) { keep[index] = true; routineRoom -= 1; }
+    }
+    kept = lines.filter((_, index) => keep[index]);
+    // Still too many: the oldest are cut.
+    if (kept.length > max) kept = kept.slice(kept.length - max);
+    dropped = lines.length - kept.length;
+  }
+  return { lines: kept.map(entry => entry.text), dropped, unreadable, counts };
+}
+
+function practiceCallsSection({ calls, windowEvents, logStats, now }) {
+  const list = Array.isArray(calls) ? calls : [];
+  const yes = value => (value ? 'yes' : 'no');
+  const out = [
+    '## Practice calls',
+    `> The newest ${REPORT_CALLS} calls with a debug log, newest first: what the call record and review say (states and counts), then every line the call logged (phases, setup, engine and audio events, the candidate's actions, the call window's events and each feedback step). Text is reduced to its length; notes, warnings and errors keep theirs, with quoted text removed.`,
+  ];
+  if (logStats && Number.isFinite(logStats.count)) out.push(`- Debug logs on disk: ${count(logStats.count)} · ${count(logStats.bytes).toLocaleString('en-US')} bytes`);
+  if (!list.length) out.push('- No practice call has a debug log.');
+  list.forEach((call, position) => {
+    const record = call?.record;
+    const analysis = call?.analysis;
+    out.push('', `### Call ${position + 1}${position === 0 ? ' (newest)' : ''}: started ${isoTime(call?.startedAt)}${Number.isFinite(call?.startedAt) ? ` (${seconds(now - call.startedAt)} ago)` : ''}`);
+    out.push(record
+      ? `- Record: length ${seconds(record.durationMs)}${record.pausedMs ? ` · paused ${seconds(record.pausedMs)}` : ''} · ended ${code(record.reason) || 'unknown'}${record.endedBy ? ` (${code(record.endedBy) || 'other'})` : ''}${record.returnedCall ? ` · returned call (${code(record.returnedCall) || 'yes'})` : ''}`
+        + ` · ${count(record.transcriptEntries)} transcript entries (${count(record.candidateTurns)} the candidate's) · ${count(record.interviewers)} interviewer(s)`
+        + ` · questions picked ${count(record.pickedQuestions)}, asked ${count(record.askedQuestions)}, answered ${count(record.answeredQuestions)}`
+        + ` · feedback skipped ${yes(record.feedbackSkipped)} · recording ${call.hasAudio ? 'kept' : record.recordingPruned ? 'pruned' : 'none'}`
+      : '- Record: none (the call never reached its record: a setup that failed, a missed call, or a call still running).');
+    if (record?.timings && Object.keys(record.timings).length) {
+      out.push(`- Timings: ${Object.entries(record.timings).slice(0, 20).map(([key, value]) => `${code(key) || 'timing'} ${Math.round(value)}`).join(' · ')}`);
+    }
+    out.push(analysis
+      ? `- Review: ${code(analysis.status) || 'unknown'}${analysis.tooShort ? ' (too short to review)' : ''} · ${count(analysis.chapters)} chapter(s) · feedback ${yes(analysis.hasFeedback)}`
+        + `${analysis.error ? ` · error: ${reportLine(unquoted(analysis.error), 300)}` : ''}${analysis.metricsError ? ` · metrics error: ${reportLine(unquoted(analysis.metricsError), 200)}` : ''}`
+      : '- Review: none written.');
+    if (typeof call?.text !== 'string') { out.push('- The debug log could not be read.'); return; }
+    const timeline = callTimeline(call.text);
+    const counts = Object.entries(timeline.counts).sort((a, b) => b[1] - a[1]).map(([event, n]) => `${event} ${n}`).join(' · ');
+    out.push(`- Debug log: ${count(call.bytes).toLocaleString('en-US')} bytes${call.truncated ? ' (only its end is read)' : ''} · lines by event: ${counts || 'none'}`
+      + `${timeline.dropped ? ` · ${timeline.dropped} routine line(s) (engine, helper, session-turn) not shown, oldest first` : ''}${timeline.unreadable ? ` · ${timeline.unreadable} unreadable line(s)` : ''}`);
+    out.push('', timeline.lines.length ? codeBlock(timeline.lines) : '- Nothing logged.');
+  });
+  const events = Array.isArray(windowEvents?.events) ? windowEvents.events.filter(line => typeof line === 'string') : [];
+  out.push('', `### Call window events (${events.length}${count(windowEvents?.eventsDropped) ? `, ${count(windowEvents.eventsDropped)} older dropped` : ''})`,
+    '> Oldest first: buttons pressed (by fixed names only), screens shown, errors and console warnings in the practice call and replay windows since the app started.',
+    events.length ? codeBlock(events.map(line => reportLine(windowLine(line)))) : '- None recorded.');
+  return out.join('\n');
+}
+
 /** Lists the top level of the data folder without opening any file. */
 export async function listDataFolder(root) {
   const names = await fs.promises.readdir(root);
@@ -294,6 +458,10 @@ export async function buildBugReportMarkdown({ payload, sources = {}, now = Date
     await section('Requests still running in the app', async () => activeTasksSection({ tasks: await read('activeTasks') })),
     await section('AI steps since the app started', async () => handoffSection({ handoffs: await read('handoffs') })),
     await section('Data folder', async () => dataFolderSection({ entries: await read('dataFolder') })),
+    await section('Practice calls', async () => {
+      const practice = (await read('practiceCalls')) || {};
+      return practiceCallsSection({ calls: practice.calls, windowEvents: practice.windowEvents, logStats: practice.logStats, now });
+    }),
     await section('Messages on screen', async () => screenSection({ renderer })),
     await section('Window events', async () => rendererEventsSection({ renderer })),
     await section('App log', async () => mainLogSection({ logs: await read('logs') })),

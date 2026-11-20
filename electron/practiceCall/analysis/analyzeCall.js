@@ -50,6 +50,8 @@ export function wordsByAnswer(transcript, words) {
   return buckets;
 }
 
+// A question named in an error is set in «» so a bug report can drop it whole, whatever quotes it holds.
+const quoteQuestion = question => `«${String(question ?? '').replace(/[«»]/gu, '')}»`;
 const sameText = (left, right) => String(left ?? '').replace(/\s+/g, ' ').trim().toLowerCase() === String(right ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 /**
@@ -66,12 +68,12 @@ export function repairPlanned(planned, picked) {
     const hit = entries.find(entry => sameText(entry.question, card.question));
     if (!hit) {
       if (card.unprepared) continue;
-      if (card.asked !== false) return { error: `feedback.planned has no entry for card ${card.number} ("${card.question}"), which the call asked; list one entry per picked card` };
+      if (card.asked !== false) return { error: `feedback.planned has no entry for card ${card.number} (${quoteQuestion(card.question)}), which the call asked; list one entry per picked card` };
       out.push({ question: card.question, asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' });
       continue;
     }
     const asked = card.unprepared || card.asked === null ? hit.asked : card.asked;
-    if (asked && !hit.asked) return { error: `feedback.planned marks card ${card.number} ("${card.question}") as not asked, but the call asked it; judge the answer to it` };
+    if (asked && !hit.asked) return { error: `feedback.planned marks card ${card.number} (${quoteQuestion(card.question)}) as not asked, but the call asked it; judge the answer to it` };
     out.push(asked ? { ...hit, question: card.question, asked } : { question: card.question, asked: false, askedAs: '', score: null, covered: '', adapted: '', improve: '', extension: '' });
   }
   return { planned: out };
@@ -164,35 +166,57 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
 
   // Progress for the call window; a listener that throws never stops the analysis.
   const stage = name => { try { deps.onStage?.(name); } catch { /* display only */ } };
+  // Diagnostics for the call's debug log (and so bug reports): states, sizes, durations and error
+  // text, never transcript or feedback content. A listener that throws never stops the analysis.
+  const now = typeof deps.clock === 'function' ? deps.clock : () => Date.now();
+  const begun = now();
+  const elapsed = (from = begun) => Math.round(now() - from);
+  const event = (name, fields) => { try { deps.onEvent?.(name, fields); } catch { /* diagnostics only */ } };
+  event('begin', {
+    transcriptEntries: transcript.length, durationMs, planCards: list(plan).length,
+    hasBrief: !!brief, toneSamples: list(callRecord.toneSamples).length, prosodySamples: list(callRecord.candidateProsody).length,
+    clients: { transcribe: !!deps.transcribe, metrics: !!deps.metrics, callText: !!deps.callText },
+  });
 
   let words = [];
   let transcriptionError = null;
   // A call answered only by typing has a silent recording: there is nothing to transcribe,
   // and the review is told the call was typed rather than that transcription failed.
-  const nothingSpoken = candidateAnswerKinds(transcript).spoken === 0;
+  const answerKinds = candidateAnswerKinds(transcript);
+  const nothingSpoken = answerKinds.spoken === 0;
+  event('answers', { ...answerKinds });
   if (!nothingSpoken) {
     stage('transcribing');
+    const started = now();
     try {
       const scribed = await clients.transcribe({ path: path.join(callDir, 'candidate.wav') });
       words = list(scribed?.words);
+      event('transcription', { ms: elapsed(started), words: words.length });
     } catch (error) {
       // Scribe failing only costs the word-level view; the call still gets metrics and a review.
       transcriptionError = reason(error);
+      event('transcription', { ms: elapsed(started), failed: true, error: transcriptionError, code: error?.code ?? null, status: error?.status ?? null });
     }
+  } else {
+    event('transcription', { skipped: 'nothing-spoken' });
   }
   let metrics = null;
   let metricsError = null;
   stage('metrics');
+  const metricsStarted = now();
   try {
     metrics = await clients.metrics({
       transcript,
       candidateProsody: list(callRecord.candidateProsody),
       baselineSnapshot: callRecord.voiceBaseline ?? null,
     });
+    event('metrics', { ms: elapsed(metricsStarted), keys: metrics && typeof metrics === 'object' ? Object.keys(metrics).slice(0, 30) : [] });
   } catch (error) {
     metricsError = reason(error);
+    event('metrics', { ms: elapsed(metricsStarted), failed: true, error: metricsError });
   }
   const wordsByTurn = wordsByAnswer(transcript, words);
+  event('words-by-answer', { answersWithWords: Object.keys(wordsByTurn).length, wordsPlaced: Object.values(wordsByTurn).reduce((sum, bucket) => sum + bucket.length, 0), wordsTotal: words.length });
   // analysis.json key order follows the build doc.
   const compose = ({ status, chapters, fillers, error: failure }) => ({
     callId: callRecord.callId, status, createdAt, metrics, chapters,
@@ -202,26 +226,43 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   });
 
   const picked = pickedCards(callRecord, plan);
+  event('picked', {
+    cards: list(picked).length, asked: list(picked).filter(card => card?.asked === true).length,
+    unasked: list(picked).filter(card => card?.asked === false).length, unprepared: list(picked).some(card => card?.unprepared),
+    wholePlanPrompt: !(Array.isArray(picked) && picked.length),
+  });
   let checked = null;
   let error = null;
   stage('review');
   for (let attempt = 0; attempt <= MAX_FEEDBACK_RETRIES && !checked; attempt += 1) {
     const request = { prompt: buildReviewPrompt({ callRecord, plan, brief, metrics, wordsByTurn, transcriptionError, correction: error }),
       schema: REVIEW_SCHEMA, profile: REVIEW_PROFILE };
+    const started = now();
+    event('review-request', { attempt: attempt + 1, promptChars: request.prompt.length, correction: !!error, model: REVIEW_PROFILE.model, effort: REVIEW_PROFILE.effort });
     let raw;
     try {
       raw = await clients.callText(request);
     } catch (thrown) {
       error = `the review call failed: ${reason(thrown)}`;
+      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'call-failed', error, code: thrown?.code ?? null, status: thrown?.status ?? null });
       continue;
     }
+    const replyShape = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? { keys: Object.keys(raw).slice(0, 20), chapters: Array.isArray(raw.chapters) ? raw.chapters.length : null, moments: Array.isArray(raw.moments) ? raw.moments.length : null, planned: Array.isArray(raw.feedback?.planned) ? raw.feedback.planned.length : null }
+      : { type: Array.isArray(raw) ? 'array' : typeof raw };
     const checkedAttempt = checkReview(raw, transcript, picked);
-    if (checkedAttempt.review) checked = checkedAttempt.review;
-    else error = checkedAttempt.error;
+    if (checkedAttempt.review) {
+      checked = checkedAttempt.review;
+      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'accepted', ...replyShape, keptChapters: checked.chapters.length, keptMoments: checked.moments.length, keptPlanned: list(checked.feedback?.planned).length });
+    } else {
+      error = checkedAttempt.error;
+      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'rejected', error, ...replyShape });
+    }
   }
   if (!checked) {
     const analysis = compose({ status: 'failed', chapters: [], fillers: { total: 0, perMinute: 0, byAnswer: [] }, error });
     await writeAnalysis(callDir, analysis, deps);
+    event('done', { status: 'failed', ms: elapsed(), error });
     return { analysis, feedback: null };
   }
 
@@ -234,5 +275,6 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   });
   const analysis = compose({ status: 'ready', chapters, fillers: fillerTotals({ feedback: checked.feedback, moments: checked.moments, transcript, durationMs }) });
   await writeAnalysis(callDir, analysis, deps);
+  event('done', { status: 'ready', ms: elapsed(), chapters: chapters.length, fillers: analysis.fillers?.total ?? null, timelineMs, metricsError });
   return { analysis, feedback: { ...checked.feedback, callId: callRecord.callId } };
 }

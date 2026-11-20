@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { logEvent } from '../utils/eventLog.js';
 import { AlertTriangle, Pause, Play, Trash2 } from 'lucide-react';
 import { FeedbackView } from '../components/InterviewPracticePanel.jsx';
 import { replaySpeakerName } from './persona.js';
@@ -257,7 +258,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     if (playing) { try { audio.pause?.(); } catch { /* detached */ } setPlaying(false); return; }
     try {
       const started = audio.play?.();
-      if (started && typeof started.catch === 'function') started.catch(() => setPlaying(false));
+      if (started && typeof started.catch === 'function') started.catch((error) => { logEvent('WARN recording did not play:', error?.name || 'error', error?.message || ''); setPlaying(false); });
       setPlaying(true);
     } catch { setPlaying(false); }
   };

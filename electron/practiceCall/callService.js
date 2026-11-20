@@ -1077,10 +1077,10 @@ export function createPracticeCallService(deps = {}) {
     const plan = result.plan;
     dbg('plan-attempts', { attempts });
     note(`plan ${JSON.stringify({
-      ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, role: plan.lead?.role },
-      // The one question that is not from the pool, as the planner wrote it.
-      unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ text: question.text, askedBy: question.askedBy, minutes: question.minutes })),
-      panel: (plan.panel || []).map(member => ({ voice: member.voice, role: member.role })),
+      // Sizes only for the planner's own text (roles, the unprepared question): the app log goes into bug reports.
+      ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, roleChars: String(plan.lead?.role ?? '').length },
+      unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ textChars: String(question.text ?? '').length, askedBy: question.askedBy, minutes: question.minutes })),
+      panel: (plan.panel || []).map(member => ({ voice: member.voice, roleChars: String(member.role ?? '').length })),
       questions: (plan.questions || []).map(question => ({ number: question.number, askedBy: question.askedBy, minutes: question.minutes })),
       problems: (plan.problems || []).map(problem => problem.ref),
     })}`);
@@ -1968,11 +1968,15 @@ export function createPracticeCallService(deps = {}) {
       state.analysisStage = 'recording';
       setPhase('analyzing');
       let audio = false;
+      const recordingStartedAt = clock.now();
+      const recordingLog = { mixMs: null, encodeMs: null, mixedDurationMs: null, m4aBytes: null };
       try {
         if (finalizeError) throw finalizeError;
         const mixdown = await resolve('mixdown');
         const mixedPath = path.join(self.dir, 'call.wav');
         const mixed = await mixdown({ candidatePath: self.candidatePath, interviewerPath, outPath: mixedPath, fs: audioFs });
+        recordingLog.mixMs = Math.round(clock.now() - recordingStartedAt);
+        recordingLog.mixedDurationMs = Number.isFinite(Number(mixed?.durationMs)) ? Math.round(Number(mixed.durationMs)) : null;
         // The mix is as long as the timeline the transcript sits on, cut or not, so it is the length to show.
         record.durationMs = Math.max(0, Number(mixed?.durationMs)) || durationMs;
         const outPath = path.join(self.dir, 'call.m4a');
@@ -1980,12 +1984,16 @@ export function createPracticeCallService(deps = {}) {
         await afconvert(['-f', 'm4af', '-d', 'aac', '-b', '64000', mixedPath, outPath]);
         await fs.unlink(mixedPath).catch(() => {});
         const produced = await fs.lstat(outPath).catch(() => null);
+        recordingLog.encodeMs = Math.round(clock.now() - recordingStartedAt) - recordingLog.mixMs;
+        recordingLog.m4aBytes = produced?.size ?? null;
         audio = !!produced && produced.isFile() && !produced.isSymbolicLink();
+        if (!audio) warn('[PracticeCall] recording-missing: the encoder finished but call.m4a is not a regular file');
         await store.writeRecord(self.callId, record);
       } catch (error) {
         warn(`[PracticeCall] recording-failed: ${error?.message || error}`);
         state.error = errorState('recording-failed', 'The call recording could not be finished.');
       }
+      dbg('recording', { audio, ...recordingLog, ms: Math.round(clock.now() - recordingStartedAt), finalizeError: finalizeError?.message ?? null });
       let analysis = { status: 'failed', error: 'analysis unavailable' };
       let feedback = null;
       let analysisWritten = false;
@@ -2007,7 +2015,20 @@ export function createPracticeCallService(deps = {}) {
         };
         const produced = await analyze({
           callDir: self.dir, callRecord: record, plan: self.plan, brief: self.brief,
-          deps: { ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage },
+          deps: {
+            ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage,
+            clock: () => clock.now(),
+            // Each analysis step lands in debug.jsonl; failures and rejected reviews also go to the app log,
+            // with quoted text (a rejected review quotes the question) left out.
+            onEvent: (name, fields) => {
+              dbg(`analysis-${name}`, fields);
+              if (fields?.failed || fields?.outcome === 'rejected' || fields?.outcome === 'call-failed') {
+                logWarn(deps.logger, `[PracticeCall] analysis ${name}${fields.attempt ? ` attempt ${fields.attempt}` : ''}: ${fields.outcome || 'failed'} after ${fields.ms ?? '?'} ms: ${String(fields.error || 'no detail').replace(/"[^"]*"/gu, '"…"')}`);
+              } else if (name === 'done' || name === 'review-reply') {
+                logNote(deps.logger, `analysis ${name}: ${fields?.status || fields?.outcome || 'ok'} in ${fields?.ms ?? '?'} ms`);
+              }
+            },
+          },
         });
         const report = produced?.analysis && typeof produced.analysis === 'object' ? produced.analysis : produced;
         dbg('analysis-produced', { ms: Math.round(clock.now() - reviewStartedAt), status: report?.status ?? null, error: report?.error ?? null });
@@ -2025,7 +2046,10 @@ export function createPracticeCallService(deps = {}) {
       if (wantsAnalysis) {
       setStage('saving');
       const stored = { callId: self.callId, createdAt: Date.now(), ...analysis };
-      try { await store.writeAnalysis(self.callId, stored); analysisWritten = true; } catch (error) { dbg('analysis-write-failed', { message: error?.message }); }
+      try { await store.writeAnalysis(self.callId, stored); analysisWritten = true; } catch (error) {
+        dbg('analysis-write-failed', { error: error?.message ?? String(error), code: error?.code ?? null });
+        warn(`[PracticeCall] analysis-write-failed: ${error?.message || error}`);
+      }
       dbg('analysis-saved', { status: stored.status, written: analysisWritten });
       self.analysis = stored;
       if (feedback) {
@@ -2046,6 +2070,7 @@ export function createPracticeCallService(deps = {}) {
               }
             };
             let code = await arm();
+            const firstArmed = !!code;
             if (!code) {
               // The call is the only thing that arms a session, so one still armed was left by an
               // earlier call whose feedback was never stored. It is closed to make room for this one.
@@ -2054,12 +2079,14 @@ export function createPracticeCallService(deps = {}) {
             }
             if (!code) throw new Error('the practice registry did not arm a session');
             const result = await registry.finish(code, feedback);
+            dbg('history-registry', { status: result?.status ?? null, rearmed: !firstArmed });
             if (!['accepted', 'duplicate'].includes(result?.status)) {
               // Never leave this call's own session armed: it would block the next call's history.
               try { if (typeof registry.cancel === 'function') await registry.cancel(armRequest.nodeId); } catch { /* the next call clears it */ }
               throw new Error(result?.note || result?.status || 'rejected');
             }
           }
+          else dbg('history-registry', { status: 'skipped', hadRegistry: false });
         } catch (error) {
           warn(`[PracticeCall] practice history not updated: ${error?.message || error}`);
           emitEvent({ type: 'feedback-error', message: 'Your call history could not be updated.' });
@@ -2081,7 +2108,13 @@ export function createPracticeCallService(deps = {}) {
       const replay = await getReplay(self.callId).catch(() => null);
       if (call === self) call = null;
       emitReplay(replay);
+      dbg('wrapped-up', { replay: !!replay, audio, analysisWritten, wantsAnalysis: !!wantsAnalysis });
       return snapshot();
+    } catch (error) {
+      // Every caller drops this rejection, so the reason is written here or nowhere.
+      dbg('finish-failed', { error: error?.message ?? String(error), code: error?.code ?? null, phase: state.phase, stack: typeof error?.stack === 'string' ? error.stack.split('\n').slice(0, 6).join('\n') : undefined });
+      warn(`[PracticeCall] finishing the call failed in phase ${state.phase}: ${error?.message || error}`);
+      throw error;
     } finally {
       finishing = false;
       // The call's log is complete: written out, then the logs of older calls beyond the newest ten are pruned.
@@ -2257,6 +2290,8 @@ export function createPracticeCallService(deps = {}) {
       return downloadModels();
     },
     ready,
+    // A line from the call window's own event capture (clicks, errors, console warnings), for the call's debug log.
+    logWindowEvent: line => { if (typeof line === 'string' && line) dbg('window', { line: line.slice(0, 600) }); },
     answer: async () => (dbg('user', { action: 'answer', phase: state.phase }), state.phase === 'ringing' || state.phase === 'connecting' ? connectCall() : snapshot()),
     decline: () => (dbg('user', { action: 'decline' }), missCall('declined')),
     callBack,

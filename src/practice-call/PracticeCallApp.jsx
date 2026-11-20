@@ -11,6 +11,7 @@ import EndedScreen from './EndedScreen.jsx';
 import Replay from './Replay.jsx';
 import ErrorScreen from './ErrorScreen.jsx';
 import { MISSING_PRELOAD, CALL_WINDOW_TITLE, mergeEvent, mergeState, replayLoadFailed } from './callModel.js';
+import { installCallEventCapture, logEvent } from './callEventLog.js';
 
 function readApi() {
   return typeof window === 'undefined' ? null : window.practiceCallAPI || null;
@@ -29,6 +30,9 @@ export default function PracticeCallApp() {
   const [state, setState] = useState(initialState);
   const [replay, setReplay] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // Clicks, errors and console warnings of this window go to the call's debug log and bug reports.
+  useEffect(() => installCallEventCapture(readApi()), []);
 
   useEffect(() => {
     const api = readApi();
@@ -50,6 +54,7 @@ export default function PracticeCallApp() {
   }, []);
 
   const phase = isReplayWindow() && state && state.phase !== 'error' ? 'replay' : state?.phase;
+  useEffect(() => { if (phase) logEvent('screen', phase); }, [phase]);
   // The window is titled like a call, never like this app.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
@@ -62,7 +67,7 @@ export default function PracticeCallApp() {
     const api = readApi();
     if (typeof api?.getReplay !== 'function') return undefined;
     let live = true;
-    const failed = () => { if (live) setReplay(replayLoadFailed()); };
+    const failed = (error) => { logEvent('ERROR replay could not be loaded:', error?.message || error || 'unknown'); if (live) setReplay(replayLoadFailed()); };
     const load = () => {
       try {
         Promise.resolve(api.getReplay()).then(value => { if (live && value && typeof value === 'object') setReplay(value); })

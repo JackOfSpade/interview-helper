@@ -367,7 +367,7 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
 
   if (peopleKnown && questions.length > 0) {
     panel.forEach((member, index) => {
-      if (!questions.some(question => question.askedBy === member.voice)) bad(`panel[${index}] (${member.voice}, ${member.role}) asks no question; every panel member must ask at least one, or be removed from the panel`);
+      if (!questions.some(question => question.askedBy === member.voice)) bad(`panel[${index}] (${member.voice}) asks no question; every panel member must ask at least one, or be removed from the panel`);
     });
   }
 

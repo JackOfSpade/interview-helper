@@ -243,6 +243,80 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     return { count, bytes };
   }
 
+  /**
+   * For bug reports: the newest `limit` call folders that have a debug log, newest first, each with
+   * the log's text (its last `maxBytes` when longer) and the record's states and counts. Transcript
+   * text, persona, plan and review content are not returned; the caller strips content from the log.
+   */
+  async function recentDiagnostics({ limit = 3, maxBytes = 2 * 1024 * 1024 } = {}) {
+    const calls = [];
+    for (const callId of await api.knownCallIds()) {
+      const file = path.join(rootDir, callId, DEBUG_FILE);
+      const entry = await lstatOrNull(fs, file);
+      if (!entry?.isFile() || entry.isSymbolicLink()) continue;
+      const record = await readJson(callId, 'call.json');
+      const at = typeof record?.startedAt === 'number' ? record.startedAt : (entry.mtimeMs ?? 0);
+      calls.push({ callId, file, bytes: entry.size || 0, changedAt: entry.mtimeMs ?? null, at, record });
+    }
+    calls.sort((left, right) => right.at - left.at);
+    const out = [];
+    for (const item of calls.slice(0, Math.max(0, limit))) {
+      let text = '';
+      let truncated = false;
+      try {
+        const handle = await fs.open(item.file, 'r');
+        try {
+          const size = (await handle.stat()).size || 0;
+          const start = Math.max(0, size - maxBytes);
+          const buffer = Buffer.alloc(size - start);
+          if (buffer.length) await handle.read(buffer, 0, buffer.length, start);
+          text = buffer.toString('utf8');
+          // A cut start lands mid-line: the partial first line is dropped.
+          if (start > 0) { truncated = true; text = text.slice(text.indexOf('\n') + 1); }
+        } finally { await handle.close(); }
+      } catch { text = null; }
+      const record = item.record;
+      const analysis = record ? await readJson(item.callId, 'analysis.json') : null;
+      out.push({
+        callId: item.callId,
+        startedAt: typeof record?.startedAt === 'number' ? record.startedAt : null,
+        changedAt: item.changedAt,
+        bytes: item.bytes,
+        truncated,
+        text,
+        record: record ? {
+          durationMs: typeof record.durationMs === 'number' ? record.durationMs : null,
+          pausedMs: typeof record.pausedMs === 'number' ? record.pausedMs : null,
+          reason: typeof record.reason === 'string' ? record.reason : null,
+          endedBy: typeof record.endedBy === 'string' ? record.endedBy : null,
+          returnedCall: typeof record.returnedCall === 'string' ? record.returnedCall : null,
+          transcriptEntries: Array.isArray(record.transcript) ? record.transcript.length : 0,
+          candidateTurns: Array.isArray(record.transcript) ? record.transcript.filter(turn => turn?.speaker === 'candidate').length : 0,
+          interviewers: (record.persona ? 1 : 0) + (Array.isArray(record.panel) ? record.panel.length : 0),
+          answeredQuestions: Array.isArray(record.answeredQuestions) ? record.answeredQuestions.length : 0,
+          setupAttempts: Array.isArray(record.setup?.attempts) ? record.setup.attempts.length : null,
+          timings: record.timings && typeof record.timings === 'object'
+            ? Object.fromEntries(Object.entries(record.timings).filter(([, value]) => typeof value === 'number' && Number.isFinite(value)))
+            : null,
+          pickedQuestions: Array.isArray(record.pickedQuestions) ? record.pickedQuestions.length : 0,
+          askedQuestions: Array.isArray(record.askedQuestions) ? record.askedQuestions.length : 0,
+          feedbackSkipped: record.feedbackSkipped === true,
+          recordingPruned: record.recordingPruned === true,
+        } : null,
+        analysis: analysis ? {
+          status: typeof analysis.status === 'string' ? analysis.status : null,
+          tooShort: analysis.tooShort === true,
+          error: typeof analysis.error === 'string' ? analysis.error : null,
+          metricsError: typeof analysis.metricsError === 'string' ? analysis.metricsError : null,
+          chapters: Array.isArray(analysis.chapters) ? analysis.chapters.length : 0,
+          hasFeedback: !!analysis.feedback,
+        } : null,
+        hasAudio: await api.hasAudio(item.callId),
+      });
+    }
+    return out;
+  }
+
   async function readJson(callId, name) {
     const file = await fileOf(callId, name);
     return file ? readJsonIfPresent(fs, file) : null;
@@ -264,6 +338,7 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     rootDir,
     pruneDebugLogs,
     debugLogStats,
+    recentDiagnostics,
     leftoverAudio,
     deleteRawAudio,
     pruneRecordings,

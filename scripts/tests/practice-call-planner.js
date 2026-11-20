@@ -68,7 +68,7 @@ const tests = [
       assert.match(mutate(p => { p.questions[1].text = 'x'.repeat(401); }), /is 401 characters long and the limit is 400/u);
       assert.match(mutate(p => { delete p.questions[1].text; }), /text \(the question you wrote\) must be a string/u);
       assert.match(mutate(p => { p.questions[0].text = 'A reworded pool question.'; }), /pool question 1 and must not carry a text field/u);
-      assert.match(mutate(p => { p.questions = p.questions.slice(0, 2); }), /panel\[0\] \(V2, Senior engineer\) asks no question/u);
+      assert.match(mutate(p => { p.questions = p.questions.slice(0, 2); }), /panel\[0\] \(V2\) asks no question/u);
       assert.match(mutate(p => { p.questions[0].minutes = 20; p.questions[2].minutes = 20; }), /add up to 45, more than 1\.25 times the call length of 30/u);
       assert.match(mutate(p => { p.problems[0].question = 3; }), /problems\[0\]\.question is 3, which is not one of the picked questions/u);
       assert.match(mutate(p => { p.problems.push({ ...p.problems[0] }); }), /ref p1 is used twice/u);
