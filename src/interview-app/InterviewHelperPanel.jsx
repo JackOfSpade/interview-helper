@@ -49,7 +49,7 @@ const safeReceiptError = () => 'The career files could not be read. Choose them 
 const safePreparationRecoveryError = () => 'Preparation did not complete. Resume or change setup to try again.';
 // Why a Prepare failed, by the fixed code the main process returns. Anything else gets the generic line.
 const PREPARATION_FAILURE_MESSAGES = Object.freeze({
-  CLAUDE_SAFEGUARD_BLOCKED: "Claude's safety filter stopped this preparation, even after a retry on another model. This is usually a false alarm on a science or health posting. Resume to try again.",
+  CLAUDE_SAFEGUARD_BLOCKED: "Claude's safety filter stopped this preparation. This is usually a false alarm on a science or health posting. Resume to try again.",
   PARALLEL_SEARCH_EXHAUSTED: 'Web research is paused because Parallel Search is out of usage. Resume in about 10 minutes, or add a Parallel API key.',
   CLAUDE_USAGE_LIMIT: 'Claude usage limit reached. Resume after it resets.',
   CLAUDE_TIMEOUT: 'Claude took too long on one step. Resume to try again.',
