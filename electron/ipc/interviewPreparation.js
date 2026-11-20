@@ -381,12 +381,22 @@ function integrityText({ status, reason } = {}) {
   return safeString(text, 500);
 }
 
+// Where the job listing came from: 'given' (a submitted application or a typed
+// posting link), 'found' (research found the open posting) or 'generated' (an
+// AI-written stand-in).
+export function listingSourceOf({ status, reason } = {}) {
+  if (status === TYPED_GENERATED_STATUS) return 'generated';
+  if (status === TYPED_POSTING_STATUS && reason === 'listing-read-from-found-posting') return 'found';
+  return 'given';
+}
+
 function safeBundleProjection(payload) {
   return {
     artifactId: payload.artifactId,
     displayName: payload.displayName,
     verification: payload.verification,
     integritySummary: integrityText(payload.verification),
+    listingSource: listingSourceOf(payload.verification),
     applicationArtifactDigest: sha256(stable(payload.digests)),
     job: payload.job,
   };

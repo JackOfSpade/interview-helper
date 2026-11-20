@@ -188,7 +188,7 @@ function within(root, label) {
 }
 
 function typedReply(kind, extra = {}) {
-  return { bundle: { artifactId: BUNDLE_ID, displayName: kind === 'generated' ? 'Acme · Engineer (generated listing)' : 'Acme · Engineer', applicationArtifactDigest: BUNDLE_DIGEST, integritySummary: 'Typed source.', verification: { status: kind === 'generated' ? 'typed-generated' : 'typed-posting' } }, jobUrl: JOB_URL, kind, notes: kind === 'generated' ? ['No open posting for this role was found, so this listing is generated.'] : [], ...extra };
+  return { bundle: { artifactId: BUNDLE_ID, displayName: kind === 'generated' ? 'Acme · Engineer (generated listing)' : 'Acme · Engineer', applicationArtifactDigest: BUNDLE_DIGEST, integritySummary: 'Typed source.', listingSource: kind === 'link' ? 'given' : kind, verification: { status: kind === 'generated' ? 'typed-generated' : 'typed-posting' } }, jobUrl: JOB_URL, kind, notes: kind === 'generated' ? ['No open posting for this role was found, so this listing is generated.'] : [], ...extra };
 }
 async function mountTyped(bundle, window, resolve, { initialData = {}, updates = [], extra = {} } = {}) {
   window.interviewAppAPI = { resolveInterviewTypedJob: resolve };
@@ -221,6 +221,7 @@ const TYPED_JOB_TESTS = [
             assert(text(window).includes('Or type a job link, or a company and role'), 'the typed job box must be labelled');
             assert(typedBox(window).maxLength === 2000, 'the box must cap the text at 2000 characters');
             assert(button(window, 'Use this job').disabled, 'the button must wait for text');
+            assert(window.document.querySelector('[aria-label="Job listing source"]')?.dataset.listingSource === 'none', 'with nothing chosen the indicator says there is no listing yet');
             await submitTyped(bundle, window, 'Engineer at Acme');
             assert(calls.length === 1 && calls[0].nodeId === 'interview-helper' && calls[0].text === 'Engineer at Acme', 'the typed text must be sent with the node id');
             const patch = updates.find(item => item.interviewHelperApplicationBundle);
@@ -232,7 +233,9 @@ const TYPED_JOB_TESTS = [
               assert(generated && /AI as a realistic stand-in/u.test(generated.textContent), 'a generated listing must be unmistakable');
               assert(text(window).includes('Acme · Engineer (generated listing)') && text(window).includes('No open posting for this role was found, so this listing is generated.'), 'the label and note must show');
             } else assert(!generated, 'only a generated listing carries the generated warning');
-            if (kind === 'link') assert(text(window).includes('Read from the posting link.'), 'a link result must say where it came from');
+            const source = window.document.querySelector('[aria-label="2. Application"] [aria-label="Job listing source"]');
+            const expected = { link: 'Job listing: given', found: 'Job listing: found', generated: 'Job listing: generated' }[kind];
+            assert(source?.textContent.startsWith(expected), `the Application section must say the listing is ${expected.slice(13)}`);
           } finally { await bundle.module.act(async () => root.unmount()); }
         });
       }
@@ -1075,7 +1078,7 @@ export default [
       await withDomBundledProbe(async (bundle, window) => {
         const launches = [];
         const ready = publicBrief();
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle(), loadInterviewPreparedBrief: async () => ({ brief: ready }), launchInterviewWindow: async args => { launches.push(args); } };
+        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => { const reply = publicBundle(); reply.bundle.listingSource = 'given'; return reply; }, loadInterviewPreparedBrief: async () => ({ brief: ready }), launchInterviewWindow: async args => { launches.push(args); } };
         const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}` }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
@@ -1086,6 +1089,7 @@ export default [
             && readyPanel.textContent.includes('there are no prepared answers, so the cue card would stay blank.'), 'ready copy must say research alone leaves the cue card blank');
           assert(readyPanel.textContent.includes('Confirm this career source matches the application you submitted.')
             && readyPanel.textContent.includes('This bundle is a captured copy; replace it after editing the documents.'), 'ready copy must explain application alignment and how to refresh frozen document content');
+          assert(!readyPanel.textContent.includes('Job listing:') && window.document.querySelector('[aria-label="2. Application"] [data-listing-source="given"]:last-child')?.textContent.startsWith('Job listing: given'), 'the listing source shows in the Application section, not the preparation card');
           assert(readyPanel.textContent.includes('Submitted wording — reference, not career evidence'), 'submitted application wording must stay visibly separate from approved career evidence');
           assert(window.document.querySelector('[aria-label="3. Interview preparation"]')
             && !text(window).includes('Worker preparation'), 'the setup section must use interview terminology');

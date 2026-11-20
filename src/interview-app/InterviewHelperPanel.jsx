@@ -42,8 +42,18 @@ function projectBundle(reply) {
   const candidateDigest = value?.digest || value?.applicationArtifactDigest;
   const digest = typeof candidateDigest === 'string' && SHA_256_HEX_RE.test(candidateDigest) ? candidateDigest : null;
   const integritySummary = boundedText(value?.integritySummary || value?.integrity || value?.verification?.status, 500);
-  return artifactId && SHA_256_HEX_RE.test(artifactId) && label && digest ? { artifactId, label, digest, ...(integritySummary ? { integritySummary } : {}) } : null;
+  const listingSource = LISTING_SOURCES.includes(value?.listingSource) ? value.listingSource : null;
+  return artifactId && SHA_256_HEX_RE.test(artifactId) && label && digest ? { artifactId, label, digest, ...(integritySummary ? { integritySummary } : {}), ...(listingSource ? { listingSource } : {}) } : null;
 }
+const bundleDisplayChanged = (a, b) => a.label !== b.label || a.integritySummary !== b.integritySummary || a.listingSource !== b.listingSource;
+// Where the job listing Prepare used came from, as the bundle reports it.
+const LISTING_SOURCES = ['given', 'found', 'generated'];
+const LISTING_SOURCE_TEXT = Object.freeze({
+  given: 'Job listing: given · the posting from your application or the link you typed',
+  found: 'Job listing: found · a real, open posting found online for this role',
+  generated: "Job listing: generated · written by AI as a stand-in, not the employer's text",
+  none: 'Job listing: none yet · choose an application or type a job above',
+});
 const MAX_MANUAL_AI_RETIREMENT_RECEIPTS = 32;
 const safeReceiptError = () => 'The career files could not be read. Choose them again.';
 const safePreparationRecoveryError = () => 'Preparation did not complete. Resume or change setup to try again.';
@@ -287,7 +297,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
       // bundle; clearing it here would orphan its manual-AI run.
       if (!refreshed || refreshed.artifactId !== saved.artifactId || refreshed.digest !== saved.digest) { invalidatePreparation(); setBundleLoadStatus('error'); if (!recoverablePreparationRunIdRef.current) persist(clearPreparationState()); return; }
       setBundleLoadStatus('ready');
-      if (refreshed.label !== saved.label || refreshed.integritySummary !== saved.integritySummary) persist({ interviewHelperApplicationBundle: refreshed });
+      if (bundleDisplayChanged(refreshed, saved)) persist({ interviewHelperApplicationBundle: refreshed });
     }).catch(() => { if (!disposed) { invalidatePreparation(); setBundleLoadStatus('error'); if (!recoverablePreparationRunIdRef.current) persist(clearPreparationState()); } });
     return () => { disposed = true; };
   }, [data.interviewHelperApplicationBundle, id, invalidatePreparation, persist, persistedBundle]);
@@ -387,7 +397,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     // Re-picking the same content-addressed bundle with the same URL must not
     // discard a finished brief.
     if (current?.artifactId === bundle.artifactId && current?.digest === bundle.digest && urlUnchanged && bundleLoadStatusRef.current === 'ready') {
-      if (current.label !== bundle.label || current.integritySummary !== bundle.integritySummary || extraPatch) persist({ ...(current.label !== bundle.label || current.integritySummary !== bundle.integritySummary ? { interviewHelperApplicationBundle: bundle } : {}), ...(extraPatch || {}) });
+      if (bundleDisplayChanged(current, bundle) || extraPatch) persist({ ...(bundleDisplayChanged(current, bundle) ? { interviewHelperApplicationBundle: bundle } : {}), ...(extraPatch || {}) });
       return true;
     }
     const recoveryRunId = recoverablePreparationRunIdRef.current;
@@ -645,6 +655,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
   const typedStage = (typedActivityKey && claudeActivity.tasks?.[typedActivityKey]?.stage) || 'Starting';
   usePublishJobRunStatus(`${id}:typed`, typedBusy ? { label: 'Interview Helper · Finding the job', headline: 'Finding the job', claudeRequestId: typedActivityKey, onCancel: typedActivityKey ? cancelTypedJob : null } : null);
   const typedKind = persistedBundle ? typedJobKind(data.interviewHelperTypedJobKind) : null;
+  const listingSourceShown = persistedBundle?.listingSource || null;
   const shownTypedNotes = typedKind ? typedJobNotes(data.interviewHelperTypedJobNotes) : [];
   return <div className="relative text-white lg:flex lg:h-full lg:min-h-0" data-testid="interview-helper-panel">
     {/* Setup and practice on the left; the saved Q&A stays on screen in the side panel. */}
@@ -665,12 +676,12 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
         {typedBusy && <p role="status" className="text-[11px] text-white/60">{typedStage}… This can take a minute.</p>}
         {typedError && <p role="alert" className="text-[11px] text-amber-100">{typedError}</p>}
         {typedKind === 'generated' && <p role="status" data-testid="typed-job-generated" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">Generated listing: no open posting was found, so this job description was written by AI as a realistic stand-in. It is not the employer's text.</p>}
-        {typedKind === 'found' && <p role="status" className="text-[11px] text-emerald-200">Found a live posting for this role.</p>}
-        {typedKind === 'link' && <p role="status" className="text-[11px] text-emerald-200">Read from the posting link.</p>}
         {shownTypedNotes.map((note, index) => <p key={index} role="status" className="text-[11px] text-white/60">{note}</p>)}
         {data.interviewHelperApplicationBundle && <><p className="text-[11px] text-white/60">{persistedBundle?.label || 'Selected application bundle'}{persistedBundle?.integritySummary ? ` · ${persistedBundle.integritySummary}` : ''}{bundleLoadStatus === 'loading' ? ' · checking…' : ''}</p></>}
         {bundlePickerError && <p role="alert" className="text-[11px] text-red-200">{bundlePickerError}</p>}{bundleLoadStatus === 'error' && <p role="alert" className="text-[11px] text-red-200">The selected application bundle is unavailable, changed, or cannot be checked in this app version. Replace it to prepare.</p>}
         {persistedBundle && !canonicalInterviewJobUrl(data.interviewHelperJobUrl) && <p role="status" className="text-[11px] text-amber-100">This application has no job posting link, so preparation cannot research it. Regenerate the application, then choose it again.</p>}
+        {/* Which listing Prepare will use, for whatever is selected now. */}
+        <p role="status" aria-label="Job listing source" data-listing-source={listingSourceShown || 'none'} className={`rounded-md border px-2 py-1 text-[11px] ${listingSourceShown === 'generated' ? 'border-amber-400/25 bg-amber-500/10 text-amber-100' : listingSourceShown ? 'border-emerald-400/20 bg-emerald-500/5 text-emerald-200' : 'border-white/10 text-white/50'}`}>{LISTING_SOURCE_TEXT[listingSourceShown || 'none']}</p>
       </section>
       <section className="break-inside-avoid space-y-2 border-t border-white/10 pt-3" aria-label="3. Interview preparation"><p className="text-[11px] font-medium text-violet-200">3. Interview preparation</p><p className="text-[11px] text-white/60">Prepare researches the job, then writes answer cards from your career data. Read and edit the cards in the Q&A panel before the interview.</p>{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'loading' && <p role="status" className="text-[11px] text-white/55">Checking saved brief…</p>}{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'error' && <p role="alert" className="text-[11px] text-amber-100">Saved brief could not be verified; prepare again.</p>}<button type="button" className="w-full rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 disabled:opacity-50" onClick={prepare} disabled={!canPrepare || locallyPreparing}>{locallyPreparing ? 'Preparing…' : preparationStatus === 'preparing' || (preparationStatus === 'failed' && data.interviewHelperPreparationRunId) ? 'Resume preparation' : prepBrief ? 'Prepare again' : 'Prepare interview brief'}</button><p className="text-[11px] text-white/60">Writes Q&A only for a tab with no cards. A tab that has cards is never changed; delete every card in it to have it written again.</p>{preparationStatus === 'failed' && <p role="alert" className="text-[11px] text-red-200">{preparationError}</p>}{prepareNotice && preparationStatus !== 'failed' && <p role="status" className="text-[11px] text-amber-100">{prepareNotice}</p>}</section>
       {prepBrief && <section className="break-inside-avoid space-y-2 rounded-lg border border-emerald-400/20 bg-emerald-500/5 p-2" aria-label="Interview preparation ready"><p className="text-xs font-medium text-emerald-100"><BriefcaseBusiness size={13} className="mr-1 inline" />{answerCardCount ? `${answerCardCount} prepared answers ready` : 'Research ready'}{prepBrief.role?.title ? ` · ${prepBrief.role.title}${prepBrief.role.company ? ` at ${prepBrief.role.company}` : ''}` : ''}</p><p className="text-[11px] text-white/70">{answerCardCount ? 'The cue card listens to the call and shows short cues when it recognises a prepared question. It stays blank for anything else. Closing it stops listening.' : 'Research is prepared, but there are no prepared answers, so the cue card would stay blank. Prepare again to add answer cards.'}</p><p className="text-[11px] text-amber-100">Confirm this career source matches the application you submitted. This bundle is a captured copy; replace it after editing the documents.</p>{[['Researched themes', prepBrief.roleThemes], ['Likely questions', prepBrief.likelyQuestions], ['Submitted wording — reference, not career evidence', prepBrief.applicationPositioning], ['Source warnings', prepBrief.warnings]].map(([label, items]) => <div key={label}><p className="text-[10px] font-semibold uppercase text-white/45">{label}</p><p className="text-[11px] text-white/70">{items.slice(0, 3).map(briefItemText).filter(Boolean).join(' · ') || 'None'}</p></div>)}<button type="button" className="w-full rounded-md bg-emerald-500/20 px-2 py-1.5 text-xs text-emerald-50 disabled:opacity-50" onClick={launch} disabled={bundleLoadStatus !== 'ready' || !window.electronAPI?.launchInterviewWindow}><Rocket size={13} className="mr-1 inline" />Open cue card</button>{launchError && <p role="alert" className="text-[11px] text-red-200">{launchError}</p>}</section>}

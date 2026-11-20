@@ -80,6 +80,7 @@ export default [
         assert(found.bundle.verification.status === 'typed-posting' && found.bundle.artifactId !== link.bundle.artifactId, 'a found posting is also typed-posting, with its own reason');
         const generated = await publishTypedJobBundle({ result: { ...base, kind: 'generated' }, userDataPath: root });
         assert(generated.bundle.verification.status === 'typed-generated' && generated.bundle.displayName === 'Acme \u00B7 Platform Engineer (generated listing)' && /AI-generated stand-in listing, not the employer/u.test(generated.bundle.integritySummary), 'a generated listing is unmistakable');
+        assert(link.bundle.listingSource === 'given' && found.bundle.listingSource === 'found' && generated.bundle.listingSource === 'generated', 'the projection says whether the listing was given, found or generated');
         const long = await publishTypedJobBundle({ result: { ...base, kind: 'generated', job: { ...base.job, title: 'T'.repeat(290) } }, userDataPath: root });
         assert(long.bundle.displayName.length <= 180 && long.bundle.displayName.endsWith(' (generated listing)'), 'a long name keeps the generated suffix');
         const reloaded = await loadInterviewPreparationBundle({ artifactId: generated.bundle.artifactId, userDataPath: root });
