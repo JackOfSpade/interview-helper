@@ -4216,3 +4216,70 @@ test('the voice description sent to the planner has no repeats and is cut at a w
   // A short one is kept whole with one full stop, duplicates dropped.
   assert.equal(await run({ a: 'Warm', b: 'warm', c: 'Calm and even' }, 'Calm and even.'), 'Warm. Calm and even.');
 });
+
+test('draftAnswer: off without draftText, refused before the call is answered, and writes from the call context once in it', async () => {
+  const transcript = [{ speaker: 'interviewer', text: 'Why this role?' }];
+  const engineFactory = () => ({ start() {}, hangUp() {}, typed() {}, state: () => ({ transcript, elapsedMs: 0 }) });
+  const off = await liveCall({ deps: { engineFactory } });
+  await off.service.start(ARGS);
+  await off.service.answer();
+  assert.deepEqual(await off.service.draftAnswer(), { error: 'Suggestions are not available.' });
+  await off.service.hangUp({ feedback: false });
+
+  const seen = [];
+  const reads = { career: 0, listing: 0 };
+  const { service } = await liveCall({ deps: {
+    engineFactory,
+    draftText: async () => 'unused',
+    loadCareerDocuments: async args => { reads.career += 1; assert.equal(args.snapshotId, ARGS.snapshotId); return 'Career text line.'; },
+    loadListing: async args => { reads.listing += 1; assert.equal(args.artifactId, ARGS.bundleArtifactId); return 'Listing text line.'; },
+    draftAnswer: async request => { seen.push(request); return 'Because it fits.'; },
+  } });
+  await service.start(ARGS);
+  assert.deepEqual(await service.draftAnswer(), { error: 'No one is waiting for an answer.' }, 'nothing before the call is answered');
+  await service.answer();
+  assert.deepEqual(await service.draftAnswer(), { text: 'Because it fits.' });
+  assert.deepEqual(await service.draftAnswer(), { text: 'Because it fits.' });
+  assert.deepEqual(reads, { career: 1, listing: 1 }, 'career text and listing are read once per call');
+  const [request] = seen;
+  assert.equal(request.careerText, 'Career text line.');
+  assert.equal(request.listingText, 'Listing text line.');
+  assert.equal(request.application.resume, 'Synthetic resume text.');
+  assert.deepEqual(request.transcript, transcript);
+  assert.equal(request.brief.company, 'Acme');
+  assert.equal(typeof request.callText, 'function');
+  assert(request.signal instanceof AbortSignal);
+  assert(request.pool.some(card => card.question === CARD.question && card.answer));
+  assert.equal(service.getState().chat.length, 0, 'nothing is sent to the chat');
+  await service.hangUp({ feedback: false });
+  assert.deepEqual(await service.draftAnswer(), { error: 'No one is waiting for an answer.' });
+});
+
+test('draftAnswer: one at a time, a failure reads as a retryable error, and hanging up aborts the one in flight', async () => {
+  const engineFactory = () => ({ start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }) });
+  let release;
+  let aborted = null;
+  let fail = false;
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => { throw new Error('gone'); },
+    logger: { warn() {} },
+    draftAnswer: async ({ signal }) => {
+      if (fail) throw new Error('model down');
+      signal.addEventListener('abort', () => { aborted = true; release?.(); });
+      await new Promise(resolve => { release = resolve; });
+      if (signal.aborted) throw new Error('aborted');
+      return 'late';
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  fail = true;
+  assert.deepEqual(await service.draftAnswer(), { error: 'Could not suggest a reply. Try again.' });
+  fail = false;
+  const first = service.draftAnswer();
+  await flush();
+  assert.deepEqual(await service.draftAnswer(), { error: 'A suggestion is already being written.' });
+  await service.hangUp({ feedback: false });
+  assert.equal(aborted, true, 'hanging up aborts the call in flight');
+  assert.deepEqual(await first, { error: 'The call has ended.' });
+});

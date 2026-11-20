@@ -70,6 +70,8 @@ const DEFAULTS = Object.freeze({
   storeKey: lazily(() => moduleExport(() => import('../ipc/interviewQaStore.js'), ['interviewQaStoreKey'])),
   loadCareerDocuments: lazily(() => moduleExport(() => import('./careerDocumentText.js'), ['loadCareerDocumentText'])),
   loadCandidateName: lazily(() => moduleExport(() => import('./candidateName.js'), ['loadCandidateName'])),
+  loadListing: lazily(() => moduleExport(() => import('../ipc/interviewPreparation.js'), ['loadInterviewListingText'])),
+  draftAnswer: lazily(() => moduleExport(() => import('./draftAnswer.js'), ['draftCandidateAnswer'])),
   orderCards: lazily(() => moduleExport(() => import('../ipc/interviewQaPractice.js'), ['orderPracticeQuestions'])),
   engineFactory: lazily(() => moduleExport(() => import('../interviewPracticeCallEngine.js'), ['createPracticeCallEngine'])),
   helperFactory: lazily(() => moduleExport(() => import('../interviewPracticeAudio.js'), ['createPracticeAudioHelper'])),
@@ -700,6 +702,7 @@ export function createPracticeCallService(deps = {}) {
     closeEar(self);
     try { self.downloadAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.planAbort?.abort?.(); } catch { /* already aborted */ }
+    try { self.draftAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.audioMirror?.stop?.(); } catch { /* audio mirror already stopped */ }
     try { await self.helper?.stop?.(); } catch { /* audio owner already stopped */ }
     await closeWarmSessions(self);
@@ -1730,6 +1733,7 @@ export function createPracticeCallService(deps = {}) {
     closeEar(self);
     try { self.downloadAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.planAbort?.abort?.(); } catch { /* already aborted */ }
+    try { self.draftAbort?.abort?.(); } catch { /* already aborted */ }
     await closeWarmSessions(self);
     state.modelDownload = null;
     setPausedState(self, false);
@@ -1838,6 +1842,8 @@ export function createPracticeCallService(deps = {}) {
     cancelPendingShare(self);
     stopElapsedTimer();
     setPausedState(self, false);
+    // A suggestion still being written has nobody to read it.
+    try { self.draftAbort?.abort?.(); } catch { /* already aborted */ }
     clearJoinTimers(self);
     try {
       if (!self.inCall) {
@@ -2329,6 +2335,65 @@ export function createPracticeCallService(deps = {}) {
       dbg('user', { action: 'pause', paused: !!paused });
       try { call.engine?.setPaused?.(!!paused); } catch { /* engine already ended */ }
       return snapshot();
+    },
+    /**
+     * Testing aid: the candidate's reply to the latest question, written from the career text,
+     * the listing and the conversation, for the chat box. Nothing is sent: the window puts the
+     * text in the box. Off unless the app passes `draftText` in, so a unit suite never calls an AI.
+     */
+    draftAnswer: async () => {
+      const self = call;
+      if (!self || self.finished || !self.inCall || self.interviewerEnded || state.interviewerLeft) return { error: 'No one is waiting for an answer.' };
+      if (typeof deps.draftText !== 'function') return { error: 'Suggestions are not available.' };
+      if (self.drafting) return { error: 'A suggestion is already being written.' };
+      self.drafting = true;
+      const abort = new AbortController();
+      self.draftAbort = abort;
+      const started = clock.now();
+      dbg('user', { action: 'draft-answer' });
+      try {
+        // The career text and the listing are read once per call, on the first suggestion.
+        self.draftSources ??= (async () => {
+          const read = async (name, args) => {
+            try {
+              const loader = await resolve(name);
+              const text = await loader({ ...args, userDataPath });
+              return typeof text === 'string' ? text : '';
+            } catch (error) {
+              warn(`[PracticeCall] ${name} unavailable for a suggestion: ${error?.code || error?.name || 'error'}`);
+              return '';
+            }
+          };
+          const typedJob = self.application?.source === 'career-documents';
+          const [careerText, listingText] = await Promise.all([
+            typedJob ? Promise.resolve(self.application.resume) : read('loadCareerDocuments', { snapshotId: self.args?.snapshotId }),
+            read('loadListing', { artifactId: self.brief?.inputs?.applicationArtifactId ?? self.args?.bundleArtifactId }),
+          ]);
+          return { careerText, listingText };
+        })();
+        const sources = await self.draftSources;
+        const draft = await resolve('draftAnswer');
+        const engineState = self.engine?.state?.() || { transcript: [] };
+        // For a typed job the career documents sit in the résumé slot; they are passed once, as career text.
+        const application = self.application?.source === 'career-documents' ? { resume: '', coverLetter: '' } : self.application;
+        const text = await draft({
+          callText: deps.draftText, signal: abort.signal,
+          brief: self.promptBrief || promptBrief(self.brief), listingText: sources.listingText, careerText: sources.careerText,
+          application, candidateName: self.candidateName, transcript: engineState.transcript, pad: state.pad,
+          pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),
+        });
+        dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });
+        if (call !== self || self.finished) return { error: 'The call has ended.' };
+        return { text };
+      } catch (error) {
+        dbg('draft-answer', { ms: Math.round(clock.now() - started), error: error?.code || error?.message || 'error' });
+        if (call !== self || self.finished) return { error: 'The call has ended.' };
+        warn(`[PracticeCall] suggestion failed: ${error?.code || error?.name || 'error'}`);
+        return { error: 'Could not suggest a reply. Try again.' };
+      } finally {
+        self.drafting = false;
+        if (self.draftAbort === abort) self.draftAbort = null;
+      }
     },
     getState: () => snapshot(),
     showReplay: callId => {

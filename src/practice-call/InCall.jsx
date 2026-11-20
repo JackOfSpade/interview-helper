@@ -286,7 +286,7 @@ export default function InCall({ state, api }) {
           </div>
         </section>}
       </div>
-      {chatOpen && <div className="pc-panel w-[340px] shrink-0"><ChatPanel chat={chat} draft={chatDraft} onDraftChange={setChatDraft} disabled={interviewerLeft} paused={paused} onSend={api?.sendChat} onTyping={api?.setTyping} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} /></div>}
+      {chatOpen && <div className="pc-panel w-[340px] shrink-0"><ChatPanel chat={chat} draft={chatDraft} onDraftChange={setChatDraft} disabled={interviewerLeft} paused={paused} onSend={api?.sendChat} onTyping={api?.setTyping} onSuggest={typeof api?.draftAnswer === 'function' ? api.draftAnswer : undefined} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} /></div>}
       {cardsOpen && <section aria-label="Notes" className="pc-panel flex w-[340px] shrink-0 flex-col rounded-2xl bg-white text-[#202124]">
         <header className="flex items-center justify-between px-5 pb-2 pt-4">
           <h2 className="text-lg font-normal">Notes</h2>

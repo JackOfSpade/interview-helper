@@ -60,6 +60,8 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Planning of an in-app practice call (cast, questions, time, probes and prepared problems, one call per practice): Opus high, not yet tested (docs/ai-model-selection.md).
   'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  // practice-call-draft-answer (testing aid: the candidate's chat reply to the latest question, put in the chat box and never sent on its own; electron/practiceCall/draftAnswer.js): Sonnet low, chosen by reasoning, not measured. The person waits on it mid-call and accuracy is not checked, so speed wins; Sonnet low writes the call's acknowledgements without leaking content, and Haiku drops supplied detail in qa-disclosures.
+  'practice-call-draft-answer': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
   // qa-glance-cues (short reminders for the live card, one call per Prepare): Opus low, not yet tested. Chosen by analogy with qa-card-repair, where Sonnet added unsupported wording and Haiku broke lines (docs/ai-model-selection.md).
   'qa-glance-cues': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a cue (docs/ai-model-selection.md).

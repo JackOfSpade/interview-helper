@@ -42,6 +42,7 @@ const practiceCallAPI = Object.freeze({
   setTyping: typing => invoke('set-typing', booleanArg(typing, 'setTyping')),
   setPaused: paused => invoke('set-paused', booleanArg(paused, 'setPaused')),
   updatePad: text => invoke('update-pad', padText(text)),
+  draftAnswer: () => invoke('draft-answer'),
   getPreparedCards: () => invoke('get-prepared-cards'),
   getReplay: () => invoke('get-replay'),
   onReplayUpdated: cb => subscribe(`${PREFIX}replay-updated`, cb),

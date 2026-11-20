@@ -306,6 +306,10 @@ if (!app.requestSingleInstanceLock()) {
       const practicePlanText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
         signal, task: 'practice-plan', claudeStage: 'practice-call-plan', responseSchema: schema,
       });
+      // Testing aid: the candidate's reply to the latest question, for the call chat's "Suggest a reply" button. Plain text, no schema.
+      const practiceDraftText = ({ prompt, signal } = {}) => reviewTransport.callRaw(prompt, {
+        signal, task: 'practice-draft-answer', claudeStage: 'practice-call-draft-answer',
+      });
       const helperPath = practiceAudioHelperPath({ packaged: app.isPackaged, projectDir: app.getAppPath() || process.cwd() });
       // An earlier "Don't Allow" is cleared only for the installed app and its helper; a
       // development run belongs to Electron's own bundle and is left alone.
@@ -328,6 +332,7 @@ if (!app.requestSingleInstanceLock()) {
         registry: getInterviewPracticeRegistry(),
         serviceOptions: {
           planText: practicePlanText,
+          draftText: practiceDraftText,
           logger,
           inferenceWorkerPath: asarUnpacked(path.join(__dirname, 'inferenceWorkerThread.js')),
           // The packaged helper lives in Resources; the default only knows the project folder.

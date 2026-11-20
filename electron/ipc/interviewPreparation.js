@@ -600,6 +600,12 @@ export async function loadInterviewApplicationText({ artifactId, userDataPath } 
   return { resume: typeof positioning.resume === 'string' ? positioning.resume : '', coverLetter: typeof positioning.coverLetter === 'string' ? positioning.coverLetter : '' };
 }
 
+/** The job listing text of a prepared application, or '' when it has none. */
+export async function loadInterviewListingText({ artifactId, userDataPath } = {}) {
+  const payload = await loadPrivateInterviewPreparationBundle({ artifactId, userDataPath });
+  return typeof payload?.listingText === 'string' ? payload.listingText : '';
+}
+
 /** Public artifact projection: deliberately excludes all bundle prose. */
 export async function loadInterviewPreparationBundle(args = {}) {
   const payload = await loadPrivateInterviewPreparationBundle(args);

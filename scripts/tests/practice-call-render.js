@@ -972,6 +972,62 @@ export default [
     },
   },
   {
+    name: 'practice call render: Suggest a reply fills the chat box without sending, reports typing meanwhile, and shows a failure; no button without the bridge call',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          const typing = [];
+          let answer = null;
+          let release;
+          window.practiceCallAPI = {
+            getState: async () => ({ phase: 'in-call', persona: PERSONA, chat: [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }] }),
+            onState: () => () => {},
+            onEvent: () => () => {},
+            sendChat: async text => { sent.push(text); },
+            setTyping: async value => { typing.push(value); },
+            draftAnswer: () => new Promise(resolve => { release = () => resolve(answer); }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Chat').click());
+            const button = byLabel('Suggest a reply');
+            assert(button, 'the chat has a Suggest a reply button');
+            await act(() => button.click());
+            assert(byLabel('Suggest a reply').disabled === true, 'the button waits while the reply is written');
+            assert(byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the button shows a loading spinner while the reply is written');
+            assert(typing.includes(true), 'the candidate counts as typing while the reply is written');
+            answer = { text: 'Your fleet work matches what I did at Northwind.' };
+            await act(() => release());
+            await act(() => new Promise(resolve => setTimeout(resolve, 5)));
+            assert(byLabel('Chat message').value === 'Your fleet work matches what I did at Northwind.', 'the reply is put in the box');
+            assert(sent.length === 0, 'the reply is not sent');
+            assert(byLabel('Suggest a reply').disabled === false && !byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the button is back to the wand once the reply is in the box');
+            assert(window.document.activeElement === byLabel('Chat message'), 'the box has focus, ready for Enter');
+            assert(!/practice|\bAI\b/iu.test(window.document.body.textContent), 'the call screen never says practice or AI');
+            answer = { error: 'Could not suggest a reply. Try again.' };
+            await act(() => byLabel('Suggest a reply').click());
+            await act(() => release());
+            assert(window.document.body.textContent.includes('Could not suggest a reply. Try again.'), 'a failure is shown');
+            assert(byLabel('Chat message').value === 'Your fleet work matches what I did at Northwind.', 'a failure keeps the draft');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+      const server = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, ChatPanel } = server.module;
+        assert(!renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], onSend: () => {}, onTyping: () => {} })).includes('Suggest a reply'));
+        const paused = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], paused: true, onSend: () => {}, onTyping: () => {}, onSuggest: async () => ({}) }));
+        assert(/<button[^>]*aria-label="Suggest a reply"[^>]*disabled=""/.test(paused), 'the button is disabled while paused');
+      } finally { await server.dispose(); }
+    },
+  },
+  {
     name: 'practice call render: chat sends on Enter, keeps Shift+Enter for new lines, reports typing only while the draft has text, and clears the unread dot when opened',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');

@@ -10,7 +10,7 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'ready', 'answer', 'decline', 'call-back', 'cancel-call-back', 'hang-up', 'leave', 'choose-feedback', 'set-muted', 'send-chat',
-  'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
+  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close',
 ]);
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
@@ -180,6 +180,7 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'set-typing'](typing) { return service.setTyping(typing); },
     async [WINDOW_PREFIX + 'set-paused'](paused) { return service.setPaused(paused); },
     async [WINDOW_PREFIX + 'update-pad'](text) { return service.updatePad(text); },
+    async [WINDOW_PREFIX + 'draft-answer']() { return typeof service.draftAnswer === 'function' ? service.draftAnswer() : { error: 'Suggestions are not available.' }; },
     async [WINDOW_PREFIX + 'get-prepared-cards']() { return service.getPreparedCards(); },
     async [WINDOW_PREFIX + 'get-replay']() { return service.getReplay(current?.callId ?? service.getState().callId); },
     async [WINDOW_PREFIX + 'delete-recording']() { return service.deleteRecording(current?.callId ?? service.getState().callId); },

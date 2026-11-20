@@ -255,6 +255,22 @@ notice is a translucent overlay in the middle of the window. New text shown or
 spoken during the call must keep to this; the render and prompt suites assert
 it.
 
+**Suggest a reply (testing aid, built 2026-11-20).** The call chat has a magic wand
+button, "Suggest a reply", left of Send. It asks Claude for the candidate's reply
+to what the interviewer last asked and puts it in the chat box with the cursor
+at the end; it is never sent until the person presses Enter. The reply is
+written from the career text (read once per call from the snapshot), the job
+listing text of the prepared application, the brief, the submitted résumé and
+cover letter, the prepared Q&A answers, the open pad and the last 40 turns of
+the conversation (`electron/practiceCall/draftAnswer.js`, `draftAnswer` in
+`callService.js`, window channel `draft-answer`). Nothing checks it against
+the career text: it only has to move the interview on for manual testing.
+Stage `practice-call-draft-answer`, Sonnet at low effort, chosen by reasoning
+and not measured (the person waits on it mid-call and accuracy is not
+checked). While it is being written the candidate counts as typing, so the
+interviewer waits; hanging up aborts it. The service refuses it unless the app
+passes `draftText` in (`main.js`), so the unit suites never call Claude.
+
 **Closing the practice call window (2026-11-19).** Closing the window ends the
 call: the three Claude CLI sessions are stopped (SIGTERM to each process group,
 SIGKILL after 250 ms), the reply in flight and its ElevenLabs voice socket are

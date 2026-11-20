@@ -246,6 +246,14 @@ test('the pad handlers forward to the service', async () => {
   assert.deepEqual(service.padCalls, [['update', 'print(1)']]);
 });
 
+test('the draft-answer handler is a window channel and answers with an error when the service has no drafter', async () => {
+  const { WINDOW_CHANNELS } = await import('../../electron/practiceCall/callWindow.js');
+  assert.ok(WINDOW_CHANNELS.includes('draft-answer'));
+  const { invoke } = await harness({ phase: 'ringing' });
+  await invoke('practice-call:start', { nodeId: 'n1' });
+  assert.deepEqual(await invoke('practice-call-window:draft-answer'), { error: 'Suggestions are not available.' });
+});
+
 test('the set-paused handler forwards to the service', async () => {
   const { invoke, service } = await harness({ phase: 'ringing' });
   await invoke('practice-call:start', { nodeId: 'n1' });
