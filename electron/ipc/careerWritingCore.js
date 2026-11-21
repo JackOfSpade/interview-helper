@@ -56,7 +56,8 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-practice-order': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   // qa-card-repair, 2026-11-12: Blind judge over 2 real repair prompts gave Opus low 9 and 8, production 8 and 9, at 34% less; Sonnet medium added unsupported claims and Haiku high broke sentences (docs/ai-model-selection.md).
   'qa-card-repair': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // qa-write, 2026-11-20 (re-tested after its evidence became plain career text): on 3 real banks x 2 runs, blind-judged twice, Sonnet medium tied Opus medium (6.92 vs 6.92; Opus reruns differ 0-1.5 per bank) with fewer cards failing the app's checks (3.8 vs 6.0 a bank) at about 55% of the cost; DeepSeek truncated the bank at its 32k output cap (docs/ai-model-selection.md).
+  'qa-write': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
   // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Planning of an in-app practice call (cast, questions, time, probes and prepared problems, one call per practice): Opus high, not yet tested (docs/ai-model-selection.md).
@@ -74,8 +75,8 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'typed-job-intake': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }), // [routed]
   // typed-job-posting: reads a whole fetched page and copies the posting text out. 2026-11-20: on 3 real pages plus 3 planted ones (closed notice, job list) x 2 runs, blind-judged, Haiku medium copied the most complete posting (9.19 against 6.54 for Sonnet low, which cut benefits and closing sections, as production did) at a tenth of the cost; every setting classified closed and non-posting pages correctly (docs/ai-model-selection.md).
   'typed-job-posting': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
-  // typed-job-research: Parallel web research about one company; same task shape as qa-research (Opus high, within noise of xhigh).
-  'typed-job-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  // typed-job-research: Parallel web research about one company. 2026-11-20: on 10 distinct targets, blind-judged twice, Sonnet high scored 7.87 against Opus high 8.02 (same-case reruns 7.50 and 7.60) at about 45% of the cost, all first-try valid; Haiku high scored 7.42, thinner, and one answer was rejected by the app (docs/ai-model-selection.md).
+  'typed-job-research': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
   // typed-job-listing: realistic stand-in posting written from research alone; like qa-write, where cheaper settings invented specifics.
   'typed-job-listing': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }), // [routed]
   // career-file-to-text: Claude reads one dropped image (or document) and copies its text out verbatim, in reading order, with [unreadable] for a part it cannot read (electron/ipc/interviewCareerFileConversion.js). 2026-11-20: on 3 rendered résumé images (one column, two columns, rotated and blurred) x 2 runs, Haiku high copied every word exactly, as Sonnet low and medium did, at about a fifteenth of the cost; Haiku medium dropped a word once. Synthetic images only; re-check on a real photo or scan (docs/ai-model-selection.md).

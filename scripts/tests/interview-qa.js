@@ -204,7 +204,7 @@ export default [
       routeFor: () => null });
     const value = await transport.callText('PROMPT', { task: 'interview-answer-bank', responseSchema: { type: 'object' }, responseValidator: v => { if (!v.ok) throw new Error('not ok'); } });
     assert.deepEqual(value, { ok: true });
-    assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['opus', 'medium', false, ''], ['opus', 'medium', true, ''], ['opus', 'medium', true, '']]);
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['sonnet', 'medium', false, ''], ['sonnet', 'medium', true, ''], ['sonnet', 'medium', true, '']]);
     assert.equal(new Set(runs.map(run => run.sessionId)).size, 1, 'retries stay in one Claude session');
     assert.match(runs[0].text, /REPLY FORMAT: one JSON object/u);
     assert.match(runs[2].text, /^YOUR PREVIOUS REPLY WAS REJECTED BY THE APP\..*\nnot ok$/su);
@@ -292,7 +292,7 @@ export default [
     assert.equal(interviewStageMayOffload('typed-job-research'), false, 'research never routes');
     assert.equal(interviewStageMayOffload('typed-job-intake'), true);
     assert.equal(await transport.callRaw('R', { claudeStage: 'typed-job-research', task: 'interview-typed-job-research' }), 'Acme research');
-    assert.deepEqual([research[0].model, research[0].effort, research[0].tools], ['opus', 'high', [...PARALLEL_RESEARCH_TOOLS]]);
+    assert.deepEqual([research[0].model, research[0].effort, research[0].tools], ['sonnet', 'high', [...PARALLEL_RESEARCH_TOOLS]]);
     assert.equal(runs.length, 0, 'typed-job-research never runs on the built-in runStage');
     const noRoute = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; }, routeFor: () => null });
