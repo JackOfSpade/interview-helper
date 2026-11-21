@@ -206,6 +206,38 @@ export default [
     },
   },
   {
+    name: 'typed job: a vague description is picked by web research, which may replace the first guess, and the notes lead with the choice',
+    async run() {
+      const basis = 'Acme is the largest widget maker hiring in Springfield, so the role was matched to Widget Reliability Engineer at Acme.';
+      const vague = 'someone who builds widgets at the big widget company';
+      const { callText, calls } = fakeCall({
+        'typed-job-intake': intakeTarget({ inferred: true, company: 'Widgetco', role: 'Widget Engineer' }),
+        'typed-job-research': research({ role: 'Widget Reliability Engineer', basis }),
+        'typed-job-listing': { title: '', location: '', listingText: LISTING },
+      });
+      const stages = [];
+      const out = await resolveTypedJob({ text: vague, callText, readPage: pageReader({}), onStatus: stage => stages.push(stage) });
+      assert.equal(out.kind, 'generated');
+      assert.deepEqual(out.job, { title: 'Widget Reliability Engineer', company: 'Acme Widgets Inc', location: 'Springfield' });
+      assert.equal(out.notes[0], basis);
+      assert.match(out.notes[1], /No open posting/);
+      assert.match(stages[1], /best fit your description/);
+      // The intake guesses a real organisation; the research gets the person's own words, fenced, and may replace the guess.
+      assert.match(calls[0].prompt, /real organisation/);
+      assert.ok(calls[1].prompt.includes(vague) && /<untrusted-typed-job-description-/.test(calls[1].prompt));
+      assert.match(calls[1].prompt, /"basis"/);
+      assert.ok(calls[2].prompt.includes('Widget Reliability Engineer'), 'the listing is written for the role the research chose');
+      // Without a basis from the research, a plain note still says what was chosen.
+      const bare = fakeCall({ 'typed-job-intake': intakeTarget({ inferred: true }), 'typed-job-research': research(), 'typed-job-listing': { title: '', location: '', listingText: LISTING } });
+      const fallback = await resolveTypedJob({ text: vague, callText: bare.callText, readPage: pageReader({}) });
+      assert.equal(fallback.notes[0], 'Your description was matched to Widget Engineer at Acme Widgets Inc.');
+      // A plainly named job carries no choice note and its research is not asked to pick.
+      const plain = fakeCall({ 'typed-job-intake': intakeTarget({ inferred: false }), 'typed-job-research': research({ basis: 'ignored' }), 'typed-job-listing': { title: '', location: '', listingText: LISTING } });
+      const direct = await resolveTypedJob({ text: 'Widget Engineer at Acme', callText: plain.callText, readPage: pageReader({}) });
+      assert.ok(!direct.notes.includes('ignored') && !/typed-job-description/.test(plain.calls[1].prompt));
+    },
+  },
+  {
     name: 'typed job: unclear text carries the intake question and spends no research',
     async run() {
       for (const intake of [

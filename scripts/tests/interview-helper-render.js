@@ -255,6 +255,7 @@ const TYPED_JOB_TESTS = [
           await submitTyped(bundle, window, 'something vague');
           const alert = [...window.document.querySelectorAll('[role="alert"]')].find(item => item.textContent.includes('Which company and which role?'));
           assert(alert && alert.className.includes('amber'), 'the unclear question must show in an amber alert');
+          assert(alert.textContent.includes('This job was not used.'), 'the alert must say the typed job was not used');
           assert(!updates.some(item => item.interviewHelperApplicationBundle), 'a failed resolve must not store a bundle');
           assert(typedBox(window).value === 'something vague' && updates.some(item => item.interviewHelperTypedJob === 'something vague'), 'the typed text must be kept so the user can add detail');
           mode = 'envelope';
