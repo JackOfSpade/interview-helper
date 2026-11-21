@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { LoaderCircle, Send, WandSparkles, X } from 'lucide-react';
+import { BOX_AUTO_MAX_HEIGHT, BOX_MIN_HEIGHT, clampBoxHeight, readBoxHeight, saveBoxHeight, startDrag } from './panelSize.js';
 
 export const CHAT_MAX_LENGTH = 2000;
 // The counter only appears when the end of the limit is near.
@@ -12,7 +13,8 @@ export const TYPING_REFRESH_MS = 3000;
 // onSuggest (testing aid) asks for a reply to the latest question and resolves { text } or { error }.
 // The text goes in the box and is never sent: the candidate reads it and presses Enter.
 export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = false, paused = false, interviewerName = '', onSend, onTyping, onSuggest, onClose }) {
-  const setDraft = value => { if (typeof onDraftChange === 'function') onDraftChange(value); };
+  // meta.generated marks text written by Suggest a reply.
+  const setDraft = (value, meta) => { if (typeof onDraftChange === 'function') onDraftChange(value, meta); };
   const [focused, setFocused] = useState(false);
   const [composing, setComposing] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
@@ -21,13 +23,38 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   const listRef = useRef(null);
   const draftRef = useRef(null);
-  // The box grows with a long answer (up to its max height) so the candidate can read what they typed.
+  const sectionRef = useRef(null);
+  // A height dragged from the grip above the box (null: the box sizes itself), kept for later calls.
+  const [boxHeight, setBoxHeight] = useState(readBoxHeight);
+  const boxHeightRef = useRef(boxHeight);
+  useEffect(() => { boxHeightRef.current = boxHeight; }, [boxHeight]);
+  // The box grows with a long answer so the candidate can read what they typed: up to its usual
+  // max height, or from the dragged height up to whichever of the two is taller.
+  const boxMax = Math.max(BOX_AUTO_MAX_HEIGHT, boxHeight ?? 0);
   useEffect(() => {
     const box = draftRef.current;
     if (!box?.style) return;
     box.style.height = 'auto';
-    box.style.height = `${box.scrollHeight}px`;
-  }, [draft]);
+    box.style.height = `${Math.min(Math.max(box.scrollHeight, boxHeight ?? BOX_MIN_HEIGHT), boxMax)}px`;
+  }, [draft, boxHeight, boxMax]);
+  const panelHeight = () => sectionRef.current?.getBoundingClientRect?.().height;
+  const dragBox = event => {
+    const from = draftRef.current?.getBoundingClientRect?.().height || boxHeightRef.current || BOX_MIN_HEIGHT;
+    let last = boxHeightRef.current;
+    startDrag(event, { axis: 'y', onMove: dy => { last = clampBoxHeight(from - dy, panelHeight()); setBoxHeight(last); }, onEnd: () => saveBoxHeight(last) });
+  };
+  const boxKey = event => {
+    const current = boxHeightRef.current ?? draftRef.current?.getBoundingClientRect?.().height ?? BOX_MIN_HEIGHT;
+    const step = event.shiftKey ? 48 : 16;
+    if (event.key === 'Home') { event.preventDefault(); setBoxHeight(null); saveBoxHeight(null); return; }
+    const next = event.key === 'ArrowUp' ? current + step : event.key === 'ArrowDown' ? current - step : null;
+    if (next == null) return;
+    event.preventDefault();
+    const height = clampBoxHeight(next, panelHeight());
+    setBoxHeight(height);
+    saveBoxHeight(height);
+  };
+  const resetBox = () => { setBoxHeight(null); saveBoxHeight(null); };
   const typingRef = useRef(onTyping);
   useEffect(() => { typingRef.current = onTyping; });
   const notifyTyping = value => { if (typeof typingRef.current === 'function') typingRef.current(!!value); };
@@ -54,21 +81,22 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
   }, [messages.length]);
   const canSuggest = typeof onSuggest === 'function';
   const suggest = async () => {
-    if (!canSuggest || suggesting || disabled || paused) return;
+    // Pausing neither blocks a suggestion nor stops one being written: the candidate may prepare a reply while paused.
+    if (!canSuggest || suggesting || disabled) return;
     setSuggesting(true);
     setSuggestError('');
     let result;
     try { result = await onSuggest(); } catch { result = { error: 'Could not suggest a reply. Try again.' }; }
     const text = typeof result?.text === 'string' ? result.text.slice(0, CHAT_MAX_LENGTH) : '';
     // The draft lives in the parent, so a reply that arrives after the panel was closed still lands in the box.
-    if (!mountedRef.current) { if (text) setDraft(text); return; }
+    if (!mountedRef.current) { if (text) setDraft(text, { generated: true }); return; }
     setSuggesting(false);
     if (!text) {
       setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.');
       notifyTyping(false);
       return;
     }
-    setDraft(text);
+    setDraft(text, { generated: true });
     // The box gets focus with the cursor at the end, ready to edit or press Enter.
     const box = draftRef.current;
     if (box && typeof box.focus === 'function') {
@@ -90,7 +118,7 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
     setSuggestError('');
     notifyTyping(false);
   };
-  return <section className="flex h-full min-h-0 flex-col rounded-2xl bg-white text-[#202124]" aria-label="Call chat">
+  return <section ref={sectionRef} className="flex h-full min-h-0 flex-col rounded-2xl bg-white text-[#202124]" aria-label="Call chat">
     <header className="flex items-center justify-between px-5 pb-2 pt-4">
       <h2 className="text-lg font-normal">In-call messages</h2>
       {typeof onClose === 'function' && <button type="button" aria-label="Close chat" onClick={onClose} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>}
@@ -104,6 +132,12 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
       </li>)}
     </ol>
     {suggestError && <p role="status" className="mx-5 mb-2 text-xs text-[#d93025]">{suggestError}</p>}
+    {/* Dragging this grip up makes the message box taller; a double click goes back to automatic. */}
+    <div role="separator" aria-orientation="horizontal" aria-label="Resize message box" aria-valuenow={boxHeight ?? undefined} tabIndex={0} title="Drag to resize"
+      onPointerDown={dragBox} onKeyDown={boxKey} onDoubleClick={resetBox}
+      className="group mx-4 flex h-3 shrink-0 cursor-row-resize touch-none items-center justify-center outline-none">
+      <span aria-hidden="true" className="h-1 w-10 rounded-full bg-[#dadce0] transition-colors group-hover:bg-[#1a73e8] group-focus-visible:bg-[#1a73e8] group-active:bg-[#1a73e8]" />
+    </div>
     <form className="m-4 mt-0 flex items-end gap-1 rounded-3xl bg-[#f1f3f4] py-1 pl-4 pr-1" aria-label="Send a chat message" onSubmit={event => { event.preventDefault(); submit(); }}>
       <textarea
         ref={draftRef}
@@ -111,7 +145,8 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
         rows={1}
         maxLength={CHAT_MAX_LENGTH}
         disabled={disabled}
-        className="max-h-28 min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[13px] text-[#202124] outline-none placeholder:text-[#5f6368] disabled:cursor-not-allowed"
+        style={{ maxHeight: `min(${boxMax}px, 60vh)` }}
+        className="min-h-9 min-w-0 flex-1 resize-none bg-transparent py-2 text-[13px] text-[#202124] outline-none placeholder:text-[#5f6368] disabled:cursor-not-allowed"
         value={draft}
         onChange={event => { setDraft(event.target.value); notifyTyping(event.target.value.length > 0); }}
         onFocus={() => { setFocused(true); if (draft) notifyTyping(true); }}
@@ -125,7 +160,7 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
         }}
         placeholder={disabled ? 'No one else is here' : 'Send a message'}
       />
-      {canSuggest && <button type="button" aria-label="Suggest a reply" title="Suggest a reply" onClick={suggest} aria-busy={suggesting} className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${suggesting ? 'cursor-wait text-[#1a73e8]' : 'text-[#5f6368] hover:bg-black/5 disabled:text-[#9aa0a6] disabled:hover:bg-transparent'}`} disabled={disabled || paused || suggesting}>{suggesting ? <LoaderCircle size={18} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={18} aria-hidden="true" />}</button>}
+      {canSuggest && <button type="button" aria-label="Suggest a reply" title="Suggest a reply" onClick={suggest} aria-busy={suggesting} className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${suggesting ? 'cursor-wait text-[#1a73e8]' : 'text-[#5f6368] hover:bg-black/5 disabled:text-[#9aa0a6] disabled:hover:bg-transparent'}`} disabled={disabled || suggesting}>{suggesting ? <LoaderCircle size={18} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={18} aria-hidden="true" />}</button>}
       {draft.length >= CHAT_COUNTER_FROM && <span data-testid="chat-counter" className="self-center text-[11px] tabular-nums text-[#5f6368]">{draft.length}/{CHAT_MAX_LENGTH}</span>}
       <button type="submit" aria-label="Send chat message" className="grid h-9 w-9 place-items-center rounded-full text-[#1a73e8] hover:bg-black/5 disabled:text-[#9aa0a6] disabled:hover:bg-transparent" disabled={disabled || paused || !draft.trim()}><Send size={18} aria-hidden="true" /></button>
     </form>

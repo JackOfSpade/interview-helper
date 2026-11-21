@@ -101,6 +101,7 @@ export const SETUP_STEPS = Object.freeze([
   { step: 'plan', label: 'Planning the interview', hint: 'the longest step, about a minute' },
   { step: 'voice', label: "Warming up the interviewer's voice" },
   { step: 'audio', label: 'Turning on your microphone' },
+  { step: 'screens', label: 'Preparing the shared screens' },
   { step: 'sessions', label: 'Bringing the interviewer in' },
 ]);
 

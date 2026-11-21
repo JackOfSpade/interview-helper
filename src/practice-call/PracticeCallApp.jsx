@@ -115,7 +115,7 @@ export default function PracticeCallApp() {
       setMuted: value => invoke('setMuted', value),
       leave: () => invoke('leave'),
       getPreparedCards: () => invoke('getPreparedCards'),
-      sendChat: text => invoke('sendChat', text),
+      sendChat: (text, options) => invoke('sendChat', text, options),
       setTyping: value => invoke('setTyping', value),
       setPaused: value => invoke('setPaused', value),
       updatePad: text => invoke('updatePad', text),

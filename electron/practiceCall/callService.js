@@ -26,7 +26,7 @@ const LATE_JOIN_MAX_MS = 210000;
 const COLLEAGUE_IDS = Object.freeze(['B', 'C', 'D', 'E']);
 // Shown while the planning step runs, before the call can ring.
 // The setup steps in the order they run; the window lists them and marks the one in progress.
-const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio', 'sessions']);
+const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio', 'screens', 'sessions']);
 // How long after Ready the call rings: long enough to feel like someone dialling in, short enough not to drag.
 const RING_DELAY_MIN_MS = 3000;
 const RING_DELAY_MAX_MS = 7000;
@@ -92,6 +92,8 @@ const DEFAULTS = Object.freeze({
   rateForTier: lazily(() => moduleExport(() => import('./eleven/dialogueVoice.js'), ['rateForTier'])),
   voiceFactory: lazily(() => moduleExport(() => import('./eleven/dialogueVoice.js'), ['createDialogueVoiceFactory', 'createDialogueVoice'])),
   panelVoiceFactory: lazily(() => moduleExport(() => import('./eleven/panelVoice.js'), ['createPanelVoiceFactory'])),
+  candidateVoice: lazily(() => moduleExport(() => import('./candidateVoice.js'), ['createCandidateVoice'])),
+  visuals: lazily(() => moduleExport(() => import('./visuals.js'), ['makeVisuals'])),
   transcribeVerbatim: lazily(() => moduleExport(() => import('./eleven/scribe.js'), ['transcribeVerbatim'])),
   modelStore: lazily(() => moduleExport(() => import('./models/modelStore.js'), ['createModelStore'])),
   questionHistory: lazily(() => moduleExport(() => import('./questionHistory.js'), ['createQuestionHistory'])),
@@ -268,6 +270,8 @@ const ENGINE_NOTICES = Object.freeze({
   'voice-open-failed': 'Your connection is unstable. They may take a moment to respond.',
   'voice-failed': 'Your connection is unstable. They may take a moment to respond.',
   'playback-stalled': 'Poor connection. Audio may be choppy.',
+  // The candidate's voice could not say a sent message, twice: nobody heard it (it stays in the chat history).
+  'candidate-voice-failed': "Your audio didn't go through. Send your message again.",
 });
 const wordCountOf = text => String(text ?? '').trim().split(/\s+/u).filter(Boolean).length;
 function errorState(code, message) {
@@ -308,7 +312,7 @@ export function createPracticeCallService(deps = {}) {
   const snapshot = () => ({
     ...state, chat: state.chat.map(item => ({ ...item })), captions: state.captions.map(item => ({ ...item })),
     notice: state.notice ? { ...state.notice } : null, setup: state.setup ? { ...state.setup } : null, participants: state.participants.map(item => ({ ...item })),
-    screen: state.screen ? { ...state.screen } : null, sharing: state.sharing ? { ...state.sharing } : null, pad: { ...state.pad },
+    screen: state.screen ? { ...state.screen, ...(state.screen.visual ? { visual: { ...state.screen.visual } } : {}) } : null, sharing: state.sharing ? { ...state.sharing } : null, pad: { ...state.pad },
   });
   const publish = () => { const next = snapshot(); for (const listener of stateListeners) { try { listener(next); } catch { /* listeners stay isolated */ } } };
   const emitEvent = event => {
@@ -460,10 +464,28 @@ export function createPracticeCallService(deps = {}) {
     if (held && !self.finished) applyPadEvent(self, held);
   }
   /** Puts the content on the stage, closing the entry it replaces; the record's atMs is when it appeared. */
-  function showScreen(self, { title, content, speakerId }, atMs) {
+  function showScreen(self, { title, content, speakerId, visualId }, atMs) {
     closeScreenEntry(self, atMs);
-    self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId });
-    state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId) };
+    const visual = visualView(self, visualId);
+    // The record names the visual's file so the replay can show it again.
+    const file = visual ? self.visuals.get(visualId)?.file : null;
+    self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId, ...(visual ? { visual: { ...visual, ...(file ? { file } : {}) } } : {}) });
+    state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId), ...(visual ? { visual } : {}) };
+  }
+  /** The screen a suggested reply should see: the one shown now, else the last one shown in this call. */
+  function sharedScreenForDraft(self) {
+    if (state.screen?.content) return { title: state.screen.title || '', content: state.screen.content, current: true, ...visualForDraft(self, state.screen.visual?.id) };
+    const last = (self.screens || []).at(-1);
+    return last?.content ? { title: last.title || '', content: last.content, current: false, ...visualForDraft(self, last.visual?.id) } : null;
+  }
+  /** The screen's visual for a suggestion: what it shows, the diagram's own SVG, and a picture itself (Claude reads images). */
+  function visualForDraft(self, id) {
+    const visual = id ? self.visuals?.get(id) : null;
+    if (!visual) return {};
+    return {
+      visual: { kind: visual.kind, description: visual.description || '', ...(visual.kind === 'diagram' && visual.svg ? { svg: visual.svg } : {}) },
+      ...(visual.kind === 'picture' ? { image: { label: 'Picture on the shared screen', mimeType: visual.mime, data: Buffer.from(visual.data).toString('base64') } } : {}),
+    };
   }
   function joinColleague(self, entry) {
     if (call !== self || self.finished || self.interviewerEnded || self.interviewerLeft || entry.joined) return;
@@ -702,6 +724,7 @@ export function createPracticeCallService(deps = {}) {
     closeEar(self);
     try { self.downloadAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.planAbort?.abort?.(); } catch { /* already aborted */ }
+    try { self.visualsAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.draftAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.audioMirror?.stop?.(); } catch { /* audio mirror already stopped */ }
     try { await self.helper?.stop?.(); } catch { /* audio owner already stopped */ }
@@ -950,6 +973,27 @@ export function createPracticeCallService(deps = {}) {
   }
 
   /**
+   * The candidate's voices for this call: one female and one male library voice, each drawn at random from the
+   * same pool as the interviewers', avoiding every voice already drawn. A failed draw leaves that one out; with
+   * neither, sent messages reach the interviewer as typed text, as before the voice.
+   */
+  async function drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken }) {
+    const found = {};
+    const avoid = new Set(taken.filter(Boolean));
+    for (const gender of ['female', 'male']) {
+      try {
+        const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, gender, excludeVoiceIds: [...avoid, ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache });
+        const voiceId = drawn?.voice?.voiceId;
+        if (!voiceId) continue;
+        avoid.add(voiceId);
+        found[gender] = { voiceId, name: String(drawn.voice.voiceName ?? ''), accent: String(drawn.voice.accent ?? ''), age: String(drawn.voice.age ?? '') };
+      } catch (error) { warn(`[PracticeCall] candidate ${gender} voice unavailable: ${error?.message || error}`); }
+    }
+    note(`candidate voices ${JSON.stringify(found)}`);
+    return Object.keys(found).length ? found : null;
+  }
+
+  /**
    * Up to four more distinct library voices to offer the planner, each avoiding every voice already
    * taken. A failed draw, an unusable voice or a repeated voice or name only means one voice
    * fewer: the lead alone is enough for a call. No voice is made or warmed here: the planner
@@ -1153,6 +1197,65 @@ export function createPracticeCallService(deps = {}) {
     }
   }
 
+  /**
+   * Every visual the plan asked for (planner: `visual` on a screen part), or an empty map. Off unless the app
+   * passes the two Claude calls in (`visualPickText`, `diagramText`), so the unit suites search and draw nothing.
+   */
+  async function prepareVisuals(self) {
+    const parts = [];
+    for (const problem of self.settledPlan?.problems || []) {
+      (problem.parts || []).forEach((part, index) => {
+        if (part.visual) parts.push({ id: `${problem.ref}.${index + 1}`, kind: part.visual.kind, search: part.visual.search, shows: part.visual.shows, screen: { title: part.title, content: part.content } });
+      });
+    }
+    if (!parts.length || (typeof deps.visualPickText !== 'function' && typeof deps.diagramText !== 'function')) return new Map();
+    try {
+      const makeVisuals = await resolve('visuals');
+      self.visualsAbort = new AbortController();
+      return await makeVisuals({
+        parts, fetch: deps.fetch ?? globalThis.fetch, clock, signal: self.visualsAbort.signal,
+        // Parallel's image search, passed in by the app (signed in with the owner's key); without it, Commons alone.
+        searchImages: typeof deps.imageSearch === 'function' ? deps.imageSearch : null,
+        pickText: typeof deps.visualPickText === 'function' ? deps.visualPickText : null,
+        diagramText: typeof deps.diagramText === 'function' ? deps.diagramText : null,
+        onEvent: fields => dbg('visual', fields),
+      });
+    } catch (error) {
+      warn(`[PracticeCall] visuals unavailable: ${error?.message || error}`);
+      return new Map();
+    }
+  }
+
+  /** The visuals made go on their screens (and to disk, for the replay); a screen whose visual failed keeps its text alone. */
+  async function settleVisuals(self) {
+    const made = self.visualsTask ? await self.visualsTask : new Map();
+    self.visualsTask = null;
+    self.visuals = made;
+    for (const [id, visual] of made) {
+      const dot = id.lastIndexOf('.');
+      const part = self.prepared?.[id.slice(0, dot)]?.parts?.[Number(id.slice(dot + 1)) - 1];
+      if (part) part.visual = { id, kind: visual.kind };
+      const file = `${id.replace(/[^A-Za-z0-9._-]/gu, '_')}.${visual.kind === 'diagram' ? 'svg' : visual.mime === 'image/png' ? 'png' : visual.mime === 'image/webp' ? 'webp' : 'jpg'}`;
+      visual.file = file;
+      try {
+        await fs.mkdir(path.join(self.dir, 'visuals'), { recursive: true });
+        await fs.writeFile(path.join(self.dir, 'visuals', file), visual.data);
+      } catch (error) { warn(`[PracticeCall] visual not saved for the replay: ${error?.code || error?.message || error}`); }
+    }
+    mark(self, 'screens', { visuals: made.size });
+  }
+
+  /** A visual as a screen carries it: what it is, what it shows and its credit; the picture itself is read separately. */
+  function visualView(self, id) {
+    const visual = id ? self?.visuals?.get(id) : null;
+    if (!visual) return null;
+    return {
+      id, kind: visual.kind, description: visual.description || '', ...(visual.credit ? { credit: visual.credit } : {}),
+      // Served by the practice-call:// protocol from the call's own folder (replayProtocol.js).
+      ...(visual.file && self.callId ? { url: `practice-call://${self.callId}/visuals/${visual.file}` } : {}),
+    };
+  }
+
   /** The plan as the interviewer prompts read it: voice keys mapped to call ids and names, a colleague who cannot speak left out. */
   function callPlanOf(self) {
     const plan = self.settledPlan;
@@ -1174,7 +1277,15 @@ export function createPracticeCallService(deps = {}) {
         number: question.number, ...(question.number === 0 ? { text: String(question.text ?? '') } : {}),
         askedBy: idByKey.get(question.askedBy) ?? 'A', minutes: question.minutes, probes: [...(question.probes || [])],
       })),
-      problems: (plan.problems || []).map(problem => ({ ...problem, parts: problem.parts.map(part => ({ ...part })), edgeCases: [...(problem.edgeCases || [])], hints: [...(problem.hints || [])] })),
+      // A part's visual is what was actually made (kind and what it shows), never the planner's request.
+      problems: (plan.problems || []).map(problem => ({
+        ...problem,
+        parts: problem.parts.map((part, index) => {
+          const made = visualView(self, `${problem.ref}.${index + 1}`);
+          return { title: part.title, content: part.content, ...(made ? { visual: { kind: made.kind, description: made.description } } : {}) };
+        }),
+        edgeCases: [...(problem.edgeCases || [])], hints: [...(problem.hints || [])],
+      })),
     };
   }
 
@@ -1274,6 +1385,11 @@ export function createPracticeCallService(deps = {}) {
       ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn, pageCache })
       : [];
     if (call !== self || self.finished) return snapshot();
+    // The candidate's own voices: one female and one male, drawn the same way and never one an interviewer may use.
+    self.candidateVoiceIds = deps.candidateVoices === true && pool?.library && typeof pool.library.drawVoice === 'function'
+      ? await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken: [recentVoiceId, leadBase.voiceId, ...extras.map(item => item.persona.voiceId)] })
+      : null;
+    if (call !== self || self.finished) return snapshot();
     const drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
       key: `V${at + 1}`, name: item.persona.name, voiceId: item.persona.voiceId, persona: item.persona,
       gender: String(item.chosen?.gender ?? ''), age: String(item.chosen?.age ?? ''), accent: String(item.chosen?.accent ?? ''),
@@ -1291,6 +1407,9 @@ export function createPracticeCallService(deps = {}) {
     const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament });
     if (!settled) return snapshot();
     mark(self, 'cast');
+    // Pictures and diagrams for the prepared screens are made while the rest of setup runs; the
+    // interviewer sessions start only once they are settled, so every screen is ready before the ring.
+    self.visualsTask = prepareVisuals(self);
     const { persona, factory } = settled;
     // Warm the unsaved library voice up before the call can ring, so its first real line is not
     // the slow one. A voice that does not answer is a failed call, not a second pick. Only the
@@ -1357,6 +1476,9 @@ export function createPracticeCallService(deps = {}) {
       inference,
       onToneSample: sample => { self.toneSamples.push(sample); },
     });
+    setSetupStep('screens');
+    await settleVisuals(self);
+    if (call !== self || self.finished) return snapshot();
     setSetupStep('sessions');
     await createSessions(self);
     mark(self, 'sessions');
@@ -1625,7 +1747,8 @@ export function createPracticeCallService(deps = {}) {
       const title = String(event.title ?? '');
       const content = String(event.content ?? '');
       const delayMs = Number.isFinite(event.delayMs) ? Math.max(0, event.delayMs) : 0;
-      const item = { title, content, speakerId };
+      const visualId = typeof event.visualId === 'string' && call.visuals?.has(event.visualId) ? event.visualId : null;
+      const item = { title, content, speakerId, ...(visualId ? { visualId } : {}) };
       // A newer screen event replaces one still coming up, and starts its own delay.
       // A pad open held back for the replaced share keeps waiting for this one.
       const heldPad = delayMs > 0 && call.shareTimer != null ? call.pendingPad : null;
@@ -1736,6 +1859,7 @@ export function createPracticeCallService(deps = {}) {
     closeEar(self);
     try { self.downloadAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.planAbort?.abort?.(); } catch { /* already aborted */ }
+    try { self.visualsAbort?.abort?.(); } catch { /* already aborted */ }
     try { self.draftAbort?.abort?.(); } catch { /* already aborted */ }
     await closeWarmSessions(self);
     state.modelDownload = null;
@@ -1770,6 +1894,32 @@ export function createPracticeCallService(deps = {}) {
     return snapshot();
   }
 
+  /**
+   * The candidate's voice for the engine, or null (no voices drawn: sent messages stay typed). The voice is plain,
+   * with no room treatment: it is the candidate's own side of the line. Tags come from `candidateTagText`, which the
+   * app passes in; without it the lines are spoken untagged.
+   */
+  async function makeCandidateVoice(self) {
+    const ids = self.candidateVoiceIds;
+    if (!ids || !self.key) return null;
+    try {
+      const voiceFactory = await resolve('voiceFactory');
+      const createCandidateVoice = await resolve('candidateVoice');
+      const factories = {};
+      for (const [gender, voice] of Object.entries(ids)) factories[gender] = voiceFactory({ key: self.key, voiceId: voice.voiceId, tier: self.tier });
+      return createCandidateVoice({
+        factories, clock,
+        gender: () => (typeof deps.candidateVoiceGender === 'function' ? deps.candidateVoiceGender() : undefined),
+        tagText: typeof deps.candidateTagText === 'function' ? deps.candidateTagText : null,
+        context: () => ({ transcript: self.engine?.state?.().transcript ?? [], brief: self.brief }),
+        onEvent: event => dbg('candidate-voice-line', event),
+      });
+    } catch (error) {
+      warn(`[PracticeCall] candidate voice unavailable: ${error?.message || error}`);
+      return null;
+    }
+  }
+
   /** The line opens: the engine starts and the interviewer speaks first. Reached by answering the ring or by a returned call being picked up. */
   async function connectCall() {
     if (!call || call.engine || !['ringing', 'calling', 'connecting'].includes(state.phase)) return snapshot();
@@ -1785,10 +1935,13 @@ export function createPracticeCallService(deps = {}) {
       const panelVoiceFactory = await resolve('panelVoiceFactory');
       if (call !== self || self.finished) return snapshot();
       const voice = panelVoiceFactory({ factories: { A: self.voice, ...Object.fromEntries(panel.map(entry => [entry.id, entry.factory])) }, leadId: 'A' });
+      const candidateVoice = await makeCandidateVoice(self);
+      if (call !== self || self.finished) return snapshot();
       self.engine = engineFactory({
         clock, sessions: self.sessions, restartSession: self.restartSession, audio: self.audioMirror,
         voice, ear: self.ear, onEvent: onEngineEvent, newId,
         prepared: self.prepared ?? {},
+        ...(candidateVoice ? { candidateVoice } : {}),
         // A returned call: the interviewer is told the first ring was missed, and how long ago.
         ...(self.missedCall ? { callback: { how: self.missedCall.how, agoMs: Math.max(0, clock.now() - self.missedCall.at) } } : {}),
         ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, present: entry.joined, joined: entry.joined }))] } } : {}),
@@ -2330,19 +2483,21 @@ export function createPracticeCallService(deps = {}) {
       publish();
       return snapshot();
     },
-    sendChat: text => {
+    // options.generated: the text came from Suggest a reply. It is heard the same, but never counts as practice.
+    sendChat: (text, options) => {
       // Nobody is listening once the interviewer has left, so nothing is recorded as delivered.
       if (state.interviewerLeft) return snapshot();
       // Paused: only the shortcut resumes, so a message is neither recorded nor sent.
       if (state.paused) return snapshot();
       const value = typeof text === 'string' ? text.trim() : '';
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
-      dbg('user', { action: 'chat', text: value });
+      const generated = options?.generated === true;
+      dbg('user', { action: 'chat', text: value, ...(generated ? { generated } : {}) });
       state.chat.push({ from: 'candidate', text: value, atMs: Math.round(clock.now() - (call?.startedAt || clock.now())) });
       // While the interviewers are still leaving the line is typed into as in a real call: the message shows
       // in the chat, nobody answers it, and the interviewer sessions are never sent it.
       if (!call?.interviewerEnded) {
-        try { call?.engine?.typed?.(value); } catch { /* engine already ended */ }
+        try { call?.engine?.typed?.(value, { generated }); } catch { /* engine already ended */ }
         // A typed message carries the pad text along, so it counts as sent.
         if (call && state.pad.open) snapshotPad(call, undefined);
       }
@@ -2418,6 +2573,8 @@ export function createPracticeCallService(deps = {}) {
           callText: deps.draftText, signal: abort.signal,
           brief: self.promptBrief || promptBrief(self.brief), listingText: sources.listingText, careerText: sources.careerText,
           application, candidateName: self.candidateName, transcript: engineState.transcript, pad: state.pad,
+          // What is on the shared screen now; when nothing is, the last screen shown (the question may still be about it).
+          screen: sharedScreenForDraft(self),
           pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),
         });
         dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });

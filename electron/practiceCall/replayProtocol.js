@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 
 const SCHEME = 'practice-call:';
 const AUDIO_NAME = 'call.m4a';
+const VISUAL_TYPES = Object.freeze({ jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', svg: 'image/svg+xml' });
 
 function notFound() {
   return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
@@ -38,6 +39,30 @@ function parseRange(header, size) {
  */
 export function createReplayHandler({ store, createReadStream = nodeCreateReadStream } = {}) {
   if (!store || typeof store.audioPath !== 'function') throw new TypeError('Replay protocol requires a call store.');
+  // A shared screen's picture or diagram: one plain file in the call's visuals folder, never a symlink.
+  // An SVG is served with a policy that lets nothing in it load or run.
+  async function visual(url, request) {
+    if (typeof store.visualPath !== 'function') return notFound();
+    const name = url.pathname.slice('/visuals/'.length);
+    const type = VISUAL_TYPES[name.split('.').pop()];
+    if (!type || !url.hostname) return notFound();
+    let file;
+    let entry;
+    try {
+      file = await store.visualPath(url.hostname, name);
+      if (!file) return notFound();
+      entry = await lstat(file);
+    } catch { return notFound(); }
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 4 * 1024 * 1024) return notFound();
+    if (request.method && request.method !== 'GET' && request.method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { allow: 'GET, HEAD' } });
+    const headers = {
+      'content-type': type, 'content-length': String(entry.size), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+      ...(type === 'image/svg+xml' ? { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'" } : {}),
+    };
+    if (request.method === 'HEAD') return new Response(null, { status: 200, headers });
+    return new Response(Readable.toWeb(createReadStream(file)), { status: 200, headers });
+  }
+
   return async function handler(request) {
     if (!request || typeof request.url !== 'string') return notFound();
     let url;
@@ -47,6 +72,7 @@ export function createReplayHandler({ store, createReadStream = nodeCreateReadSt
       return notFound();
     }
     if (url.protocol !== SCHEME || url.username || url.password) return notFound();
+    if (url.pathname.startsWith('/visuals/') && !url.search) return visual(url, request);
     if (url.pathname !== `/${AUDIO_NAME}` || url.search) return notFound();
     const callId = url.hostname;
     if (!callId) return notFound();

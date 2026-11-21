@@ -19,6 +19,8 @@ const TRANSCRIPT_TURNS = 40;
 const TURN_MAX = 1500;
 const POOL_MAX = 30;
 const PAD_MAX = 4000;
+const SCREEN_MAX = 8000;
+const SVG_MAX = 12000;
 
 const clip = (value, max) => {
   const text = String(value ?? '').trim();
@@ -56,6 +58,11 @@ export function draftAnswerPrompt(context = {}) {
     .map(card => `Q: ${clip(card.question, 400)}\nA: ${clip(card.answer, 1200)}`);
   const pad = context.pad?.open && typeof context.pad.text === 'string' && context.pad.text.trim()
     ? clip(context.pad.text, PAD_MAX) : '';
+  const shownVisual = context.screen?.visual;
+  const visualLines = shownVisual && typeof shownVisual.description === 'string' && shownVisual.description.trim()
+    ? `\n${shownVisual.kind === 'diagram' ? 'Diagram above the text' : 'Picture above the text (attached)'}: ${clip(shownVisual.description, 400)}${shownVisual.kind === 'diagram' && shownVisual.svg ? `\nThe diagram itself (SVG):\n${clip(shownVisual.svg, SVG_MAX)}` : ''}` : '';
+  const screen = context.screen && typeof context.screen.content === 'string' && context.screen.content.trim()
+    ? `${context.screen.title ? `Title: ${clip(context.screen.title, 200)}\n` : ''}${clip(context.screen.content, SCREEN_MAX)}${visualLines}` : '';
   const section = (title, body) => (body ? `\n<${title}>\n${body}\n</${title}>\n` : '');
   return [
     `You are ${name || 'the candidate'}, a job candidate in a live video interview for ${brief.role || 'the role'}${brief.company ? ` at ${brief.company}` : ''}.`,
@@ -69,6 +76,7 @@ export function draftAnswerPrompt(context = {}) {
     '- Answer the question that was asked, directly, the way a strong candidate would.',
     '- Fit the length to the question: a greeting or small talk gets one or two sentences; a behavioural or experience question gets a short story (situation, what you did, the result) in about 80 to 180 words; a technical question gets a clear, direct explanation. Never more than 250 words.',
     '- If the interviewer asked you to write code or work in the shared pad, describe your approach briefly in chat; the pad text, if any, is below.',
+    '- The interviewer may be sharing their screen (a problem, a diagram, data, a timeline); its text is below. You can see it, so work from it directly: use its actual numbers, names and details, and never say you cannot see it or ask them to share or paste it.',
     '- If the last thing said is not a question (for example, they are wrapping up or asking if you have questions), reply as a candidate naturally would, using the listing and company to ask one good question when that fits.',
     '- Output only the reply text, nothing before or after it.',
     section('role', [brief.company && `Company: ${brief.company}`, brief.role && `Role: ${brief.role}`, brief.location && `Location: ${brief.location}`, brief.roleSummary && `Summary: ${brief.roleSummary}`, ...list(brief.roleThemes).map(theme => `Theme: ${theme}`), ...list(brief.companyFacts).slice(0, 8).map(fact => `Company fact: ${fact}`)].filter(Boolean).join('\n')),
@@ -77,6 +85,7 @@ export function draftAnswerPrompt(context = {}) {
     section('submitted-resume', resume && resume !== career ? resume : ''),
     section('submitted-cover-letter', coverLetter),
     section('prepared-answers (your own notes; use one when it fits the question, reworded as you would say it)', pool.join('\n\n')),
+    section(context.screen?.current === false ? 'screen-the-interviewer-shared-earlier' : 'interviewer-shared-screen', screen),
     section('shared-pad', pad),
     section('conversation-so-far', lines.length ? lines.join('\n') : '(nothing has been said yet)'),
     'Your reply:',
@@ -99,7 +108,9 @@ export function cleanDraft(text) {
 /** One text call. Returns the reply text; throws when the call fails or says nothing. */
 export async function draftCandidateAnswer({ callText, signal, ...context } = {}) {
   if (typeof callText !== 'function') throw new Error('No text call is available to draft an answer.');
-  const reply = await callText({ prompt: draftAnswerPrompt(context), signal });
+  // A picture on the shared screen goes with the prompt, so the reply can work from what it shows.
+  const image = context.screen?.image && typeof context.screen.image.data === 'string' ? [context.screen.image] : null;
+  const reply = await callText({ prompt: draftAnswerPrompt(context), signal, ...(image ? { pageImages: image } : {}) });
   const text = cleanDraft(typeof reply === 'string' ? reply : reply?.text);
   if (!text) throw new Error('The drafted answer was empty.');
   return text;

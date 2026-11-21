@@ -154,6 +154,14 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
     return ipcRenderer.invoke('interview-app:set-text-size', { percent });
   },
   onTextSizeChanged: createListener('interview-app:text-size-changed'),
+  // The candidate's voice in practice calls: 'female' or 'male'.
+  getPracticeVoice: () => ipcRenderer.invoke('interview-app:get-practice-voice'),
+  setPracticeVoice: (args) => {
+    const { gender } = args || {};
+    return ipcRenderer.invoke('interview-app:set-practice-voice', { gender });
+  },
+  // The App menu's Settings… (⌘,).
+  onOpenSettings: createListener('interview-app:open-settings'),
   // A Prepare wrote Q&A. General Q&A is shared by every interview, so whichever one is on screen reloads.
   onInterviewQaChanged: createListener('interview-app:qa-changed'),
   // Bug report: the typed description and what the window saw. The main process adds the rest.

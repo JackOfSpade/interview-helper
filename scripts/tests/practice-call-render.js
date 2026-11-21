@@ -35,7 +35,7 @@ async function loadServerBundle() {
     SharedScreen: 'SharedScreen.jsx',
     CodingPad: 'CodingPad.jsx',
   };
-  const namespaces = { callModel: 'callModel.js', replayModel: 'replayModel.js', ringtone: 'ringtone.js', persona: 'persona.js', screenMarkup: 'screenMarkup.js' };
+  const namespaces = { callModel: 'callModel.js', replayModel: 'replayModel.js', ringtone: 'ringtone.js', persona: 'persona.js', screenMarkup: 'screenMarkup.js', panelSize: 'panelSize.js' };
   const lines = [
     `import React from ${JSON.stringify(react)};`,
     `import { renderToStaticMarkup } from ${JSON.stringify(server)};`,
@@ -176,6 +176,16 @@ export const presentingTests = [
         const markup = renderToStaticMarkup(React.createElement(SharedScreen, { title: 'Two sum', content: SCREEN.content, presenterName: 'John Park' }));
         assert(markup.includes('if (a &lt; b &amp;&amp; c &gt; d) { return `x`; }'), 'angle brackets and backticks inside a code block are text');
         assert(markup.includes('<strong') && markup.includes('<ul') && markup.includes('<pre'), 'bold, bullets and code block are elements');
+        // The call window turns selection off; a shared screen is read-only but can be selected and copied from.
+        assert(/data-screen-body="true"[^>]*class="[^"]*\bselect-text\b/.test(markup), 'the shared screen text is selectable');
+        assert(/<h2[^>]*class="[^"]*\bselect-text\b/.test(markup), 'the shared screen title is selectable');
+        assert(!/contenteditable/i.test(markup), 'and it stays read-only');
+        const pictured = renderToStaticMarkup(React.createElement(SharedScreen, { title: 'Moon base', content: 'Could you live here?', visual: { kind: 'picture', url: 'practice-call://call-1/visuals/p1.1.jpg', description: 'A grey, cratered plain.', credit: 'NASA, Public domain, via Wikimedia Commons' } }));
+        assert(/<figure[^>]*data-screen-visual="picture"/.test(pictured) && pictured.includes('src="practice-call://call-1/visuals/p1.1.jpg"') && pictured.includes('alt="A grey, cratered plain."'), 'a prepared picture shows above the text');
+        assert(pictured.includes('Photo: NASA, Public domain, via Wikimedia Commons'), 'with its credit');
+        assert(pictured.indexOf('<figure') < pictured.indexOf('Could you live here?'), 'above the text');
+        const outside = renderToStaticMarkup(React.createElement(SharedScreen, { title: 'T', content: 'x', visual: { kind: 'picture', url: 'https://example.com/a.jpg' } }));
+        assert(!outside.includes('<img'), 'a picture from anywhere else is never shown');
         const hostile = renderToStaticMarkup(React.createElement(SharedScreen, { title: '<b>t</b>', content: '<script>alert(1)</script> <img src=x onerror=y>' }));
         assert(!hostile.includes('<script') && !hostile.includes('<img') && hostile.includes('&lt;script&gt;'), 'HTML in content is never interpreted');
       } finally { await bundle.dispose(); }
@@ -448,6 +458,23 @@ export default [
         assert(!markup.includes('Interviewer is typing') && !markup.includes('chat-typing'), 'the candidate typing must not be shown as the interviewer typing');
         const left = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], disabled: true, onSend: () => {}, onTyping: () => {} }));
         assert(left.includes('disabled=""') && left.includes('No one else is in the call.'), 'the chat box is disabled once the interviewer left');
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
+    name: 'practice call render: the side panel and the chat box each have a resize handle, and dragged sizes stay inside the window',
+    async run() {
+      const bundle = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, ChatPanel, panelSize } = bundle.module;
+        const markup = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], onSend: () => {}, onTyping: () => {} }));
+        assert(/role="separator"[^>]*aria-orientation="horizontal"[^>]*aria-label="Resize message box"/.test(markup), 'the chat box has a vertical resize grip');
+        assert(!/<textarea[^>]*class="[^"]*\bmax-h-28\b/.test(markup), 'the box height cap comes from the dragged size, not a fixed class');
+        const { clampPanelWidth, clampBoxHeight, PANEL_MIN_WIDTH, STAGE_MIN_WIDTH, BOX_MIN_HEIGHT } = panelSize;
+        assert(clampPanelWidth(100, 1200) === PANEL_MIN_WIDTH, 'the panel never goes below its minimum width');
+        assert(clampPanelWidth(2000, 1200) === 1200 - STAGE_MIN_WIDTH, 'the call keeps its minimum width beside the panel');
+        assert(clampPanelWidth(500, 1200) === 500);
+        assert(clampBoxHeight(10, 600) === BOX_MIN_HEIGHT && clampBoxHeight(5000, 600) < 600 && clampBoxHeight(200, 600) === 200, 'the box stays between one line and a height that leaves the messages visible');
       } finally { await bundle.dispose(); }
     },
   },
@@ -985,6 +1012,7 @@ export default [
         const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
         try {
           const sent = [];
+          const sentOptions = [];
           const typing = [];
           let answer = null;
           let release;
@@ -992,7 +1020,7 @@ export default [
             getState: async () => ({ phase: 'in-call', persona: PERSONA, chat: [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }] }),
             onState: () => () => {},
             onEvent: () => () => {},
-            sendChat: async text => { sent.push(text); },
+            sendChat: async (text, options) => { sent.push(text); sentOptions.push(options); },
             setTyping: async value => { typing.push(value); },
             draftAnswer: () => new Promise(resolve => { release = () => resolve(answer); }),
           };
@@ -1021,6 +1049,19 @@ export default [
             await act(() => release());
             assert(window.document.body.textContent.includes('Could not suggest a reply. Try again.'), 'a failure is shown');
             assert(byLabel('Chat message').value === 'Your fleet work matches what I did at Northwind.', 'a failure keeps the draft');
+            // A sent suggestion, even edited, is marked so it never counts as practice; the candidate's own words are not.
+            const key = (node, init) => node.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
+            const setValue = (node, value) => {
+              Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(node, value);
+              node.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+            };
+            await act(() => setValue(byLabel('Chat message'), 'Your fleet work matches what I did at Northwind, mostly.'));
+            await act(() => key(byLabel('Chat message'), { key: 'Enter' }));
+            assert(sentOptions.at(-1)?.generated === true && Object.keys(sentOptions.at(-1)).length === 1, 'a sent suggestion is marked generated');
+            await act(() => setValue(byLabel('Chat message'), 'My own answer.'));
+            await act(() => key(byLabel('Chat message'), { key: 'Enter' }));
+            assert(sentOptions.at(-1) === undefined, 'typed by hand is not marked');
+            assert(JSON.stringify(sent.slice(-2)) === JSON.stringify(['Your fleet work matches what I did at Northwind, mostly.', 'My own answer.']), 'both are sent');
           } finally { await act(() => root.unmount()); }
         } finally { await bundle.dispose(); }
       });
@@ -1029,7 +1070,7 @@ export default [
         const { React, renderToStaticMarkup, ChatPanel } = server.module;
         assert(!renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], onSend: () => {}, onTyping: () => {} })).includes('Suggest a reply'));
         const paused = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], paused: true, onSend: () => {}, onTyping: () => {}, onSuggest: async () => ({}) }));
-        assert(/<button[^>]*aria-label="Suggest a reply"[^>]*disabled=""/.test(paused), 'the button is disabled while paused');
+        assert(!/<button[^>]*aria-label="Suggest a reply"[^>]*disabled=""/.test(paused), 'the button stays enabled while paused');
       } finally { await server.dispose(); }
     },
   },
@@ -1173,7 +1214,7 @@ export default [
         assert(callModel.downloadPercent({ receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }) === 25, 'downloadPercent reports the received fraction');
         assert(callModel.levelPercent(0.426) === 43, 'levelPercent rounds the meter level');
         assert(callModel.humanizeKey('pauseCount') === 'pause count', 'humanizeKey splits camelCase keys');
-        assert(callModel.setupProgress({ step: 'voice' }).map(item => item.status).join(',') === 'done,done,done,active,pending,pending', 'setupProgress marks the steps before the running one as done');
+        assert(callModel.setupProgress({ step: 'voice' }).map(item => item.status).join(',') === 'done,done,done,active,pending,pending,pending', 'setupProgress marks the steps before the running one as done');
         assert(callModel.setupProgress(null).every(item => item.status === 'pending'), 'setupProgress with no step leaves everything pending');
         assert(callModel.elapsedLabel(59999) === '59s' && callModel.elapsedLabel(65000) === '1m 05s', 'elapsedLabel counts seconds, then minutes');
         assert(JSON.stringify(callModel.mergeState({ phase: 'consent', level: 0 }, { phase: 'precheck' })) === JSON.stringify({ phase: 'precheck', level: 0 }), 'mergeState keeps the previous fields');

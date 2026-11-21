@@ -1983,6 +1983,7 @@ test('model download bar keeps one total across both models when the store repor
 });
 
 test('chat is accepted without an answer while the interviewer is leaving, and ignored once they have left', async () => {
+  const flags = [];
   const typed = [];
   const clock = manualClock();
   const { service, engine } = await liveCall({ deps: {
@@ -1990,22 +1991,26 @@ test('chat is accepted without an answer while the interviewer is leaving, and i
     clock,
     engineFactory: options => {
       engine.listener = options.onEvent;
-      return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }), typed: text => typed.push(text) };
+      return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }), typed: (text, options) => { typed.push(text); flags.push({ ...options }); } };
     },
   } });
   await service.start(ARGS);
   await service.answer();
   service.sendChat('before');
+  // A sent suggestion is marked, so it never counts as practice; anything else is the candidate's own.
+  service.sendChat('suggested', { generated: true, extra: 'ignored' });
+  assert.deepEqual(flags, [{ generated: false }, { generated: true }]);
+  typed.splice(1);
   engine.listener({ type: 'ended', reason: 'interviewer' });
   // They are still on the line for 2 s: a real call lets you type, and nobody answers.
   let state = service.sendChat('during');
-  assert.deepEqual(state.chat.map(item => item.text), ['before', 'during']);
+  assert.deepEqual(state.chat.map(item => item.text), ['before', 'suggested', 'during']);
   assert.deepEqual(typed, ['before'], 'the interviewer sessions never get it');
   const [leave] = clock.pending().filter(timer => timer.ms === 2000);
   clock.setNow(clock.now() + 2000);
   clock.fire(leave);
   state = service.sendChat('after');
-  assert.deepEqual(state.chat.map(item => item.text), ['before', 'during']);
+  assert.deepEqual(state.chat.map(item => item.text), ['before', 'suggested', 'during']);
   assert.deepEqual(typed, ['before']);
 });
 
@@ -3594,7 +3599,7 @@ test('setup: each step is published in order, with the planner attempt, and clea
     if (seen[seen.length - 1] !== key) seen.push(key);
   });
   const state = await service.start(ARGS);
-  assert.deepEqual(seen, ['account:1', 'voices:1', 'plan:1', 'plan:2', 'voice:1', 'audio:1', 'sessions:1']);
+  assert.deepEqual(seen, ['account:1', 'voices:1', 'plan:1', 'plan:2', 'voice:1', 'audio:1', 'screens:1', 'sessions:1']);
   assert.equal(state.phase, 'ringing');
   assert.equal(state.setup, null);
 });
@@ -3690,6 +3695,44 @@ test('plan: the engine gets the prepared problems by reference, and none when th
   const second = await panelStart(without);
   await second.service.answer();
   assert.deepEqual(without.engineOptions[0].prepared, {});
+});
+
+test('visuals: the diagram for a screen part is drawn during setup, saved for the replay, described to the interviewer and shown with its screen', async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200"><rect x="10" y="10" width="300" height="40" fill="#cde"/><text x="20" y="38" font-size="16">Egress 00:00</text></svg>';
+  const asked = [];
+  const setup = panelHarness({ cast: [], plan: drawn => soloPlan(drawn, {
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [
+      { title: 'EVA timeline', content: 'Egress 00:00, task A 00:00-01:10.', visual: { kind: 'diagram', shows: 'the tasks on a time axis, so the overlap is visible' } },
+      { title: 'Follow-up', content: 'What if task A runs late?' },
+    ], solution: 'It fits.', edgeCases: [], hints: [] }],
+  }), deps: { diagramText: async request => { asked.push(request); return { svg, description: 'A timeline bar from egress to the end of task A.' }; } } });
+  const started = await panelStart(setup);
+  assert.equal(asked.length, 1, 'one diagram, drawn before the call rings');
+  assert(asked[0].prompt.includes('Egress 00:00, task A 00:00-01:10.') && asked[0].schema);
+  const main = setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(main.options.callPlan.problems[0].parts[0].visual, { kind: 'diagram', description: 'A timeline bar from egress to the end of task A.' }, 'the interviewer is told what the screen shows');
+  assert.equal(main.options.callPlan.problems[0].parts[1].visual, undefined, 'a part without a visual has none');
+  await started.service.answer();
+  const engine = setup.engineOptions[0];
+  assert.deepEqual(engine.prepared.p1.parts[0].visual, { id: 'p1.1', kind: 'diagram' });
+  const callId = started.service.getState().callId;
+  const file = await started.deps.store.visualPath(callId, 'p1.1.svg');
+  const saved = started.deps.fs.written.find(item => item.op === 'write' && item.file === file);
+  assert(saved && String(saved.data) === svg, 'saved in the call folder, where the replay protocol reads it');
+  engine.onEvent({ type: 'screen', title: 'EVA timeline', content: 'Egress 00:00, task A 00:00-01:10.', speakerId: 'A', delayMs: 0, atMs: 1000, visualId: 'p1.1' });
+  const shown = started.service.getState().screen.visual;
+  assert.deepEqual(shown, { id: 'p1.1', kind: 'diagram', description: 'A timeline bar from egress to the end of task A.', url: `practice-call://${callId}/visuals/p1.1.svg` });
+  engine.onEvent({ type: 'screen', title: 'Odd', content: 'x', speakerId: 'A', delayMs: 0, atMs: 2000, visualId: 'p9.9' });
+  assert.equal(started.service.getState().screen.visual, undefined, 'an unknown visual is never shown');
+});
+
+test('visuals: without the drawing and picking calls nothing is searched or drawn and the screens keep their text', async () => {
+  const setup = panelHarness({ cast: [], plan: drawn => soloPlan(drawn, {
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Moon base', content: 'Could you live here for a year?', visual: { kind: 'picture', search: 'lunar surface', shows: 'how desolate it is' } }], solution: 'Open.', edgeCases: [], hints: [] }],
+  }) });
+  const started = await panelStart(setup);
+  await started.service.answer();
+  assert.deepEqual(setup.engineOptions[0].prepared.p1.parts[0], { title: 'Moon base', content: 'Could you live here for a year?' });
 });
 
 test('plan: the interviewer sessions reply a bare READY, and anything they return is not read as a setup', async () => {
@@ -4248,12 +4291,40 @@ test('draftAnswer: off without draftText, refused before the call is answered, a
   assert.equal(request.application.resume, 'Synthetic resume text.');
   assert.deepEqual(request.transcript, transcript);
   assert.equal(request.brief.company, 'Acme');
+  assert.equal(request.screen, null, 'nothing has been shared, so no screen goes with the suggestion');
   assert.equal(typeof request.callText, 'function');
   assert(request.signal instanceof AbortSignal);
   assert(request.pool.some(card => card.question === CARD.question && card.answer));
   assert.equal(service.getState().chat.length, 0, 'nothing is sent to the chat');
   await service.hangUp({ feedback: false });
   assert.deepEqual(await service.draftAnswer(), { error: 'No one is waiting for an answer.' });
+});
+
+test('draftAnswer: pausing neither refuses a suggestion nor stops one being written', async () => {
+  const engineFactory = () => ({ start() {}, hangUp() {}, setPaused() {}, state: () => ({ transcript: [], elapsedMs: 0 }) });
+  let release;
+  let aborted = false;
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    draftAnswer: async ({ signal }) => {
+      signal.addEventListener('abort', () => { aborted = true; });
+      await new Promise(resolve => { release = resolve; });
+      return 'Written anyway.';
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  const during = service.draftAnswer();
+  await flush();
+  service.setPaused(true);
+  release();
+  assert.deepEqual(await during, { text: 'Written anyway.' }, 'a pause after it started does not stop it');
+  assert.equal(aborted, false);
+  const whilePaused = service.draftAnswer();
+  await flush();
+  release();
+  assert.deepEqual(await whilePaused, { text: 'Written anyway.' }, 'a suggestion can be asked for while paused');
+  await service.hangUp({ feedback: false });
 });
 
 test('draftAnswer: one at a time, a failure reads as a retryable error, and hanging up aborts the one in flight', async () => {

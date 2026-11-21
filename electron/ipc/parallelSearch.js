@@ -150,12 +150,15 @@ async function withAbortAndTimeout({ signal, timeoutMs }, run) {
 }
 
 /** One anonymous Parallel MCP tool call, or null on any failure (network, non-ok, tool error, bad JSON). */
-async function callTool({ name, args, fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, now = Date.now }) {
+async function callTool({ name, args, key = '', fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, now = Date.now }) {
   if (signal?.aborted || parallelBlocked(now())) return null;
+  // A tool with no REST twin (image_search) is called signed in when a usable key is given: the key
+  // goes in the Authorization header, never the URL, as for the research server.
+  const auth = key && validKey(String(key)) && !parallelKeyRejected(now()) ? { Authorization: `Bearer ${key}` } : {};
   return withAbortAndTimeout({ signal, timeoutMs }, async (abortSignal) => {
     const response = await fetchImpl(PARALLEL_MCP_URL, {
       method: 'POST', signal: abortSignal,
-      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...auth },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, session_id: SESSION_ID } } }),
     });
     const text = await Promise.resolve(response?.text?.()).catch(() => '');
@@ -222,6 +225,31 @@ export async function parallelPlainLeads({ member, key = '', fetch: fetchImpl = 
     if (leads.length >= PLAIN_LEADS) break;
   }
   return leads;
+}
+
+/**
+ * Images on the web for a shared screen, from Parallel's image search: [{ title, imageUrl, pageUrl, width, height }],
+ * best first, or [] on any failure. No AI. Signed in with the key it runs Parallel's "advanced" mode (better
+ * results); without one, the free "fast" mode. The results are only links: nothing here judges them.
+ */
+export async function parallelImageSearch({ objective, queries = [], key = '', fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = 20_000, now } = {}) {
+  const search_queries = (Array.isArray(queries) ? queries : []).map(item => String(item ?? '').trim().slice(0, 200)).filter(Boolean).slice(0, 3);
+  if (!search_queries.length) return [];
+  const body = await callTool({
+    name: 'image_search', args: { objective: String(objective ?? '').slice(0, 1000), search_queries },
+    key, fetch: fetchImpl, signal, timeoutMs, ...(now ? { now } : {}),
+  });
+  const found = [];
+  for (const result of Array.isArray(body?.results) ? body.results : []) {
+    let image;
+    try { image = new URL(String(result?.image_url ?? '')); } catch { continue; }
+    if (image.protocol !== 'https:' || image.username || image.password) continue;
+    found.push({
+      title: String(result?.title ?? '').trim().slice(0, 200), imageUrl: image.href, pageUrl: String(result?.source_page_url ?? ''),
+      width: Number(result?.width) || 0, height: Number(result?.height) || 0,
+    });
+  }
+  return found;
 }
 
 /** Newest page copy the reader accepts: an older one is a stored copy, not a read. */

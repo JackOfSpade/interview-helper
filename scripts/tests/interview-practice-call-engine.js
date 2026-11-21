@@ -61,7 +61,7 @@ export const HELPER_OFFSET = 5000;
 
 const bare = entry => { const rest = { ...entry }; delete rest.startMs; delete rest.endMs; return rest; };
 
-export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback } = {}) {
+export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback, candidateVoice } = {}) {
   const clock = fakeClock();
   const events = [];
   const ops = [];
@@ -133,6 +133,7 @@ export function makeRig({ autoOpener = false, thresholds, restartFails = false, 
     clock, sessions: { ...sessions }, restartSession, audio, voice, ear, thresholds: { speculateMs: 600, joinGapMinLeadMs: Infinity, joinFlushLeadMs: Infinity, ...thresholds }, ...(panel ? { panel } : {}), ...(createParser ? { createParser } : {}), ...(formatTurn ? { formatTurn } : {}), ...(prepared ? { prepared } : {}), // the rig pins the 600 ms speculation point its timings assume, and leaves out the join pause and holds no first-sentence flush (both tested on their own); defaults are tested separately
     onEvent: event => events.push(event), newId: () => `utt${++counter}`,
     ...(callback ? { callback } : {}),
+    ...(candidateVoice ? { candidateVoice } : {}),
   });
   // The helper's clock is not the engine clock: helper atMs = clock ms - HELPER_OFFSET. Callers pass clock times.
   const helper = {
@@ -193,6 +194,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
+    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
   const source = fs.readFileSync(new URL('../../electron/interviewPracticeCallEngine.js', import.meta.url), 'utf8');
@@ -4227,7 +4229,7 @@ test('silence prompts back off, report the real cumulative silence, and reset wh
 
 // ---- asked marker ------------------------------------------------------------
 // A stub parser that turns <asked n="N"/> into { asked: N } items, so these tests do not depend on the real parser.
-function askedParser() {
+export function askedParser() {
   const real = createReplyStreamParser();
   const pending = [];
   const strip = text => text.replace(/<asked n="([^"]*)"\/>/g, (_, n) => { pending.push(Number(n)); return ''; });

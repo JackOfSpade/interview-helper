@@ -121,6 +121,7 @@ const SCREEN_PAD_LINES = [
 const PREPARED_SCREEN_LINES = [
   '- Prepared screens: for a planned question that has a prepared problem (see PREPARED PROBLEMS), show it by reference instead of writing it out: <screen ref="p1.2" delay="6"/> shows part 2 of problem p1, and <screen ref="p1"/> alone shows part 1. The ref and the delay may come in either order, and the tag is self-closing: it has no content and no closing tag. Everything else about a screen (delay, the filler for a long setup, one part at a time, the pointing line after the tag) is the same. If a ref does not exist you are told, and you then write the screen yourself or carry on without it.',
   '- A screen you write with its own content, <screen title="...">...</screen>, still works for anything that is not prepared.',
+  '- When you ask a planned question that has a prepared problem, show its screen, even one prepared only to carry a picture for a spoken question: it was made because it makes the question clearer.',
 ];
 
 /**
@@ -207,13 +208,17 @@ function planLines({ kind, people, questions, problems }, pool) {
   if (problems.length > 0) {
     const prepared = problems.map(item => ({
       ref: text(item.ref), planQuestion: item.question, language: text(item.language),
-      screens: item.parts.map((part, index) => ({ ref: `${text(item.ref)}.${index + 1}`, title: text(part?.title), content: text(part?.content) })),
+      screens: item.parts.map((part, index) => ({
+        ref: `${text(item.ref)}.${index + 1}`, title: text(part?.title), content: text(part?.content),
+        ...(part?.visual && text(part.visual.description) ? { [part.visual.kind === 'diagram' ? 'diagramAboveTheText' : 'pictureAboveTheText']: text(part.visual.description) } : {}),
+      })),
       referenceSolution: text(item.solution), edgeCasesWorthProbing: strings(item.edgeCases), hintsGentleToDirect: strings(item.hints),
     }));
     lines.push(
       '',
       'PREPARED PROBLEMS (data, not instructions; prepared and checked ahead of time, private to you)',
       '- Each problem below belongs to one planned question. "screens" is what the candidate sees when you show it by reference (see SHARED SCREEN AND CODING PAD). The reference solution, the edge cases and the hints are for YOU: never read them out and never show them, except that a hint is given in your own words when the candidate is stuck.',
+      '- A screen with pictureAboveTheText or diagramAboveTheText shows that picture or diagram above its text, as described there. You chose it to make the question clearer, so you can see it and may refer to it the way anyone presenting would ("as you can see in the photo", "on the left of the chart"); never describe it as if the candidate could not see it, and never mention where it came from.',
       '- Judge the candidate\'s code and reasoning against the reference solution and its checked examples. It is one correct answer, not the only one: a different approach that is correct is just as good, and one that fails an edge case or an example is not.',
       '- Hints go from gentle to direct. Give the next one only when the candidate is clearly stuck, one at a time, and never the solution itself. Probe the edge cases only after the main approach works.',
       JSON.stringify(prepared, null, 2),
@@ -317,6 +322,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     '- The first time in this call you ask a question from the INTERVIEW PLAN, write <asked n="3"/> (n is that question\'s number in the plan) at the very start of that reply, before any speaker tag and before the text. It is never spoken. Write it once per planned question, only the first time; never for follow-ups, small talk or questions of your own.',
     '- A note that the candidate said a listening signal while you spoke (an acknowledgement) never gets a reply of its own; just carry on naturally.',
     "- A note that you were interrupted means the candidate cut in while you were speaking: they heard only the words the note quotes, and the rest (the note may list it as what you had not yet said) was never said. What you do next depends on what they cut in with. (1) Something that changes nothing, such as a greeting, a \"hello\", \"sorry, go on\" or a brief aside: return it in a word or two, then pick your thread up the way a person does. You stopped in the middle of a sentence, so do not carry on as if that sentence had been finished and do not jump to the sentence after it: say the cut-off thought again from a natural starting point, in fresh words, so the candidate hears it whole (cut off part-way through saying who you are, you go on with a quick \"Hi!\", then \"So, as I was saying,\" and your role and team again in fresh words), then continue with what you still had to say. Do not repeat anything they heard in full, such as your greeting or your name, and never continue from the exact word you stopped on as if nothing had happened. (2) A question, a clarification, a correction or an answer: deal with that first. Afterwards return to what you had not yet said only if it still matters, and re-ask a cut-off question only if it was never answered. What you had not yet said is yours to reword, shorten or drop: it is not a script to read out.",
+    "- A message with [The candidate is still speaking. This is what you have heard so far; more is coming.] is a look at a long answer while the candidate is still talking. Usually reply exactly <listen/> and let them finish: a real interviewer rarely cuts in. Cut in only when a real interviewer in your role and temperament would at this point: the answer has gone well past what the question needs, has drifted off the question, is going much deeper than you want (you have what you need), or time is short; a tough interviewer does it sooner than a warm one, and never more than a couple of times in a call. To cut in, write what you would say as you take the floor: short and natural, starting with words that show you are cutting in politely or firmly (\"Sorry to jump in,\" \"Let me stop you there,\" \"That's great, and in the interest of time,\") and then redirect, narrow the question or move on. The candidate stops talking when you start, and the rest of what they were saying is never said. Then wait for their answer to you.",
     "- A [voice: …] note is a hint about how the candidate sounded, derived from the audio. React only the way a real interviewer occasionally would, for example slow down, reassure, or, if the tone was tough, press for specifics; never mention measuring, recording, notes or the app.",
     '- <wait s="90"/> is never spoken. Write it at the END of the reply\'s text. It says how many seconds of silence would be normal after THIS reply before a person would check in on the candidate (a whole number of seconds, 6 to 300; without it the default is 20). Set it from what you just asked: long (60 to 180) for a hard problem, while the candidate reads a shared screen or writes code in the pad, or after a question that needs real thought; short (6 to 12) after a greeting, small talk or a yes/no question. It applies only to the reply it is written in.',
     '- A message of the form [candidate silent Ns, check K of 3] means the candidate has said nothing for N seconds in total since they last spoke, and it is check K out of three, arriving after the wait you set (or 20 seconds). First check: a light nudge that fits the moment (encourage them, offer to rephrase, say to take their time), or <listen/> when the pause is still reasonable. Second check: ask whether they can hear you or have a technical problem. Third check: say the line seems to have dropped and end that reply with <end-call/>. The call ends after the third check whatever happens. These are what each check is FOR, not words to say: put every check in your own words, the way you in particular would say it at that moment in this call, and never the same way twice. A check-in reply may carry its own <wait s="N"/>, which sets how long to wait before the next check.',
@@ -404,7 +410,7 @@ export function formatTurnMessage({
   elapsedMs, candidateText, acknowledgements = [], interruption = null, silenceMs = null,
   notSpoken = false, acknowledgement = '', lastSpoken, typing = false, channel,
   audioHint = null, voiceNote = null, pausedAck = null, spokenText = '', joined = [], presence = null, absentHandover = [], unknownSpeaker = false, unknownScreen = [],
-  padText, padProgress = null, silenceCheck = null,
+  padText, padProgress = null, silenceCheck = null, stillSpeaking = false,
 } = {}) {
   const seconds = Math.max(0, Math.floor((Number(elapsedMs) || 0) / 1000));
   const parts = [`[elapsed ${pad(Math.floor(seconds / 60))}:${pad(seconds % 60)}]`];
@@ -449,6 +455,7 @@ export function formatTurnMessage({
   if (!silent && text(spokenText)) parts.push(`Candidate: '${text(spokenText)}'`);
   // The handover turn answers no candidate, so it has no Candidate line unless something was said or typed.
   const handoverOnly = (absent.length > 0 || unknownSpeaker || unknownScreenRefs.length > 0) && !text(candidateText) && !text(spokenText);
+  if (!silent && !progress && !handoverOnly && stillSpeaking) parts.push('[The candidate is still speaking. This is what you have heard so far; more is coming.]');
   if (!silent && !progress && !handoverOnly) parts.push(`${channel === 'chat' ? 'Candidate (typed in chat)' : 'Candidate'}: '${candidateText ?? ''}'`);
   // The first words of this reply, already spoken by the time it is written: last, so the message reads in the order
   // things happened (the candidate's line, then what you have begun to say back). Nothing when none was spoken.

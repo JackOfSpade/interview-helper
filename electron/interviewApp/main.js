@@ -31,6 +31,8 @@ import { BUG_REPORT_DIRECTORY, REPORT_CALLS, createBugReportService, createBugRe
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { attachContextMenu } from './contextMenu.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
+import { createPracticeVoiceStore, registerPracticeVoiceHandlers } from './practiceVoiceSetting.js';
+import { parallelImageSearch, readParallelKey } from '../ipc/parallelSearch.js';
 
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell, systemPreferences } = electronPkg;
 
@@ -71,6 +73,16 @@ let sessionStore = null;
 // The menu bar's two faces: the app's own menu, and the short one shown while the call window is in front.
 let appMenu = null;
 let callMenu = null;
+
+/** Opens the Settings dialog in the main window (App menu, ⌘,). */
+function openSettings() {
+  const win = createMainWindow();
+  const send = () => { try { win.webContents.send('interview-app:open-settings'); } catch { /* the window is going away */ } };
+  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
+}
+
+// The candidate's voice in practice calls (female or male), read by the call for every spoken line.
+let practiceVoice = null;
 
 function sendFileCommand(command) {
   const win = createMainWindow();
@@ -171,8 +183,17 @@ if (!app.requestSingleInstanceLock()) {
     });
     app.on('browser-window-created', (_event, win) => textSize.adopt(win));
     registerTextSizeHandlers({ ipcMain, guarded, controller: textSize });
+    practiceVoice = createPracticeVoiceStore({ filePath: path.join(roots.profile, 'practice-voice.json') });
+    registerPracticeVoiceHandlers({ ipcMain, guarded, store: practiceVoice });
+    // The app menu with Settings… in its usual place, after About.
+    const appMenuWithSettings = { label: app.name, submenu: [
+      { role: 'about' }, { type: 'separator' },
+      { label: 'Settings…', accelerator: 'CommandOrControl+,', click: () => openSettings() },
+      { type: 'separator' }, { role: 'services' }, { type: 'separator' },
+      { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
+    ] };
     appMenu = Menu.buildFromTemplate([
-      { role: 'appMenu' },
+      appMenuWithSettings,
       // Save and Load act on the main window, whichever window is in front.
       { label: 'File', submenu: [
         { label: 'Save Interviews…', accelerator: 'CommandOrControl+S', click: () => sendFileCommand('save') },
@@ -292,8 +313,20 @@ if (!app.requestSingleInstanceLock()) {
         signal, task: 'practice-plan', claudeStage: 'practice-call-plan', responseSchema: schema,
       });
       // Testing aid: the candidate's reply to the latest question, for the call chat's "Suggest a reply" button. Plain text, no schema.
-      const practiceDraftText = ({ prompt, signal } = {}) => reviewTransport.callRaw(prompt, {
+      const practiceDraftText = ({ prompt, signal, pageImages } = {}) => reviewTransport.callRaw(prompt, {
         signal, task: 'practice-draft-answer', claudeStage: 'practice-call-draft-answer',
+        ...(Array.isArray(pageImages) && pageImages.length ? { pageImages } : {}),
+      });
+      // Shared-screen visuals, made during setup: choosing a Commons picture (it reads the candidates) and drawing a diagram.
+      const practiceVisualPickText = ({ prompt, schema, signal, pageImages } = {}) => reviewTransport.callText(prompt, {
+        signal, task: 'practice-visual-pick', claudeStage: 'practice-call-visual-pick', responseSchema: schema, pageImages,
+      });
+      const practiceDiagramText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
+        signal, task: 'practice-diagram', claudeStage: 'practice-call-diagram', responseSchema: schema,
+      });
+      // Delivery tags for the candidate's spoken line (a sent chat message spoken in the candidate's voice). Plain text, no schema.
+      const practiceCandidateTagText = ({ prompt, signal } = {}) => reviewTransport.callRaw(prompt, {
+        signal, task: 'practice-candidate-voice', claudeStage: 'practice-call-candidate-voice',
       });
       const helperPath = practiceAudioHelperPath({ packaged: app.isPackaged, projectDir: app.getAppPath() || process.cwd() });
       // An earlier "Don't Allow" is cleared only for the installed app and its helper; a
@@ -318,6 +351,17 @@ if (!app.requestSingleInstanceLock()) {
         serviceOptions: {
           planText: practicePlanText,
           draftText: practiceDraftText,
+          // Sent chat messages are spoken in the candidate's own voice (off in the unit suites).
+          candidateVoices: true,
+          candidateTagText: practiceCandidateTagText,
+          candidateVoiceGender: () => practiceVoice?.read(),
+          // Pictures and diagrams on the prepared shared screens (off in the unit suites).
+          visualPickText: practiceVisualPickText,
+          diagramText: practiceDiagramText,
+          // Pictures are searched for on the web with Parallel's image search (the Keychain key signs it in).
+          imageSearch: async ({ objective, queries, signal } = {}) => {
+            return parallelImageSearch({ objective, queries, key: await readParallelKey(), signal });
+          },
           logger,
           inferenceWorkerPath: asarUnpacked(path.join(__dirname, 'inferenceWorkerThread.js')),
           // The packaged helper lives in Resources; the default only knows the project folder.

@@ -45,6 +45,16 @@ test('the prompt keeps the candidate in character and lets it make up what the d
   assert(!/say so plainly/iu.test(prompt), 'no rule telling it to admit the documents lack an answer');
 });
 
+test('the prompt carries the shared screen, says it can be seen, and marks one shown earlier', () => {
+  const now = draftAnswerPrompt({ ...CONTEXT, screen: { title: 'EVA timeline', content: 'Egress 00:00, task A 00:00-01:10, task B 01:10-02:30', current: true } });
+  assert(now.includes('<interviewer-shared-screen>') && now.includes('Title: EVA timeline') && now.includes('task B 01:10-02:30'));
+  assert(now.includes('never say you cannot see it'));
+  assert(now.indexOf('<interviewer-shared-screen>') < now.indexOf('<conversation-so-far>'));
+  const earlier = draftAnswerPrompt({ ...CONTEXT, screen: { title: '', content: 'Old problem', current: false } });
+  assert(earlier.includes('<screen-the-interviewer-shared-earlier>') && earlier.includes('Old problem'));
+  assert(!draftAnswerPrompt(CONTEXT).includes('shared-screen>'), 'no screen, no section');
+});
+
 test('a closed pad, an empty conversation and a missing name still make a prompt', () => {
   const prompt = draftAnswerPrompt({ ...CONTEXT, pad: { open: false, text: 'hidden' }, transcript: [], candidateName: '' });
   assert(!prompt.includes('hidden'));

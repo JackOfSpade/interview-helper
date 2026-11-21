@@ -372,7 +372,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         chapters under it do not jump as the playback moves in and out of a shared screen. */}
     {hasShare && <section aria-label="Shared screen and code at this moment" data-replay-share="true" className="grid gap-2 lg:grid-cols-2">
       {shownScreen
-        ? <SharedScreen title={shownScreen.title} content={shownScreen.content} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-44" />
+        ? <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-44" />
         : <p data-replay-share-empty="screen" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">Nothing was on the shared screen at this moment.</p>}
       {shownPad
         ? <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-44" />

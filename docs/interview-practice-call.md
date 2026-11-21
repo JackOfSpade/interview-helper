@@ -21,7 +21,7 @@ the status table says what has run live.
 | Post-call analysis, two-track recording and in-app replay with chapters | Built, Phase 5 (fakes only; not yet run live) |
 | Live checklist for the user | Written, Phase 6 (section 14); not yet run |
 | First live runs (2026-11-17) | Run end to end with typed chat answers: real interviewer sessions, ElevenLabs voice, both models, recording, review and chapters. The spoken path (microphone capture, turn-taking on real speech, tone notes, Scribe) is still not run live. See "Live run record" below. |
-| Interviewer interrupts long answers | Planned, Phase 7 (after acceptance) |
+| Candidate voice and interviewer cut-ins (2026-11-20) | Built: a sent chat message is spoken in the candidate's own voice, and the interviewer may cut into it. Unit-tested only; not yet heard in a live call. The cut-in on spoken (microphone) answers is still Phase 7. |
 | Panel interviews (several voices, late joiners, interviewers talking to each other) | Built 2026-11-17 (section 9); run live from source with typed answers |
 | Voice delivery for Eleven v4 (tags, stability, flush) and the fast acknowledgement | Built 2026-11-17 (sections 4a and 9a) |
 
@@ -350,6 +350,61 @@ reported as `[candidate silent 10s]`.
 New and decided. The call window has an optional chat panel for typed
 messages, mixable with voice.
 
+**The candidate's voice (2026-11-20).** A sent message still shows in the
+chat history, but the interviewer no longer reads it: it is spoken on the call
+in the candidate's own voice and the interviewer hears it as an ordinary
+`Candidate: '…'` line once it has been said.
+
+- **Voices.** At setup two library voices are drawn for the candidate, one
+  female and one male (`drawCandidateVoices` in `callService.js`; `drawVoice`
+  takes a `gender`), never one an interviewer could use. The Settings dialog of
+  the main window (sidebar, or Settings… on the App menu, ⌘,) picks which one
+  speaks (`practice-voice.json` in the profile folder; default male). It is
+  read for every line, so a change applies mid-call.
+- **Pipeline.** The same as the interviewers': one short Claude call
+  (`practice-call-candidate-voice`, Sonnet low) adds delivery tags from the line
+  and the last 12 turns, aimed at a prepared, confident candidate; then the
+  ElevenLabs dialogue voice with the interviewers' model. The tagged words must
+  equal the sent words, else the line is spoken plain; tags that take more than
+  4 s are not waited for (`electron/practiceCall/candidateVoice.js`).
+- **Playback.** Through the helper like an interviewer line, so it is on the
+  interviewer track and in the replay, never in `candidate.wav` (which feedback
+  transcribes). The transcript entry is `channel: 'chat'` with `voiced: true`,
+  so delivery measures still leave it out. Captions show the words as they are
+  heard.
+- **Interviewer cut-ins.** Once 12 s of a line has played, and every 10 s
+  after while at least 2.5 s is left, the main session gets the heard words
+  with `[The candidate is still speaking. …]` (no acknowledgement first). It
+  answers `<listen/>` (the usual case) or writes a cut-in. A cut-in sounds
+  like one interviewer cutting into another (2026-11-21): the candidate's voice
+  stops as the interviewer's starts, and what it was about to say plays on
+  under the interviewer's leading silence and first CUT_IN_OVERLAP_MS (700 ms),
+  fading out over the last 120 ms. The fade, the mix and the speech level are
+  the panel voice's own code, now in `electron/practiceCall/audio/cutInMix.js`
+  and used by both. The helper still plays one utterance at a time; the overlap
+  is mixed into the interviewer's audio before it reaches the helper. When the
+  two voices run at different rates or nothing of the line is left, the
+  candidate's voice instead stops at the end of its word
+  (`afterWordBoundary`, as when the candidate cuts into an interviewer). The
+  entry keeps only the heard words, the overlap included
+  (`interrupted`, `cutOffBy: 'interviewer'`), the rest is dropped, and the
+  call then waits for the candidate. A look still being written when the line
+  ends is dropped and the whole line goes to the interviewer.
+- **The interviewer never reads the chat.** The chat history is for the
+  candidate only. A message the voice cannot say (no audio within 15 s, or a
+  failed stream) is tried once more; if that fails too it is lost, like speech
+  on a bad line: the window says "Your audio didn't go through. Send your
+  message again." and the interviewer gets nothing of it. Only a call for which
+  no candidate voice could be drawn at all still passes messages on as typed
+  lines. A message sent while the voice is speaking is spoken next. A line that
+  ends during a pause is answered on resume.
+- **Practice count.** A message from Suggest a reply (edited or not) is marked
+  `generated`; it is heard like any other but does not count towards
+  "Practised ×N".
+- **Off in the unit suites.** The service draws candidate voices only when the
+  app passes `candidateVoices: true` and the tag call (`candidateTagText`) in
+  from `main.js`.
+
 - **Typed turns** go to the interviewer marked as typed:
   `Candidate (typed in chat): '…'`. They carry the same elapsed time and the
   same acknowledgement and interruption notes as spoken turns.
@@ -364,6 +419,61 @@ messages, mixable with voice.
   statement.
 - **Feedback.** Typed turns count for content feedback but are excluded from
   delivery metrics. The review notes which answers were typed.
+
+## 6b. Pictures and diagrams on shared screens (2026-11-21)
+
+A prepared screen may carry one visual above its text, made during setup so
+every screen is ready before the call rings (the owner: a real interviewer has
+their slides ready). Most screens get none: the planner adds one only when it
+makes the question clearer or illustrates it better than text, at most 4 per
+plan (`visual` on a part: `kind` picture or diagram, `search`, `shows`). A
+spoken question a picture would help (living a year in a moon colony, with a
+photo of the lunar surface) may get a one-part screen just for that.
+
+- **Pictures** come first from Parallel's image search across the web (the
+  `image_search` tool of the Parallel MCP server, signed in with the owner's
+  Keychain key so it runs Parallel's "advanced" mode; without a key, the free
+  "fast" mode). The owner chose this on 2026-11-21: the app is for personal use,
+  so licences do not narrow the choice. A probe that day returned direct image
+  links with their pages and sizes in 1.4 s (anonymous mode: three Alamy stock
+  previews, which the pick step rejects for watermarks). No watermarked picture
+  is ever shown (the owner, 2026-11-21: it looks unprofessional): images hosted
+  on, or found on a page of, a stock library that watermarks its previews
+  (`WATERMARKED_HOSTS`: Alamy, Shutterstock, Getty, iStock, Adobe Stock and
+  others) are never downloaded, the search asks for clean photos, and the pick
+  step rules out any image with a watermark, however faint, before choosing.
+  When the web gives
+  fewer than two usable images, Wikimedia Commons tops the choice up to six.
+  Images are downloaded whole (at most 5 MB, a known size of at least 400×250),
+  and one Claude call (`practice-call-visual-pick`, Sonnet medium) looks at them
+  beside the screen and keeps one only if it really fits; "none" is a normal
+  answer. A Commons photo shows its credit (author, licence, "via Wikimedia
+  Commons"); a web photo shows none, like a presenter's own slide.
+- **Diagrams** are drawn as SVG by one Claude call (`practice-call-diagram`,
+  Opus low) from the screen's own content, every value checked against it.
+  `safeSvg` accepts only a short list of drawing elements with no scripts,
+  styles, links, images or outside references, and the window shows it through
+  an `<img>`, where nothing could run anyway.
+- **Timing.** Visuals start when the plan is settled and run beside the voice
+  warm-up and audio start; the new setup step "Preparing the shared screens"
+  waits for them (90 s budget) before the interviewer sessions start, since
+  their prompts list what each screen shows. A visual that fails or runs late
+  is left out and the screen keeps its text.
+- **Where they live.** Saved in the call folder (`visuals/<ref>.<ext>`) and
+  served by `practice-call://<callId>/visuals/<file>` (`replayProtocol.js`; plain
+  files only, an SVG with a policy that blocks everything), so the live screen
+  and the replay use the same address.
+- **Who sees them.** The interviewer's plan lists `pictureAboveTheText` or
+  `diagramAboveTheText` with a description, and the prompt lets it refer to the
+  visual naturally. Suggest a reply gets the description, the diagram's SVG and
+  the picture itself (as an image).
+- **Off in the unit suites**: nothing is searched or drawn unless the app passes
+  `visualPickText` and `diagramText` in from `main.js` (and `imageSearch`, for the
+  web search).
+- Claude Design was considered: it is a separate product (claude.ai/design) with
+  no API the app could call during setup.
+
+Unit-tested only (2026-11-21): no live call has made a visual yet.
 
 ## 7. The interviewer interrupting the candidate
 

@@ -6,6 +6,7 @@
  * order so the caller still sees ONE utterance with one running timeline.
  */
 import { pcmDurationMs } from './dialogueVoice.js';
+import { CUT_IN_FADE_MS, CUT_IN_LEVEL_WINDOW_MS, CUT_IN_OVERLAP_MS, CUT_IN_SPEECH_FLOOR, fadeOutTail, mixHeadInto, msSamples, windowRms } from '../audio/cutInMix.js';
 
 const noop = () => {};
 
@@ -18,18 +19,11 @@ export const OVERLAY_HOLD_MAX_MS = 3000;
 /** Audio that must stay queued for playback while waiting, so the speaker never runs dry. */
 export const OVERLAY_PLAY_MARGIN_MS = 200;
 
-/**
- * A cut-in starts this long before the interrupted voice's SPEECH ends (not its buffer: a synthesised
- * segment ends in near-silence), so the two voices are heard together. Real overlaps are brief, 80% under 1 s.
- */
-export const CUT_IN_OVERLAP_MS = 700;
-/** The interrupted voice fades out over its last stretch, so it gives way instead of being cut. */
-export const CUT_IN_FADE_MS = 120;
+// The cut-in sound (overlap, fade, speech level) is shared with the engine's cut into the candidate's voice.
+export { CUT_IN_FADE_MS, CUT_IN_LEVEL_WINDOW_MS, CUT_IN_OVERLAP_MS, CUT_IN_SPEECH_FLOOR };
 /** The most trailing near-silence a segment followed by a cut-in is expected to carry; held back with the overlap. */
 export const CUT_IN_TRAILING_ALLOWANCE_MS = 1200;
 /** Level test: speech is a window whose RMS is above the floor and above this share of the segment's loudest window. */
-export const CUT_IN_LEVEL_WINDOW_MS = 20;
-export const CUT_IN_SPEECH_FLOOR = 8;
 export const CUT_IN_SPEECH_RATIO = 0.05;
 /** gap() is clamped to this; the silence is emitted in chunks of at most SILENCE_CHUNK_MS. */
 export const GAP_MAX_MS = 20000;
@@ -49,14 +43,8 @@ function mixSamples(target, at, remark, from, count) {
   }
 }
 
-const msSamples = (rate, ms) => Math.round((Number(rate) * ms) / 1000);
 // Bytes (always even) withheld from a segment that a cut-in follows: the overlap plus the trailing-silence allowance.
 const holdBytes = rate => msSamples(rate, CUT_IN_OVERLAP_MS + CUT_IN_TRAILING_ALLOWANCE_MS) * 2;
-const windowRms = (buffer, fromSample, toSample) => {
-  let sum = 0;
-  for (let i = fromSample; i < toSample; i += 1) { const v = buffer.readInt16LE(i * 2); sum += v * v; }
-  return toSample > fromSample ? Math.sqrt(sum / (toSample - fromSample)) : 0;
-};
 
 export function createPanelVoiceFactory({
   factories = {},
@@ -277,13 +265,8 @@ export function createPanelVoiceFactory({
       if (data.length & 1) { segment.odd = Buffer.from(data.subarray(data.length - 1)); data = data.subarray(0, data.length - 1); }
       if (!data.length) return;
       if (segment.mixHead && segment.mixHead.length) {
-        const count = Math.min(segment.mixHead.length, data.length) >> 1;
-        const mixed = Buffer.from(data);
-        for (let i = 0; i < count; i += 1) {
-          const sum = mixed.readInt16LE(i * 2) + segment.mixHead.readInt16LE(i * 2);
-          mixed.writeInt16LE(Math.max(-32768, Math.min(32767, sum)), i * 2);
-        }
-        segment.mixHead = segment.mixHead.subarray(count * 2);
+        const { mixed, rest } = mixHeadInto(data, segment.mixHead);
+        segment.mixHead = rest;
         data = mixed;
       }
       forward(segment, data);
@@ -308,12 +291,7 @@ export function createPanelVoiceFactory({
       const rate = segment.stream.sampleRate;
       const end = speechEndSample(segment, pending);
       const start = Math.max(0, end - msSamples(rate, CUT_IN_OVERLAP_MS));
-      const tail = Buffer.from(pending.subarray(start * 2, end * 2));
-      const fade = Math.min(msSamples(rate, CUT_IN_FADE_MS), end - start);
-      for (let k = 0; k < fade; k += 1) {
-        const at = (end - start - fade + k) * 2;
-        tail.writeInt16LE(Math.round(tail.readInt16LE(at) * (1 - (k + 1) / fade)), at);
-      }
+      const tail = fadeOutTail(Buffer.from(pending.subarray(start * 2, end * 2)), rate);
       return { full: pending, head: pending.subarray(0, start * 2), tail, dropped: pending.length - end * 2, rate };
     }
     function endSegment(segment) {

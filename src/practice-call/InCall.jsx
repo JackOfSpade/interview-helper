@@ -9,6 +9,7 @@ import { firstNameOf, participantsOf, roleLine } from './persona.js';
 import { playJoinChime, playLeaveChime } from './ringtone.js';
 import { formatTime } from './replayModel.js';
 import { shouldTogglePause } from './pauseKey.js';
+import { PANEL_DEFAULT_WIDTH, PANEL_KEY_STEP, PANEL_MIN_WIDTH, STAGE_MIN_WIDTH, clampPanelWidth, readPanelWidth, savePanelWidth, startDrag } from './panelSize.js';
 
 // Meeting-style controls: a round neutral button, red when the device is off,
 // light blue when a view (captions, a side panel) is switched on.
@@ -51,7 +52,41 @@ export default function InCall({ state, api }) {
   const [captionsOn, setCaptionsOn] = useState(false);
   // One side panel at a time, as in a meeting window: 'chat', 'cards' or none.
   const [panel, setPanel] = useState(null);
+  // The chat and notes panel share one width, dragged from its left edge and kept for later calls.
+  const [panelWidth, setPanelWidth] = useState(readPanelWidth);
+  const panelWidthRef = useRef(panelWidth);
+  useEffect(() => { panelWidthRef.current = panelWidth; }, [panelWidth]);
+  const rowRef = useRef(null);
+  const rowWidth = () => rowRef.current?.getBoundingClientRect?.().width;
+  const dragPanel = event => {
+    const from = panelWidthRef.current;
+    let last = from;
+    startDrag(event, { axis: 'x', onMove: dx => { last = clampPanelWidth(from - dx, rowWidth()); setPanelWidth(last); }, onEnd: () => savePanelWidth(last) });
+  };
+  const panelKey = event => {
+    const step = event.shiftKey ? PANEL_KEY_STEP * 4 : PANEL_KEY_STEP;
+    const next = event.key === 'ArrowLeft' ? panelWidthRef.current + step
+      : event.key === 'ArrowRight' ? panelWidthRef.current - step
+        : event.key === 'Home' ? PANEL_DEFAULT_WIDTH : null;
+    if (next == null) return;
+    event.preventDefault();
+    const width = clampPanelWidth(next, rowWidth());
+    setPanelWidth(width);
+    savePanelWidth(width);
+  };
+  const resetPanel = () => { setPanelWidth(PANEL_DEFAULT_WIDTH); savePanelWidth(PANEL_DEFAULT_WIDTH); };
   const [chatDraft, setChatDraft] = useState('');
+  // Whether the text in the box was written by Suggest a reply (edited or not). It lives with the draft, so
+  // closing the panel keeps it; clearing the box ends it. A sent suggestion is heard but never counts as practice.
+  const [draftGenerated, setDraftGenerated] = useState(false);
+  const changeDraft = (value, meta) => {
+    setChatDraft(value);
+    if (meta?.generated) setDraftGenerated(true);
+    else if (typeof value === 'string' && !value.trim()) setDraftGenerated(false);
+  };
+  const sendChat = typeof api?.sendChat === 'function'
+    ? text => { const generated = draftGenerated; setDraftGenerated(false); return generated ? api.sendChat(text, { generated: true }) : api.sendChat(text); }
+    : undefined;
   const [cards, setCards] = useState([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState(null);
@@ -188,7 +223,7 @@ export default function InCall({ state, api }) {
   const unreadChat = !chatOpen && chat.slice(seenChat).some(message => message?.from !== 'candidate');
   const notice = state?.notice?.message || null;
   // The AI decides what to present; the window only shows what the service reports.
-  const screen = state?.screen && typeof state.screen === 'object' ? { ...clampScreen(state.screen), speakerId: state.screen.speakerId, presenterName: state.screen.presenterName } : null;
+  const screen = state?.screen && typeof state.screen === 'object' ? { ...clampScreen(state.screen), speakerId: state.screen.speakerId, presenterName: state.screen.presenterName, visual: state.screen.visual ?? null } : null;
   const pad = state?.pad && typeof state.pad === 'object' ? state.pad : null;
   const padOpen = pad?.open === true;
   // While the interviewer is still setting a share up on their side, nothing shows here, as on a
@@ -228,7 +263,7 @@ export default function InCall({ state, api }) {
   };
   const cardsOpen = panel === 'cards';
   return <main className="flex h-screen flex-col bg-[#202124] text-[#e8eaed]" aria-label="Call in progress">
-    <div className="flex min-h-0 flex-1 gap-4 px-4 pt-4">
+    <div ref={rowRef} className="flex min-h-0 flex-1 gap-4 px-4 pt-4">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
         <div className="relative min-h-0 flex-1">
           {presenting
@@ -251,7 +286,7 @@ export default function InCall({ state, api }) {
                 </p>}
               </div>
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
-                {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} className="min-h-0 min-w-0 flex-1 basis-0" />}
+                {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} visual={screen.visual} className="min-h-0 min-w-0 flex-1 basis-0" />}
                 {padOpen && <CodingPad key="pad" lang={pad.lang || ''} initialText={pad.text || ''} disabled={interviewerLeft}
                   onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}
               </div>
@@ -286,17 +321,25 @@ export default function InCall({ state, api }) {
           </div>
         </section>}
       </div>
-      {chatOpen && <div className="pc-panel w-[340px] shrink-0"><ChatPanel chat={chat} draft={chatDraft} onDraftChange={setChatDraft} disabled={interviewerLeft} paused={paused} onSend={api?.sendChat} onTyping={api?.setTyping} onSuggest={typeof api?.draftAnswer === 'function' ? api.draftAnswer : undefined} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} /></div>}
-      {cardsOpen && <section aria-label="Notes" className="pc-panel flex w-[340px] shrink-0 flex-col rounded-2xl bg-white text-[#202124]">
-        <header className="flex items-center justify-between px-5 pb-2 pt-4">
-          <h2 className="text-lg font-normal">Notes</h2>
-          <button type="button" aria-label="Close notes" onClick={() => setPanel(null)} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>
-        </header>
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-4">
-          {cards.length === 0 && <p className="text-sm text-[#5f6368]">No notes for this interview.</p>}
-          {cards.map(card => <article key={card.id || card.question} className="border-b border-[#e8eaed] pb-3 last:border-0"><p className="text-sm font-medium">{card.question}</p><p className="mt-1 whitespace-pre-wrap text-[13px] leading-snug text-[#3c4043]">{card.answer}</p></article>)}
+      {(chatOpen || cardsOpen) && <div data-side-panel="true" className="pc-panel relative shrink-0" style={{ width: panelWidth, minWidth: PANEL_MIN_WIDTH, maxWidth: `calc(100% - ${STAGE_MIN_WIDTH}px)` }}>
+        {/* The edge in the gap between the call and the panel drags the panel wider or narrower. */}
+        <div role="separator" aria-orientation="vertical" aria-label="Resize side panel" aria-valuenow={panelWidth} tabIndex={0} title="Drag to resize"
+          onPointerDown={dragPanel} onKeyDown={panelKey} onDoubleClick={resetPanel}
+          className="group absolute -left-4 top-0 z-10 flex h-full w-4 cursor-col-resize touch-none items-center justify-center outline-none">
+          <span aria-hidden="true" className="h-10 w-1 rounded-full bg-white/20 transition-colors group-hover:bg-[#8ab4f8] group-focus-visible:bg-[#8ab4f8] group-active:bg-[#8ab4f8]" />
         </div>
-      </section>}
+        {chatOpen && <ChatPanel chat={chat} draft={chatDraft} onDraftChange={changeDraft} disabled={interviewerLeft} paused={paused} onSend={sendChat} onTyping={api?.setTyping} onSuggest={typeof api?.draftAnswer === 'function' ? api.draftAnswer : undefined} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} />}
+        {cardsOpen && <section aria-label="Notes" className="flex h-full flex-col rounded-2xl bg-white text-[#202124]">
+          <header className="flex items-center justify-between px-5 pb-2 pt-4">
+            <h2 className="text-lg font-normal">Notes</h2>
+            <button type="button" aria-label="Close notes" onClick={() => setPanel(null)} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>
+          </header>
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+            {cards.length === 0 && <p className="text-sm text-[#5f6368]">No notes for this interview.</p>}
+            {cards.map(card => <article key={card.id || card.question} className="border-b border-[#e8eaed] pb-3 last:border-0"><p className="text-sm font-medium">{card.question}</p><p className="mt-1 whitespace-pre-wrap text-[13px] leading-snug text-[#3c4043]">{card.answer}</p></article>)}
+          </div>
+        </section>}
+      </div>}
     </div>
     <footer className="grid h-20 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 px-6">
       <p className="flex min-w-0 items-center gap-3 text-sm font-medium text-[#e8eaed]">

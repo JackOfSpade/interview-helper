@@ -39,7 +39,8 @@ const practiceCallAPI = Object.freeze({
   chooseFeedback: wants => invoke('choose-feedback', booleanArg(wants, 'chooseFeedback')),
   hangUp: options => invoke('hang-up', { feedback: options?.feedback !== false }),
   setMuted: muted => invoke('set-muted', booleanArg(muted, 'setMuted')),
-  sendChat: text => invoke('send-chat', chatText(text)),
+  // generated: the text came from Suggest a reply (it does not count as practising a question).
+  sendChat: (text, options) => invoke('send-chat', chatText(text), { generated: options?.generated === true }),
   setTyping: typing => invoke('set-typing', booleanArg(typing, 'setTyping')),
   setPaused: paused => invoke('set-paused', booleanArg(paused, 'setPaused')),
   updatePad: text => invoke('update-pad', padText(text)),

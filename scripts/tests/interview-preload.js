@@ -79,7 +79,7 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['cancelInterviewBrief', 'cancelInterviewTypedJob', 'chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setTextSize', 'stateSavedNow']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['cancelInterviewBrief', 'cancelInterviewTypedJob', 'chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'copyBugReport', 'getPracticeVoice', 'getTextSize', 'loadState', 'loadStateFromFile', 'onFileCommand', 'onInterviewQaChanged', 'onOpenSettings', 'onSaveStateNow', 'onTextSizeChanged', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveBugReport', 'saveState', 'saveStateToFile', 'setPracticeVoice', 'setTextSize', 'stateSavedNow']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder();
       await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
       await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
@@ -107,6 +107,11 @@ const tests = [
         ['interview-app:get-text-size', []],
         ['interview-app:set-text-size', [{ percent: 150 }]],
       ], 'the text size call forwards only the percent');
+      await appApi.getPracticeVoice(); await appApi.setPracticeVoice({ gender: 'male', voiceId: 'x' });
+      assert.deepEqual(invocations.slice(-2).map(({ channel, args }) => [channel, args.map(arg => ({ ...arg }))]), [
+        ['interview-app:get-practice-voice', []],
+        ['interview-app:set-practice-voice', [{ gender: 'male' }]],
+      ], 'the practice voice call forwards only the gender');
       // There is no canvas here: the application list never forwards a renderer-supplied path.
       const listed = await api.listInterviewApplicationFolders({ nodeId: 'interview-node', canvasFilePath: '/Users/someone/elsewhere.json' });
       assert.deepEqual({ ...listed.args[0] }, { nodeId: 'interview-node', canvasFilePath: null });

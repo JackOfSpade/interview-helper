@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Bug, Plus, Trash2 } from 'lucide-react';
+import { Bug, Plus, Settings, Trash2 } from 'lucide-react';
 import './interviewApp.css';
 import { InterviewHelperPanel } from './InterviewHelperPanel';
 import { BugReportDialog } from './BugReportDialog';
 import { TextSizeControl } from './TextSizeControl';
+import { SettingsDialog } from './SettingsDialog';
 import { installEventCapture, logEvent } from '../utils/eventLog';
 import { ClaudePauseNotice } from '../components/ClaudePauseNotice';
 import { JobRunStatusSection } from '../components/ClaudeRunStatus';
@@ -30,6 +31,10 @@ export default function InterviewHelperApp() {
   const [deleting, setDeleting] = useState(null);
   const [reportingBug, setReportingBug] = useState(false);
   const closeBugReport = useCallback(() => setReportingBug(false), []);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  // Settings… on the App menu (⌘,) opens the same dialog.
+  useEffect(() => window.interviewAppAPI?.onOpenSettings?.(() => setSettingsOpen(true)), []);
   const stateRef = useRef(EMPTY_STATE);
   const writeQueue = useRef(Promise.resolve());
 
@@ -160,6 +165,7 @@ export default function InterviewHelperApp() {
       <div className="space-y-1 border-t border-white/10 p-2">
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 hover:bg-violet-500/30" onClick={newInterview}><Plus size={13} />New interview</button>
         <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={() => setReportingBug(true)}><Bug size={13} />Report a bug…</button>
+        <button type="button" className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-white/60 hover:bg-white/5" onClick={() => setSettingsOpen(true)}><Settings size={13} />Settings…</button>
         <TextSizeControl onError={setNotice} />
       </div>
     </aside>
@@ -171,6 +177,7 @@ export default function InterviewHelperApp() {
         {!selected && <div className="p-6 text-sm text-white/60"><p>Create an interview to get started, or import one you set up in Infinite Canvas.</p></div>}
       </div>
     </main>
+    {settingsOpen && <SettingsDialog onClose={closeSettings} onError={setNotice} />}
     {reportingBug && <BugReportDialog onClose={closeBugReport} selectedIndex={state.sessions.findIndex(session => session.id === selectedId)} />}
   </div>;
 }

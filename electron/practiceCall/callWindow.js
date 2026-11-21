@@ -180,7 +180,7 @@ export function createPracticeCallController(deps = {}) {
       return state;
     },
     async [WINDOW_PREFIX + 'set-muted'](muted) { return service.setMuted(muted); },
-    async [WINDOW_PREFIX + 'send-chat'](text) { return service.sendChat(text); },
+    async [WINDOW_PREFIX + 'send-chat'](text, options) { return service.sendChat(text, { generated: options?.generated === true }); },
     async [WINDOW_PREFIX + 'set-typing'](typing) { return service.setTyping(typing); },
     async [WINDOW_PREFIX + 'set-paused'](paused) { return service.setPaused(paused); },
     async [WINDOW_PREFIX + 'update-pad'](text) { return service.updatePad(text); },

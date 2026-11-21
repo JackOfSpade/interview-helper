@@ -157,6 +157,8 @@ function libraryUnavailable(message, options = {}) {
 export async function drawVoice({
   fetch: fetchImpl = globalThis.fetch, key, random = Math.random,
   excludeVoiceIds = [], excludeNames = [], pageSize = 100, maxAttempts = 24, signal,
+  // Only voices of this gender ('female' or 'male'), by rejection like everything else; null for any.
+  gender = null,
   // Pages read by earlier draws of the same call setup; exclusion is still applied to every row drawn.
   pageCache = new Map(),
 } = {}) {
@@ -209,6 +211,7 @@ export async function drawVoice({
     if (textOf(row.category) !== LIBRARY_TIER) continue;
     if (exclude.has(row.voiceId)) continue;
     if (excludedNames.has(textOf(row.voiceName))) continue;
+    if (gender && row.gender !== gender) continue;
     return { voice: catalogVoiceOf(row), source: 'library', libraryTotal, attempts };
   }
 

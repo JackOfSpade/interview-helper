@@ -89,7 +89,18 @@ export const PLAN_SCHEMA = Object.freeze({
             type: 'array', minItems: 1, maxItems: 4,
             items: {
               type: 'object', additionalProperties: false, required: ['title', 'content'],
-              properties: { title: str(1, 120), content: str(1, 6000) },
+              properties: {
+                title: str(1, 120), content: str(1, 6000),
+                visual: {
+                  type: 'object', additionalProperties: false, required: ['kind', 'shows'],
+                  description: 'Only when a picture or diagram makes this screen clearer than its text alone; leave it out otherwise.',
+                  properties: {
+                    kind: { type: 'string', enum: ['picture', 'diagram'] },
+                    search: str(0, 80, 'For a picture: a few plain image search words, such as "lunar surface Apollo".'),
+                    shows: str(1, 300, 'What it should show and why that makes the question clearer.'),
+                  },
+                },
+              },
             },
           },
           solution: str(1, 6000),
@@ -102,6 +113,20 @@ export const PLAN_SCHEMA = Object.freeze({
 });
 
 const clean = value => (typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '');
+// At most this many pictures and diagrams in one plan: each takes setup time, and most screens need none.
+export const MAX_PLAN_VISUALS = 4;
+
+/** A part's visual request, normalised; problems go to `bad`. */
+function planVisual(value, path, bad) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) { bad(`${path} must be an object or left out`); return null; }
+  const kind = value.kind;
+  if (kind !== 'picture' && kind !== 'diagram') { bad(`${path}.kind must be "picture" or "diagram"`); return null; }
+  const shows = clean(value.shows);
+  if (!shows || shows.length > 300) { bad(`${path}.shows must say in 1 to 300 characters what it shows and why it helps`); return null; }
+  const search = clean(value.search);
+  if (kind === 'picture' && (!search || search.length > 80)) { bad(`${path}.search must give 1 to 80 characters of search words for a picture`); return null; }
+  return { kind, shows, ...(kind === 'picture' ? { search } : {}) };
+}
 /** Multi-line text keeps its line breaks (screen content is laid out with them). */
 const cleanBlock = value => (typeof value === 'string' ? value.replace(/\r\n?/gu, '\n').trim() : '');
 
@@ -205,7 +230,7 @@ export function buildPlanPrompt(inputs = {}) {
     '(f) PER PERSON. Give the lead a temperament (warm, neutral or tough), judged from how the lead\'s voice sounds. Give every person a voice setting "stability" from 0.15 to 0.75: lower lets the voice act out more with a wider emotional range, higher keeps it steadier. Around 0.3 suits most voices and is the starting point. A voice described as expressive, upbeat, animated or dramatic should be set steadier, toward 0.45 to 0.6, so it does not overact in a professional interview. A voice described as calm, flat, monotone or deep can be set more expressive, toward 0.2 to 0.3. A tough or neutral temperament sits a little steadier than a warm one. Give every person a "room" from 0 to 1: how much of the room the candidate hears in that person\'s audio. 0 is someone on a good headset in a quiet, furnished room: only a slight amount of room, barely noticeable unless you listen for it, and never none. 1 is a laptop microphone at arm\'s length in a bare, echoey room. Choose it from who they are and where they would plausibly be calling from (a home office, a meeting room, a car, a quiet corner of an open office), and make people differ from one another. Give every person a "manner": how this person carries themselves as an interviewer (how long they have been doing this, what they care about in an answer, how they talk). MANNER ONLY. A manner never states a fact about the company, its products, its people or its plans that is not in the brief below, and never invents the interviewer\'s history at this company. Keep it to a sentence.',
     '(g) TIME. Give each question, yours included, a time budget in minutes that fits the call length, and say who asks it: the lead or a colleague, by voice key. The budgets together must fit the call length and may not exceed it by more than a quarter. If the candidate\'s focus note asks for a different length (for example a ten minute call), that is the call length: pick fewer questions and budget to it. Every colleague must ask at least one question, and each question is asked by the person whose role it belongs to.',
     '(h) PROBES. THE APPLICATION below is what the candidate submitted for this job: a resume and a cover letter. Read both closely. For each question you picked, yours included, write up to four probes: the places where a real interviewer holding this application would dig, given what that question touches. Look for a claim in the resume or letter that the question touches and that needs "what exactly did you do", a number with no source, a gap or a missing result, or a decision with no reason given. Write each as what to look for, not as a scripted line. Base probes only on the application and the question, never on what a good answer would be. Write none for a question where the application gives nothing worth digging into. If the application is empty, write probes only from the question itself.',
-    `(i) PREPARED PROBLEMS. For every picked question that should be shown on a shared screen (a coding problem, anything with an example or sample data, a question with several parts, or exact wording that matters), write a prepared problem. A problem has one or more parts (at most four), one part per screen, so a multi-part question shows one part at a time. Write each part in the screen format: ${SCREEN_FORMAT} Keep each part under 6000 characters. Give the problem a short ref such as p1, p2 and so on, and the number of the picked question it belongs to (0 if it belongs to your own question). Work every example through yourself and check that each stated output is really correct before you write it: the live interviewer will judge the candidate's code against what you write here, so an example with a wrong output is the worst mistake you can make. Also give a reference solution (private, for the interviewer to judge the candidate's answer against), the edge cases worth probing, and a ladder of hints from gentle to direct. Hints and the solution are never read out to the candidate. A question that is simply spoken needs no problem.`,
+    `(i) PREPARED PROBLEMS. For every picked question that should be shown on a shared screen (a coding problem, anything with an example or sample data, a question with several parts, or exact wording that matters), write a prepared problem. A problem has one or more parts (at most four), one part per screen, so a multi-part question shows one part at a time. Write each part in the screen format: ${SCREEN_FORMAT} Keep each part under 6000 characters. Give the problem a short ref such as p1, p2 and so on, and the number of the picked question it belongs to (0 if it belongs to your own question). Work every example through yourself and check that each stated output is really correct before you write it: the live interviewer will judge the candidate's code against what you write here, so an example with a wrong output is the worst mistake you can make. Also give a reference solution (private, for the interviewer to judge the candidate's answer against), the edge cases worth probing, and a ladder of hints from gentle to direct. Hints and the solution are never read out to the candidate. A question that is simply spoken needs no problem. VISUALS: a part may also carry one visual, a picture or a diagram, but ONLY when it makes that screen clearer or illustrates something better than the text alone; most parts need none, and never add one just because you can (at most ${MAX_PLAN_VISUALS} in the whole plan). A picture is a real photo, found by a web image search from your search words: for example a hypothetical about living in a moon colony is clearer with a photo of the lunar surface. A diagram or chart is drawn from the part's own content: a timeline, a small system sketch, a chart of the sample data. A spoken question that a picture would make clearer may get a one-part problem just for that, with the question written as its content. Say in "shows" what it should show and why it helps; a picture that does not fit is left out, so the text must stand on its own.`,
     '',
     'THE CANDIDATE MAY NOT FIT THIS JOB. This interview is held whether or not the candidate would really have been invited: their background may match the role closely, partly or not at all. Plan the interview this company would really hold for this role, the same for any candidate. Choose the questions, your own question, the people on the call, the difficulty and the prepared problems from the role, the company and the focus note alone. Never pick, drop, soften or reword a question because of what the application shows the candidate has or has not done. The application is for the probes in (h) only, and a question the application does not cover simply gets probes from the question itself. Being asked about something the candidate has never done is a normal part of a real interview.',
     '',
@@ -399,7 +424,8 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
         value.parts.forEach((part, partIndex) => {
           const partPath = `${path}.parts[${partIndex}]`;
           if (!isObject(part)) { bad(`${partPath} must be an object`); return; }
-          parts.push({ title: text(part.title, `${partPath}.title`, 1, 120), content: block(part.content, `${partPath}.content`, 1, 6000) });
+          const visual = part.visual === undefined || part.visual === null ? null : planVisual(part.visual, `${partPath}.visual`, bad);
+          parts.push({ title: text(part.title, `${partPath}.title`, 1, 120), content: block(part.content, `${partPath}.content`, 1, 6000), ...(visual ? { visual } : {}) });
         });
       }
       const solution = block(value.solution, `${path}.solution`, 1, 6000);
@@ -407,6 +433,8 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
       const hints = value.hints === undefined ? [] : strings(value.hints, `${path}.hints`, 5, 1, 300);
       problemsOut.push({ ref, question: value.question, language, parts, solution, edgeCases, hints });
     });
+    const visuals = problemsOut.reduce((sum, problem) => sum + problem.parts.filter(part => part.visual).length, 0);
+    if (visuals > MAX_PLAN_VISUALS) bad(`the problems ask for ${visuals} visuals and the limit is ${MAX_PLAN_VISUALS}: keep only those that help most`);
   }
 
   if (problems.length) return { plan: null, problems };

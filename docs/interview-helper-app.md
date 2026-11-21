@@ -135,8 +135,10 @@ Every window has one (`electron/interviewApp/contextMenu.js`, attached in
 - **In a text box otherwise:** Cut, Copy, Paste and Select All.
 - **On selected page text:** Copy. Anywhere else no menu opens.
 - The call window turns text selection off (`src/index.css`); its chat
-  messages turn it back on (`select-text` in `ChatPanel.jsx`) so they can be
-  dragged over and copied.
+  messages and the shared screen's title and text turn it back on
+  (`select-text` in `ChatPanel.jsx` and `SharedScreen.jsx`, the screen since
+  2026-11-20) so they can be dragged over and copied. The screen stays
+  read-only.
 - The coding pad turns spell checking off, so it gets the edit items only.
 - Not yet checked by right-clicking in the running app; the suites cover the
   menu's contents and that a correction replaces the word.
@@ -313,7 +315,9 @@ at the end; it is never sent until the person presses Enter. The reply is
 written from the career text (read once per call from the snapshot), the job
 listing text of the prepared application, the brief, the submitted résumé and
 cover letter, the prepared Q&A answers, the open pad and the last 40 turns of
-the conversation (`electron/practiceCall/draftAnswer.js`, `draftAnswer` in
+the conversation, and the shared screen (the one shown, else the last one shown,
+added 2026-11-20 after a suggestion said it could not see the screen)
+(`electron/practiceCall/draftAnswer.js`, `draftAnswer` in
 `callService.js`, window channel `draft-answer`). Nothing checks it against
 the career text: it only has to move the interview on for manual testing. The
 prompt keeps the candidate in character (never mentioning documents, notes or
@@ -323,8 +327,30 @@ reply said "my documents don't give me" a reason).
 Stage `practice-call-draft-answer`, Sonnet at low effort, chosen by reasoning
 and not measured (the person waits on it mid-call and accuracy is not
 checked). While it is being written the candidate counts as typing, so the
-interviewer waits; hanging up aborts it. The service refuses it unless the app
+interviewer waits; hanging up aborts it. Pausing does neither: the button
+stays enabled while paused and a reply already being written finishes and lands
+in the box (2026-11-20). The service refuses it unless the app
 passes `draftText` in (`main.js`), so the unit suites never call Claude.
+
+**Sent messages are spoken (2026-11-20).** A message sent in the call chat is
+spoken in the candidate's own voice and the interviewer may cut into it; the
+voice (female or male) is chosen in Settings (sidebar, or ⌘,). See
+docs/interview-practice-call.md, section 6. Unit-tested only.
+
+**Pictures and diagrams on shared screens (2026-11-21).** The planner may give a
+prepared screen one picture (from Parallel's web image search, with Wikimedia
+Commons as the fallback, checked by Claude for fit)
+or one drawn diagram, only where it makes the question clearer; they are made
+during setup. See docs/interview-practice-call.md, section 6b. Unit-tested only.
+
+**Resizing the call's side panel and chat box (2026-11-20).** The chat and notes
+panel shares one width, dragged from the strip in the gap on its left (arrow keys
+when it has focus, double click for the default 340 px); it stays between 280 px
+and the window width less 360 px for the call. The chat box has a grip above it:
+dragging up makes it taller (the messages keep at least 160 px), double click goes
+back to growing with the answer. Both sizes are kept in the call window's
+`localStorage` (`src/practice-call/panelSize.js`). Render-tested only, not yet
+dragged in the built app.
 
 **Closing the practice call window (2026-11-19).** Closing the window ends the
 call: the three Claude CLI sessions are stopped (SIGTERM to each process group,
@@ -342,7 +368,13 @@ calls asked it and got an answer. Since 2026-11-19 a question counts only once
 the candidate has said or typed at least 15 words after it, or written in the
 pad, before the next planned question or the end of the call; a question asked
 just before hanging up, or met only with "could you repeat that?", is not
-counted. This is a word count, not a judgment of the answer. General questions are counted across every job, the rest per
+counted. Since 2026-11-20 only the candidate's own words count: speech into
+the microphone, or a message they typed themselves (which is spoken in their
+voice). A message written by Suggest a reply is heard by the interviewer like
+any other but adds nothing, even after edits (the box remembers that it held a
+suggestion until it is emptied; `generated` on `sendChat` and on the
+transcript entry, skipped in the engine's `noteAnswer`). This is a word count,
+not a judgment of the answer. General questions are counted across every job, the rest per
 posting (`practice-question-history.json`). The planner favours entries asked
 least, so repeated practice goes through the pool. For a topic the interviewer
 makes up its own question or exercise each call.

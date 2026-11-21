@@ -21,6 +21,8 @@ function checkId(value) {
   return value;
 }
 
+const VISUAL_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,40}\.(?:jpg|png|webp|svg)$/u;
+
 async function lstatOrNull(fs, target) {
   try {
     return await fs.lstat(target);
@@ -360,6 +362,12 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     },
     async audioPath(callId) {
       return fileOf(callId, 'call.m4a');
+    },
+    /** A picture or diagram made for one of the call's shared screens: only a plain file name in its visuals folder. */
+    async visualPath(callId, name) {
+      if (typeof name !== 'string' || !VISUAL_NAME.test(name) || name.includes('..')) return null;
+      const dir = await dirOf(callId);
+      return dir ? path.join(dir, 'visuals', name) : null;
     },
     async hasAudio(callId) {
       const file = await fileOf(callId, 'call.m4a');

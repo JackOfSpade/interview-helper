@@ -7,6 +7,18 @@ export const SCREEN_CONTENT_MAX = 6000;
 export const PAD_TEXT_MAX = 20000;
 
 // Mirrors the engine's caps so a longer value that slips through is cut here too.
+/**
+ * A screen's picture or diagram as the window may show it: only one served by the call's own
+ * practice-call:// protocol, of a known kind; anything else is no visual.
+ */
+export function safeVisual(visual) {
+  if (!visual || typeof visual !== 'object') return null;
+  const url = String(visual.url || '');
+  if (!/^practice-call:\/\/[A-Za-z0-9_-]+\/visuals\/[A-Za-z0-9._-]+$/u.test(url)) return null;
+  if (visual.kind !== 'picture' && visual.kind !== 'diagram') return null;
+  return { kind: visual.kind, url, description: String(visual.description || '').slice(0, 400), credit: String(visual.credit || '').slice(0, 300) };
+}
+
 export function clampScreen(screen) {
   if (!screen || typeof screen !== 'object') return null;
   return {
