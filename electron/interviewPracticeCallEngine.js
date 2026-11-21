@@ -112,6 +112,7 @@ const ACK_WORD_ESTIMATE_MS = 390;
 const ACK_TAIL_ESTIMATE_MS = 150;
 const JOIN_GAP_MIN_MS = 60;
 const LEADING_TAGS = /^(?:\s*\[[^\]]*\])+\s*/u;
+const SUPERSEDE_COVER = 0.9; // share of a volatile result's range a newer result must cover to replace it
 const MAX_SILENCE_CHECKS = 3; // unanswered check-ins before the interviewer gives up and the line drops
 const nonSpace = text => String(text ?? '').replace(/\s/g, '').length; // the overlay position unit: whitespace never counts
 const tokens = value => String(value ?? '').split(/\s+/).filter(Boolean);
@@ -297,6 +298,11 @@ export function createPracticeCallEngine({
   let cancelling = null; // reply stopped, waiting for the helper's cancelled event
   let overlap = null;
   let audioHint = false; // Smart Turn said the candidate sounds unfinished: opener-only [audio: ...] hint
+  // The answer text an "unfinished" verdict (<listen/>) judged at a turn end. The recogniser can still be finishing the
+  // last words when the turn is looked at (found live on 2026-11-21: the look saw "...rather than be surpris", the
+  // final "...rather than be surprised." came a moment later, and with the candidate done nothing looked again).
+  // A final result that changes the answer after such a verdict gets the answer looked at again.
+  let listenedText = null;
   let generation = 0;
   // Panel calls only: who is on the call, who holds the floor (spoke last), and names not yet announced to the model.
   const speakers = panel && Array.isArray(panel.speakers) ? panel.speakers.map(item => ({ ...item })) : null;
@@ -467,6 +473,39 @@ export function createPracticeCallEngine({
     if (kind === 'pass' && reply.candidates.length) keepPassedLine(reply);
     setPhase('listening');
     armSilence();
+    if (kind === 'listen' && answerLook(reply)) {
+      listenedText = reply.turnBase?.candidateText ?? null;
+      relookIfRevised(); // the final words may already have arrived while the look was being made
+    }
+  }
+
+  /** A look at an answer the candidate finished speaking (a turn end), not a check-in, a live look or a typed line. */
+  const answerLook = reply => !reply.greeting && !reply.typed && !reply.cutIn && !reply.liveLook && !reply.checkIn && !reply.padProgress;
+
+  /**
+   * After an "unfinished" verdict at a turn end: once the recogniser's final result has changed the answer and the
+   * candidate is still quiet, the answer is looked at again on the normal schedule (speculate now, commit after the
+   * usual gap). An unchanged answer is never looked at twice, so a second <listen/> waits for the candidate as ever.
+   */
+  function relookIfRevised() {
+    if (listenedText === null) return;
+    if (paused || phase !== 'listening' || current || speaking || said || injecting || typingNow || !candidateSpoke) return;
+    const text = candidateText();
+    if (!text || sameWords(text, listenedText) || !newestSegmentFinal()) return;
+    listenedText = null;
+    emit({ type: 'relook', words: tokens(text).length });
+    arm('spec', 0, onSpeculate);
+    arm('commit', Math.max(0, th.commitMs - th.speculateMs), onCommitDue);
+  }
+
+  // A final often only adds punctuation and capitals to what was looked at: that is no new answer to look at.
+  const wordKey = text => tokens(text).map(word => word.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '')).filter(Boolean).join(' ');
+  const sameWords = (a, b) => wordKey(a) === wordKey(b);
+
+  function newestSegmentFinal() {
+    let newest = null;
+    for (const item of segments.values()) if (item.startMs >= turnStartMs && (!newest || item.startMs >= newest.startMs)) newest = item;
+    return !!newest?.final;
   }
 
   async function restart(kind, pending = []) {
@@ -516,6 +555,7 @@ export function createPracticeCallEngine({
     greeting = false, typed = false, candidates = [], text = '', channel, silenceMs = null, padProgress = null, immediate = false,
     lastWordAt = null, respeculated = 0, specTokens = null, pausedAck = null, spokenText = '', handover = false, cutInCheck = false, liveLook = false, voicedNote = null, mostRecent = '', cutInBy = null, watched = false,
   }) {
+    listenedText = null; // any new look supersedes the one that listened
     disarm('spec');
     disarm('silence');
     if (immediate) disarm('commit');
@@ -2560,6 +2600,7 @@ export function createPracticeCallEngine({
     if (paused) { if (!event.speaking) speaking = false; return; }
     if (event.speaking) {
       speaking = true; // a bare sound postpones the check-in but is not an answer: the counters stay
+      listenedText = null; // the candidate went on: their next pause is a turn end of its own, judged the normal way
       audioHint = false; // the candidate resumed: no stale Smart Turn hint
       disarm('silence');
       if (current && current.committed) {
@@ -2605,6 +2646,7 @@ export function createPracticeCallEngine({
 
   function onTranscript(event) {
     if (paused) return; // dropped: no caption, no stored words, so nothing from the pause reaches a turn
+    dropSupersededVolatile(event);
     segments.set(event.segmentId, { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final });
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
     if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; } // the candidate actually said something
@@ -2624,6 +2666,27 @@ export function createPracticeCallEngine({
       } else if (speakingOverlap.decision === 'continue' && (count > th.interruptWords || (speakingOverlap.durationElapsed && count >= 1))) {
         immediateStop(speakingOverlap);
       }
+    }
+    if (event.final) relookIfRevised();
+  }
+
+  /**
+   * The helper keys a result by the start of its audio range, and a later result for the same speech can start a little
+   * earlier or later. A volatile result that a newer one covers is replaced, not kept beside it: found live on
+   * 2026-11-21, where every sentence reached the interviewer twice ("First, prevention. First, prevention.").
+   * Only volatile results are dropped, and only when nearly all of their range lies under the new one: a longer volatile
+   * that runs past a final keeps its words until a result covers them.
+   */
+  function dropSupersededVolatile(event) {
+    const start = Number(event.startMs);
+    const end = Number(event.endMs);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+    for (const [id, item] of segments) {
+      if (id === event.segmentId || item.final || !Number.isFinite(item.startMs) || !Number.isFinite(item.endMs)) continue;
+      const covered = Math.min(end, item.endMs) - Math.max(start, item.startMs);
+      const length = item.endMs - item.startMs;
+      const supersedes = length > 0 ? covered >= length * SUPERSEDE_COVER : item.startMs >= start && item.startMs < end;
+      if (supersedes) segments.delete(id);
     }
   }
 

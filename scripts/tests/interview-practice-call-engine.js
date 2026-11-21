@@ -343,6 +343,121 @@ test('listen from the opener discards the reply with no playback and no not-spok
   assert(message.endsWith("Candidate: 'I built a scheduler so the rest was'"), message);
 });
 
+test('a final that revises the answer after an unfinished verdict gets it looked at again, once', async () => {
+  // Found live on 2026-11-21: the turn end was looked at while the recogniser still had "be surpris"; the final came a
+  // moment later and, with the candidate done, nothing looked again until the hang-up.
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('it can adapt rather than be surpris', 'a', start, false, start + 300);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  assert.equal(rig.engine.state().phase, 'listening');
+  rig.h.transcript('It can adapt rather than be surprised.', 'a', start, true, start + 300);
+  await rig.clock.advance(0); // the look is armed on the clock, due now
+  assert.equal(rig.of('relook').length, 1);
+  assert.equal(rig.sessions.opener.calls.length, 2, 'the revised answer is looked at again at once');
+  assert(rig.sessions.opener.calls[1].message.endsWith("Candidate: 'It can adapt rather than be surprised.'"), rig.sessions.opener.calls[1].message);
+  // A second unfinished verdict on the same words waits for the candidate as ever: no third look, however long.
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  rig.h.transcript('It can adapt rather than be surprised.', 'a', start, true, start + 300);
+  await rig.clock.advance(5000);
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  assert.equal(rig.of('relook').length, 1);
+});
+
+test('a final that arrived while the look was being made is looked at as soon as the look says unfinished', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('and then we shipped', 'a', start, false, start + 300);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  rig.h.transcript('And then we shipped it.', 'a', start, true, start + 300);
+  await flush();
+  assert.equal(rig.sessions.opener.calls.length, 1, 'a final during a look does not start another look by itself');
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(0);
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  assert(rig.sessions.opener.calls[1].message.endsWith("Candidate: 'And then we shipped it.'"));
+});
+
+test('an unchanged final after an unfinished verdict, or a live look that listened, starts no new look', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('I built a scheduler', 'a', start, false, start + 300);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  rig.h.transcript('I built a scheduler', 'a', start, true, start + 300);
+  await rig.clock.advance(100);
+  rig.h.transcript('I built a Scheduler.', 'a', start, true, start + 300); // punctuation and capitals only: the same words
+  await rig.clock.advance(3000);
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  assert.equal(rig.of('relook').length, 0);
+  // The candidate speaking again is the ordinary path, not a re-look.
+  rig.h.vad(true);
+  rig.h.transcript('in Go', 'b', rig.clock.now(), true, rig.clock.now() + 200);
+  await flush();
+  assert.equal(rig.of('relook').length, 0, 'never while the candidate is speaking');
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  // Nor at the pause after: a final that lands then is new speech, and the turn end takes its usual time.
+  await rig.clock.advance(200);
+  rig.h.vad(false);
+  rig.h.transcript('in Go and Rust', 'b', rig.clock.now() - 200, true, rig.clock.now());
+  await rig.clock.advance(300);
+  assert.equal(rig.of('relook').length, 0);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the speculation point (600 ms) has not come yet');
+  await rig.clock.advance(400);
+  assert.equal(rig.sessions.opener.calls.length, 2);
+});
+
+test('a volatile result that a newer one covers is replaced, so no sentence reaches the interviewer twice', async () => {
+  // Found live on 2026-11-21: results for the same speech were keyed by slightly different starts and both were kept.
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('First prevention', 'p1', start + 40, false, start + 900);
+  rig.h.transcript('First, prevention.', 'p2', start, true, start + 1000);
+  rig.h.transcript('During the pilot I would', 'q1', start + 1100, false, start + 1800);
+  rig.h.transcript('During the pilot I would run blanks', 'q2', start + 1080, false, start + 2400);
+  rig.h.transcript('During the pilot, I would run blanks.', 'q3', start + 1060, true, start + 2400);
+  // The next sentence's volatile result touches the last one's end but is its own speech: it stays.
+  rig.h.transcript('Second', 'r1', start + 2400, false, start + 2700);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.endsWith("Candidate: 'First, prevention. During the pilot, I would run blanks. Second'"), message);
+});
+
+test('a volatile result that runs well past a final keeps its words', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('I built a scheduler so the rest was', 'v', start + 30, false, start + 2000);
+  rig.h.transcript('I built a scheduler.', 'f', start, true, start + 1200);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  assert.match(rig.sessions.opener.calls[0].message, /so the rest was'$/, 'the words past the final are not lost');
+});
+
 test('listen from main after a finished line: the opener reaction is not spoken, nothing plays, the line stays unconsumed', async () => {
   const rig = makeRig({ thresholds: { voiceGateMs: 600 } }); // gate open at speculation
   await greet(rig);
