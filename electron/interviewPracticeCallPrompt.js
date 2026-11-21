@@ -320,7 +320,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     ...(hasProblems ? PREPARED_SCREEN_LINES : []),
     '',
     'CONTROL TAGS',
-    '- If the candidate sounds mid-thought or unfinished, reply with exactly <listen/> and nothing else. The line is not kept and is joined to whatever they say next, however long they pause. This is for spoken lines only: a Candidate (typed in chat) line is a sent message and is always finished, so it never gets <listen/>.',
+    '- If the candidate is not done yet, reply with exactly <listen/> and nothing else. The line is not kept and is joined to whatever they say next. Not done means the line breaks off mid-thought, OR it is a complete sentence but the answer plainly has more to come: they announced more ("first", "two things", "a few steps") and have not given it all, they are partway through steps or a list, or they have not yet got to what was asked. A pause after a full sentence is often someone thinking, not someone finished. An answer that has covered what was asked, or ends on a conclusion, is done. A note [The candidate has been quiet for Ns since these words. You already waited once.] means you held back once and they have said nothing since. If they were plainly partway through what they set out to cover, a real interviewer keeps waiting, so <listen/> again: a check-in comes if the silence runs unusually long. Otherwise a person still quiet after that has usually finished or is waiting for you, so reply. This is for spoken lines only: a Candidate (typed in chat) line is a sent message and is always finished, so it never gets <listen/>.',
     '- Not every finished line from the candidate needs an answer. When a line, spoken or typed in chat, is complete but needs no reply (a plain acknowledgement of what you just said, an "okay" or "thanks" while you are busy, for example after you said you need a minute to pull something up), reply only <pass/> and stay silent. The line is kept as said and is never joined to the next one. It is your judgment each time, the same for spoken and typed lines: an unfinished spoken line is <listen/>, a finished line with nothing to answer is <pass/>, and a line that asks, answers, objects or adds something gets a reply.',
     '- When you have said your farewell and the call is over, end that final reply with <end-call/>.',
     '- The first time in this call you ask a question from the INTERVIEW PLAN, write <asked n="3"/> (n is that question\'s number in the plan) at the very start of that reply, before any speaker tag and before the text. It is never spoken. Write it once per planned question, only the first time; never for follow-ups, small talk or questions of your own.',
@@ -369,7 +369,7 @@ export const OPENER_BLOCK = [
   'Never describe, rate or restate the answer. Never say "that\'s a ...", "that\'s clear", "sounds ..." or "makes sense" about the answer, plan, reason, flow, detail or approach, and never use a noun from the line or its topic (no tools, places, events, features or names, not even in other words). Never praise, state a fact, say whether you know or have something, answer a question, ask one, hand a question to anyone, or say what comes next ("let me ask", "so", "next"). End on a settled reaction, never a lead-in.',
   'Vary the wording and the opening sound from turn to turn: you can see your earlier reactions in this conversation, so never write the same reaction twice, never repeat a shape you used in the last few turns, do not open with "Okay" more than now and then, and say thanks only now and then, when the candidate shared something long or personal.',
   'You may put ONE delivery tag in square brackets before it when the moment clearly calls for it, for example "[warm] Oh, that\'s great to hear."; usually write it plain. Never write a hesitation (no ellipsis, no drawn-out "Mm..."): a pause before the reply tells the candidate their answer did not land.',
-  'If the candidate\'s spoken line stops mid-thought or is clearly unfinished, reply exactly <listen/> instead. A line marked as typed in chat is always finished, so it never gets <listen/>.',
+  'If the candidate is not done yet, reply exactly <listen/> instead: the spoken line breaks off, or the answer plainly has more coming (they announced steps or points not yet given, or have not reached what you asked). After a note that they have been quiet and you already waited once, <listen/> only if they were plainly partway through. A line marked as typed in chat is always finished, so it never gets <listen/>.',
   'If the candidate\'s line, spoken or typed, is finished but is only an acknowledgement that needs no reply (an "okay", "thanks" or "sure" said back to you, for example after you said you need a minute), reply exactly <pass/> instead, so nothing is spoken back at it.',
   'Lines in square brackets in a message are notes about the call, not something to answer.',
 ].join('\n');
@@ -519,12 +519,14 @@ export function formatTurnMessage({
   elapsedMs, candidateText, acknowledgements = [], interruption = null, silenceMs = null,
   notSpoken = false, acknowledgement = '', lastSpoken, typing = false, channel,
   audioHint = null, voiceNote = null, pausedAck = null, spokenText = '', joined = [], presence = null, absentHandover = [], unknownSpeaker = false, unknownScreen = [],
-  padText, padProgress = null, silenceCheck = null, stillSpeaking = false, mostRecent = '', cutInBy = null,
+  padText, padProgress = null, silenceCheck = null, stillSpeaking = false, mostRecent = '', cutInBy = null, quietMs = null,
 } = {}) {
   const seconds = Math.max(0, Math.floor((Number(elapsedMs) || 0) / 1000));
   const parts = [`[elapsed ${pad(Math.floor(seconds / 60))}:${pad(seconds % 60)}]`];
   if (text(audioHint)) parts.push(text(audioHint));
   if (text(voiceNote)) parts.push(`[voice: ${text(voiceNote)}]`);
+  // A second look at an answer judged unfinished: the candidate has stayed quiet since.
+  if (Number.isFinite(quietMs) && quietMs > 0) parts.push(`[The candidate has been quiet for ${Math.max(1, Math.round(quietMs / 1000))}s since these words. You already waited once.]`);
   for (const name of (Array.isArray(joined) ? joined : []).map(text).filter(Boolean)) {
     parts.push(`[${name} has joined the call and is listening. They have not been introduced yet.]`);
   }

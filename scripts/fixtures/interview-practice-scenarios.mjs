@@ -127,6 +127,14 @@ export const SCENARIOS = [
       turn(minutes(47, 30), 'No more questions from me, thank you so much for your time.', 'The interviewer says a short in-character farewell and ends with <end-call/> (judge whether the farewell is natural; never mention the app, notes or feedback).', { expectControl: 'end-call' }),
     ],
   },
+  {
+    name: 'h-announced-steps-pause', title: 'A complete sentence partway through announced steps should get <listen/>, then a reply once it is finished', temperament: 'neutral', seed: 89,
+    turns: [
+      turn(minutes(18, 0), 'There are three things I would check before trusting the route planner. First, that every planned route keeps the battery reserve above the safety margin.', 'The candidate announced three things and has given only the first, in a complete sentence: they are plainly not done, so the interviewer must reply with exactly <listen/>.', { expectControl: 'listen' }),
+      turn(minutes(18, 4), 'There are three things I would check before trusting the route planner. First, that every planned route keeps the battery reserve above the safety margin.', 'The same words after a quiet stretch (the note says the interviewer already waited once). The candidate is still plainly partway through the three things, so a real interviewer keeps waiting: exactly <listen/>.', { expectControl: 'listen', format: { quietMs: 3000 } }),
+      turn(minutes(18, 30), 'There are three things I would check before trusting the route planner. First, that every planned route keeps the battery reserve above the safety margin. Second, that two Drifters are never given the same aisle at the same time. And third, that a lost network link makes a Drifter stop rather than guess. That is how I would test it.', 'All three things are given and the answer ends on a conclusion: the interviewer replies out loud, not <listen/>.'),
+    ],
+  },
 ].map(scenario => ({ ...scenario, persona: pickPersona({ random: seeded(scenario.seed), temperament: scenario.temperament }) }));
 
 // SYNTHETIC classifier cases: interviewer partial sentence + candidate overlap words. Labels are assigned in code, not by a model.

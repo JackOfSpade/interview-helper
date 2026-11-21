@@ -17,6 +17,8 @@ import {
 const MARKERS = { haiku: 'Marker-Hh', opus: 'Marker-Oo', sonnet: 'Marker-Ss' };
 const BASE_MS = { haiku: 500, opus: 1000, sonnet: 2000 };
 const LISTEN_PROBE = 'um, we first looked at the, hmm, the';
+const STEPS_PROBE = 'First, that every planned route keeps the battery reserve above the safety margin.';
+const STEPS_DONE = 'That is how I would test it.';
 const totalTurns = SCENARIOS.reduce((sum, scenario) => sum + scenario.turns.length, 0);
 
 function stubFactory(counts = { sessions: 0, turns: 0 }, { neverListen = [], failOn = {} } = {}) {
@@ -30,7 +32,7 @@ function stubFactory(counts = { sessions: 0, turns: 0 }, { neverListen = [], fai
         seen += 1;
         if (failOn[config.model] === seen) throw Object.assign(new Error('stub'), { code: 'BOOM' });
         const base = BASE_MS[config.model];
-        if (message.includes(LISTEN_PROBE) && !neverListen.includes(config.model)) {
+        if ((message.includes(LISTEN_PROBE) || (message.includes(STEPS_PROBE) && !message.includes(STEPS_DONE))) && !neverListen.includes(config.model)) {
           // firstSentenceMs is deliberately huge: a listen turn must never reach the first-sentence percentiles.
           return { text: '<listen/>', control: 'listen', endCall: false, firstSentenceMs: 99_999, firstDeltaMs: null, totalMs: 400, costUsd: 0.01 };
         }
@@ -173,9 +175,9 @@ export default [
     },
   },
   {
-    name: 'interview practice fixtures: seven synthetic scenarios and 24 balanced classifier cases',
+    name: 'interview practice fixtures: eight synthetic scenarios and 24 balanced classifier cases',
     run() {
-      assert.deepEqual(SCENARIOS.map(scenario => scenario.name.slice(0, 1)), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+      assert.deepEqual(SCENARIOS.map(scenario => scenario.name.slice(0, 1)), ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']);
       for (const scenario of SCENARIOS) {
         assert(scenario.turns.length >= 1 && scenario.persona.name);
         for (const item of scenario.turns) assert(/^\[elapsed \d+:\d\d\]/.test(item.message) && item.expect.length > 20);
@@ -184,6 +186,8 @@ export default [
       assert(byName.c.turns.some(item => item.message.includes('You were interrupted after saying')));
       assert(byName.d.turns[0].expectControl === 'listen' && byName.d.turns[1].expectControl === undefined);
       assert(byName.e.turns[0].message.includes('[candidate silent 10s]'));
+      assert.deepEqual(byName.h.turns.map(item => item.expectControl), ['listen', 'listen', undefined], 'announced steps not yet given are not done');
+      assert(byName.h.turns[1].message.includes('You already waited once.') && !byName.h.turns[0].message.includes('waited'));
       assert.equal(SYNTHETIC_HISTORY.split('\n').filter(line => line.includes('Interviewer:')).length, 40);
       assert.equal(byName.g.turns.length, 3);
       assert(byName.g.turns.some(item => item.message.startsWith('[elapsed 46:00]')));
@@ -211,14 +215,14 @@ export default [
         assert.equal(counts.turns, totalTurns * 2);
         const haiku = summary.interviewer.find(row => row.config === 'haiku/low');
         const sonnet = summary.interviewer.find(row => row.config === 'sonnet/low');
-        assert.equal(haiku.listenTurns, 1);
-        assert.equal(haiku.spokenTurns, totalTurns - 1);
+        assert.equal(haiku.listenTurns, 3, 'the mid-thought pause and the two announced-steps pauses');
+        assert.equal(haiku.spokenTurns, totalTurns - 3);
         assert.equal(haiku.p50FirstSentenceMs, 500);
         assert.equal(haiku.p95FirstSentenceMs, 500, 'the 99999 ms listen turn must not leak into the percentile');
         assert.equal(haiku.p50ListenMs, 400);
         assert.equal(haiku.p95ListenMs, 400);
         assert.equal(haiku.keepListeningAccuracy, 1);
-        assert.equal(sonnet.keepListeningAccuracy, 0.5, 'never listening misses the unfinished turn');
+        assert.equal(sonnet.keepListeningAccuracy, 0.4, 'never listening misses the three unfinished turns of five');
         assert.equal(sonnet.listenTurns, 0);
         closeTo(haiku.meanCostPerTurnUsd, 0.01);
         closeTo(haiku.projectedCostPerCallUsd, 0.6);

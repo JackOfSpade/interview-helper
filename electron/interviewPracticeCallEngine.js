@@ -22,6 +22,19 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   smartTurnTimeoutMs: 300,
   holdSpeculateMs: 1500,
   holdCommitMs: 2500,
+  // Smart Turn between smartTurnHoldBelow and this is an unsure "finished": the turn is looked at on the normal schedule
+  // but only commits unsureCommitMs after the vad end. Measured on call-mwqbzwjm-yv242w (2026-11-21): most mid-answer
+  // pauses scored 0.6 to 0.99, the real ends 0.96 and 0.99, so only a confident score keeps the 1.2 s commit.
+  smartTurnSureAbove: 0.85,
+  unsureCommitMs: 1800,
+  // After an "unfinished" verdict (<listen/>) at a turn end, the answer is looked at once more when the candidate has
+  // been quiet quietRelookMs from the vad end (never sooner than quietRelookMinGapMs after the verdict), the way an
+  // interviewer waits a beat and then takes the turn. Without it a wrong verdict waits for the 20 s silence check.
+  quietRelookMs: 3000,
+  quietRelookMinGapMs: 1000,
+  // That second look listened too: the candidate was plainly partway through, so the interviewer keeps waiting, and the
+  // first silence check comes this long after the vad end (sooner than silencePromptMs) unless it set its own <wait>.
+  listenCheckInMs: 10000,
   floorBidAfterMs: 250,
   resumeDelayMs: 250,
   maxResumePauseMs: 1200,
@@ -245,7 +258,7 @@ export function createPracticeCallEngine({
   const transcript = [];
   const segments = new Map();
   const handles = new Set();
-  const named = { spec: null, commit: null, silence: null, typing: null, padIdle: null, padTyping: null, liveLook: null, watch: null };
+  const named = { spec: null, commit: null, quietRelook: null, silence: null, typing: null, padIdle: null, padTyping: null, liveLook: null, watch: null };
   const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null }; // the watcher's checks: one at a time
   const classifierControllers = new Set();
   let phase = 'connecting';
@@ -303,6 +316,11 @@ export function createPracticeCallEngine({
   // final "...rather than be surprised." came a moment later, and with the candidate done nothing looked again).
   // A final result that changes the answer after such a verdict gets the answer looked at again.
   let listenedText = null;
+  // The one look that a quiet stretch after an unfinished verdict gets (onQuietRelook): used until the candidate speaks
+  // again. quietHint is how long they had been quiet, for the message of that look.
+  let quietRelookUsed = false;
+  let quietHint = null;
+  let checkInAt = null; // clock ms of the earlier first silence check after the quiet look also listened
   let generation = 0;
   // Panel calls only: who is on the call, who holds the floor (spoke last), and names not yet announced to the model.
   const speakers = panel && Array.isArray(panel.speakers) ? panel.speakers.map(item => ({ ...item })) : null;
@@ -475,6 +493,12 @@ export function createPracticeCallEngine({
     armSilence();
     if (kind === 'listen' && answerLook(reply)) {
       listenedText = reply.turnBase?.candidateText ?? null;
+      if (reply.quietLook) {
+        // Still not done after the quiet look: wait on, and check in sooner than a normal silence would.
+        checkInAt = (toClock(lastVadEndMs) ?? now()) + th.listenCheckInMs;
+        armSilence();
+      }
+      armQuietRelook();
       relookIfRevised(); // the final words may already have arrived while the look was being made
     }
   }
@@ -496,6 +520,30 @@ export function createPracticeCallEngine({
     emit({ type: 'relook', words: tokens(text).length });
     arm('spec', 0, onSpeculate);
     arm('commit', Math.max(0, th.commitMs - th.speculateMs), onCommitDue);
+  }
+
+  /** After an unfinished verdict: one more look once the candidate has been quiet quietRelookMs from the vad end. */
+  function armQuietRelook() {
+    if (quietRelookUsed || !(th.quietRelookMs > 0)) return;
+    const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
+    arm('quietRelook', Math.max(th.quietRelookMinGapMs, th.quietRelookMs - since), onQuietRelook);
+  }
+
+  /**
+   * The candidate stayed quiet after an unfinished verdict: the answer is looked at again, told how long they have been
+   * quiet, and the reply commits as soon as it has audio (the pause is already well past the commit point). Once per
+   * quiet stretch: a second unfinished verdict waits for the candidate or the silence check, as before.
+   */
+  function onQuietRelook() {
+    if (listenedText === null) return; // superseded: the candidate went on, or another look already ran
+    if (paused || phase !== 'listening' || current || speaking || said || injecting || typingNow || !candidateSpoke) return;
+    const text = candidateText();
+    if (!text) return;
+    quietRelookUsed = true;
+    quietHint = Math.round(Math.max(0, now() - (toClock(lastVadEndMs) ?? now())));
+    emit({ type: 'quiet-relook', words: tokens(text).length, quietMs: quietHint });
+    arm('spec', 0, onSpeculate);
+    arm('commit', 0, onCommitDue);
   }
 
   // A final often only adds punctuation and capitals to what was looked at: that is no new answer to look at.
@@ -558,9 +606,14 @@ export function createPracticeCallEngine({
     listenedText = null; // any new look supersedes the one that listened
     disarm('spec');
     disarm('silence');
+    disarm('quietRelook');
+    const quiet = quietHint;
+    quietHint = null;
+    checkInAt = null; // any turn supersedes an earlier check-in; the check-in turn itself has already used it
     if (immediate) disarm('commit');
     if (current) { const old = current; current = null; abortReply(old); } // never leave an orphan reply
     const reply = createReply({ immediate, greeting, typed, candidates, lastWordAt, respeculated, specTokens, handover });
+    reply.quietLook = quiet !== null && !greeting; // the look a quiet stretch after an unfinished verdict asked for
     reply.heldTurn = audioHint && !greeting; // the ear heard unfinished audio: a listen then means "still mid-thought"
     reply.checkIn = silenceMs !== null && silenceMs !== undefined;
     reply.padProgress = padProgress !== null && padProgress !== undefined;
@@ -594,6 +647,7 @@ export function createPracticeCallEngine({
         notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true, ...(mostRecent ? { mostRecent } : {}), ...(cutInBy ? { cutInBy } : {}) } : {}), ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
         ...(padText !== padSent ? { padText } : {}),
+        ...(quiet !== null && !greeting ? { quietMs: quiet } : {}),
       };
       reply.padSnapshot = padText;
       reply.padCarried = padText !== padSent && pausedAck === null;
@@ -2206,10 +2260,14 @@ export function createPracticeCallEngine({
       // Fenced against a stale answer: the candidate resumed, a newer vad end arrived, or the fast path already began.
       const stale = speaking || lastVadEndMs !== atMs || named.spec === null || current !== null;
       const held = value !== null && value < th.smartTurnHoldBelow && !stale;
-      emit({ type: 'turn-model', probability: value, held });
+      // An unsure finish: looked at as usual (a listen costs nothing yet) but committed later, so a thinking pause
+      // after a complete sentence has more room before the interviewer speaks.
+      const unsure = value !== null && !held && !stale && value < th.smartTurnSureAbove;
+      emit({ type: 'turn-model', probability: value, held, ...(unsure ? { unsure: true } : {}) });
+      const since = Math.max(0, now() - (toClock(atMs) ?? now()));
+      if (unsure) { arm('commit', th.unsureCommitMs - since, onCommitDue); return; }
       if (!held) return;
       audioHint = true;
-      const since = Math.max(0, now() - (toClock(atMs) ?? now()));
       arm('spec', th.holdSpeculateMs - since, onSpeculate);
       arm('commit', th.holdCommitMs - since, onCommitDue);
     };
@@ -2267,11 +2325,15 @@ export function createPracticeCallEngine({
   function armSilence() {
     disarm('silence');
     if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting || named.spec || named.commit) return;
+    // A quiet look that something held off when it was due (typing, a reply in flight) is due again now.
+    if (listenedText !== null && !quietRelookUsed && named.quietRelook === null) armQuietRelook();
     if (maybeSendPadProgress()) return;
     // Like a person: the first check comes after a while, the next ones come further apart.
     // The interviewer judges the first wait (<wait>); the later gaps widen with it, like a person who gives more room.
     const first = patienceS === null ? th.silencePromptMs : patienceS * 1000;
-    const waitMs = silencePrompts === 0 ? first
+    // After two unfinished verdicts the first check comes at checkInAt; a wait the interviewer chose itself still wins.
+    const listenCheck = silencePrompts === 0 && patienceS === null && checkInAt !== null;
+    const waitMs = listenCheck ? Math.max(0, checkInAt - now()) : silencePrompts === 0 ? first
       : nextGapMs !== null ? nextGapMs
         : silencePrompts === 1 ? clamp(first, 12000, 30000) : clamp(first * 1.5, 20000, 45000);
     arm('silence', waitMs, () => {
@@ -2280,7 +2342,8 @@ export function createPracticeCallEngine({
       if (silencePrompts >= MAX_SILENCE_CHECKS) return end('interviewer', undefined, { cause: 'silence' });
       nextGapMs = null;
       silencePrompts += 1;
-      silenceTotalMs += waitMs;
+      silenceTotalMs += listenCheck ? th.listenCheckInMs : waitMs; // the check-in counts the quiet from the vad end
+      if (listenCheck) checkInAt = null;
       beginTurn({ silenceMs: silenceTotalMs, immediate: true });
     });
   }
@@ -2602,6 +2665,10 @@ export function createPracticeCallEngine({
       speaking = true; // a bare sound postpones the check-in but is not an answer: the counters stay
       listenedText = null; // the candidate went on: their next pause is a turn end of its own, judged the normal way
       audioHint = false; // the candidate resumed: no stale Smart Turn hint
+      quietRelookUsed = false; // a new quiet stretch gets its own look
+      quietHint = null;
+      checkInAt = null;
+      disarm('quietRelook');
       disarm('silence');
       if (current && current.committed) {
         if (liveCutProtects(current)) { syncLiveCut(); return; } // trailing speech over a cut-in: not an interruption
@@ -2649,7 +2716,7 @@ export function createPracticeCallEngine({
     dropSupersededVolatile(event);
     segments.set(event.segmentId, { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final });
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
-    if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; } // the candidate actually said something
+    if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; } // the candidate actually said something
     if (liveCutProtects(current)) syncLiveCut();
     else if (candidateSpoke && speaking) armLiveLook();
     if (overlapWait && current === overlapWait.reply && tokens(overlapText(overlapWait)).length >= 1) {
@@ -2950,7 +3017,7 @@ export function createPracticeCallEngine({
       voicedNotes.set(entry, pending);
     }
     emit({ type: 'candidate-voice', state: whole ? 'finished' : 'cut', heardChars: heard.length, ...(whole ? {} : { messages: heardByMessage(utterance.texts, heard) }) });
-    if (heard) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; }
+    if (heard) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; }
     const reply = utterance.cutBy;
     if (reply && current === reply && !reply.committed) {
       // The interviewer's reply answers everything heard so far; the unspoken rest of the line is dropped.
@@ -3196,6 +3263,7 @@ export function createPracticeCallEngine({
     disarm('silence');
     silencePrompts = 0;
     silenceTotalMs = 0;
+    checkInAt = null; // the candidate is working: the normal silence wait starts after the edits
     arm('padTyping', th.typingExpireMs, () => { armSilence(); });
     schedulePadProgress();
   }
@@ -3208,6 +3276,7 @@ export function createPracticeCallEngine({
     silencePrompts = 0;
     silenceTotalMs = 0;
     nextGapMs = null;
+    checkInAt = null;
     // The helper can mix the candidate's voice into the microphone: the message is spoken as live speech, and everything
     // that follows (turn end, looks, cut-ins, talking over the interviewer) is the microphone path.
     if (injectMode()) return injectTyped(item);
@@ -3276,6 +3345,10 @@ export function createPracticeCallEngine({
     dropLiveLook(false, 'paused'); // a look at speech from before the pause is never spoken
     cancelWatch();
     if (!current) { candidateSpoke = false; audioHint = false; markTurnConsumed(); clearLiveAnswer(); }
+    // The speech the quiet look and the early check-in were about is forgotten too.
+    disarm('quietRelook');
+    quietHint = null;
+    checkInAt = null;
   }
 
   function typing(isTyping) {
@@ -3283,6 +3356,7 @@ export function createPracticeCallEngine({
     typingNow = !!isTyping;
     if (typingNow) {
       disarm('silence');
+      checkInAt = null; // the candidate is writing: the normal silence wait starts when they stop
       // The panel can vanish without saying it stopped: typing lapses unless it is refreshed.
       arm('typing', th.typingExpireMs, () => { typingNow = false; armSilence(); });
     } else {

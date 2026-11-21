@@ -1429,6 +1429,29 @@ export default [
       assert.match(prompt, /the recruiter can give the current picture/u);
     },
   },
+  {
+    name: 'interview practice prompt: an unfinished verdict is judged by meaning, and a quiet second look is told it already waited',
+    run() {
+      const prompt = buildInterviewerInstructions({ persona, brief, plan });
+      const line = prompt.split('\n').find(item => item.startsWith('- If the candidate is not done yet'));
+      assert(line, 'the main listen rule');
+      assert.match(line, /announced more \("first", "two things", "a few steps"\)/u, 'announced structure not yet given is not done');
+      assert.match(line, /partway through steps or a list/u);
+      assert.match(line, /not yet got to what was asked/u);
+      assert.match(line, /A pause after a full sentence is often someone thinking/u);
+      assert.match(line, /covered what was asked, or ends on a conclusion, is done/u);
+      assert.match(line, /plainly partway through what they set out to cover, a real interviewer keeps waiting, so <listen\/> again/u);
+      assert.match(line, /never gets <listen\/>/u, 'typed lines are still always finished');
+      const opener = buildOpenerInstructions({ persona, brief, plan });
+      assert.match(opener, /the answer plainly has more coming \(they announced steps or points not yet given, or have not reached what you asked\)/u);
+      assert.match(opener, /<listen\/> only if they were plainly partway through/u);
+      assert(opener.length < 4000, 'the acknowledgement instructions stay small');
+      const note = '[The candidate has been quiet for 3s since these words. You already waited once.]';
+      assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'First I would extract the DNA.', quietMs: 3040 }), `[elapsed 01:01] ${note} Candidate: 'First I would extract the DNA.'`);
+      assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'x', quietMs: 400 }), "[elapsed 01:01] [The candidate has been quiet for 1s since these words. You already waited once.] Candidate: 'x'", 'never 0 s');
+      for (const quietMs of [null, 0, -5, Number.NaN]) assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'x', quietMs }), "[elapsed 01:01] Candidate: 'x'");
+    },
+  },
 ];
 
 function OPENER_BLOCK_TEXT() { return buildOpenerInstructions({ persona }); }

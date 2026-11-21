@@ -203,6 +203,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     speculateMs: 500, commitMs: 1200, interruptWords: 2, interruptMs: 700, silencePromptMs: 20000, typingExpireMs: 6000, padIdleMs: 12000, padProgressMs: 25000, turnTimeoutMs: 20000, classifierTimeoutMs: 2500,
     voiceGateMs: 1200,
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
+    smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
     cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, voicedNoteWaitMs: 300,
@@ -363,13 +364,17 @@ test('a final that revises the answer after an unfinished verdict gets it looked
   assert.equal(rig.of('relook').length, 1);
   assert.equal(rig.sessions.opener.calls.length, 2, 'the revised answer is looked at again at once');
   assert(rig.sessions.opener.calls[1].message.endsWith("Candidate: 'It can adapt rather than be surprised.'"), rig.sessions.opener.calls[1].message);
-  // A second unfinished verdict on the same words waits for the candidate as ever: no third look, however long.
+  // A second unfinished verdict on the same words is not looked at again for the revision; only the quiet look
+  // (3 s after the vad end) comes, once.
   rig.sessions.opener.answer('<listen/>');
   await flush();
   rig.h.transcript('It can adapt rather than be surprised.', 'a', start, true, start + 300);
-  await rig.clock.advance(5000);
+  await rig.clock.advance(1500);
   assert.equal(rig.sessions.opener.calls.length, 2);
+  await rig.clock.advance(3500);
   assert.equal(rig.of('relook').length, 1);
+  assert.equal(rig.of('quiet-relook').length, 1);
+  assert.equal(rig.sessions.opener.calls.length, 3);
 });
 
 test('a final that arrived while the look was being made is looked at as soon as the look says unfinished', async () => {
@@ -405,7 +410,7 @@ test('an unchanged final after an unfinished verdict, or a live look that listen
   rig.h.transcript('I built a scheduler', 'a', start, true, start + 300);
   await rig.clock.advance(100);
   rig.h.transcript('I built a Scheduler.', 'a', start, true, start + 300); // punctuation and capitals only: the same words
-  await rig.clock.advance(3000);
+  await rig.clock.advance(1500); // short of the quiet look (3 s from the vad end)
   assert.equal(rig.sessions.opener.calls.length, 1);
   assert.equal(rig.of('relook').length, 0);
   // The candidate speaking again is the ordinary path, not a re-look.
@@ -3810,6 +3815,264 @@ test('smart turn answering after the candidate resumed is ignored', async () => 
   await flush();
   assert.deepEqual(rig.of('turn-model').map(event => event.held), [false]);
   assert(!rig.engine.state().transcript.some(entry => String(entry.text ?? '').includes('[audio:')));
+});
+
+/** Speculate after `prob` from the ear, answer the look, and report the ms after the vad end at which the reply first plays. */
+async function commitPointFor(prob) {
+  const rig = makeRig({ ear: makeEar({ endOfTurn: () => prob }) });
+  await greet(rig);
+  await speak(rig, 'I built a scheduler');
+  await flush();
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('Okay.');
+  await flush();
+  await flush();
+  rig.sessions.main.answer('Tell me more.');
+  rig.streams[1].audio(1000);
+  await flush();
+  for (let at = 600; at <= 3000; at += 100) {
+    if (rig.opsOf('play').some(item => item.id === 'utt2')) return { rig, at };
+    await rig.clock.advance(100);
+  }
+  return { rig, at: null };
+}
+
+test('an unsure smart turn finish keeps the normal look but commits at unsureCommitMs; a sure one at commitMs', async () => {
+  const unsure = await commitPointFor(0.7);
+  assert.deepEqual(unsure.rig.of('turn-model').map(event => [event.probability, event.held, event.unsure === true]), [[0.7, false, true]]);
+  assert.equal(unsure.rig.sessions.opener.calls.length, 1, 'looked at on the normal schedule');
+  assert(!unsure.rig.sessions.opener.calls[0].message.includes('[audio: sounds unfinished]'), 'an unsure finish is not a hold');
+  assert(unsure.at >= 1800 && unsure.at <= 1900, `unsure commit at ${unsure.at} ms`);
+  const sure = await commitPointFor(0.9);
+  assert.deepEqual(sure.rig.of('turn-model').map(event => [event.probability, event.held, event.unsure === true]), [[0.9, false, false]]);
+  assert(sure.at >= 1200 && sure.at <= 1300, `sure commit at ${sure.at} ms`);
+});
+
+test('a candidate who resumes inside the unsure wait drops the look as ever', async () => {
+  const rig = makeRig({ ear: makeEar({ endOfTurn: () => 0.7 }) });
+  await greet(rig);
+  await speak(rig, 'I built a scheduler');
+  await flush();
+  await rig.clock.advance(1400); // past the normal commit point, short of the unsure one
+  assert.equal(rig.opsOf('play').filter(item => item.id === 'utt2').length, 0);
+  rig.h.vad(true);
+  await flush();
+  assert(rig.of('discarded').some(event => event.reason === 'resumed'));
+});
+
+test('after an unfinished verdict the answer is looked at once more when the candidate stays quiet 3 s', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig); // 600 ms after the vad end
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await flush();
+  assert.equal(rig.engine.state().phase, 'listening');
+  await rig.clock.advance(2300); // 2900 ms
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  await rig.clock.advance(100); // 3000 ms
+  assert.deepEqual(rig.of('quiet-relook').map(event => [event.quietMs, event.words]), [[3000, 4]]);
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  const note = '[The candidate has been quiet for 3s since these words. You already waited once.]';
+  const opener = rig.sessions.opener.calls[1].message;
+  assert(opener.includes(note), opener);
+  assert(opener.endsWith("Candidate: 'I built a scheduler'"), opener);
+  rig.sessions.opener.answer('Okay.');
+  await flush();
+  await flush();
+  assert(rig.sessions.main.calls.at(-1).message.includes(note), 'the main reply knows it waited too');
+  rig.sessions.main.answer('Tell me more.');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(0);
+  await flush();
+  assert.equal(rig.opsOf('play').filter(item => item.id === `utt${rig.streams.length}`).length, 1, 'the quiet look commits as soon as it has audio');
+});
+
+test('the quiet look never comes when the candidate goes on, and comes again only for a new quiet stretch', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(1000);
+  rig.h.vad(true); // the candidate goes on before the quiet look, and keeps talking past when it was due
+  rig.h.transcript('and then I tested it', 'b', rig.clock.now(), false, rig.clock.now() + 2500);
+  await rig.clock.advance(2500); // 4100 ms after the first vad end: the first stretch's look would have been due at 3000
+  assert.equal(rig.of('quiet-relook').length, 0, "the first stretch's look was cancelled by the speech");
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  assert.equal(rig.of('quiet-relook').length, 0);
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  assert(!rig.sessions.opener.calls[1].message.includes('quiet for'), 'an ordinary turn end, no quiet note');
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400); // 3 s after the new vad end
+  assert.equal(rig.of('quiet-relook').length, 1, 'the new quiet stretch gets its own look');
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(5000);
+  assert.equal(rig.of('quiet-relook').length, 1, 'once per quiet stretch');
+  assert.equal(rig.sessions.opener.calls.length, 3);
+  // After a quiet look that was used, speech starts a new stretch, and its own quiet look comes.
+  await speak(rig, 'and then I wrote the runbook', 'c');
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 4);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400);
+  assert.equal(rig.of('quiet-relook').length, 2, 'a used quiet look is reset by new speech');
+});
+
+test('when the quiet look listens too, the first silence check comes 10 s after the vad end', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400); // 3000 ms: the quiet look
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  const before = rig.sessions.main.calls.length;
+  await rig.clock.advance(6900); // 9900 ms
+  assert.equal(rig.sessions.main.calls.length, before);
+  await rig.clock.advance(100); // 10000 ms
+  assert.equal(rig.sessions.main.calls.length, before + 1);
+  assert.match(rig.sessions.main.calls.at(-1).message, /\[candidate silent 10s, check 1 of 3\]$/);
+});
+
+test('a single unfinished verdict keeps the normal silence check; a wait the interviewer set beats the early one', async () => {
+  // With the quiet look switched off, one unfinished verdict waits for the normal 20 s check, as before.
+  const single = makeRig({ thresholds: { quietRelookMs: 0 } });
+  await greet(single);
+  await speculate(single);
+  single.sessions.opener.answer('<listen/>');
+  await flush();
+  const calls = single.sessions.main.calls.length;
+  await single.clock.advance(15000);
+  assert.equal(single.sessions.opener.calls.length, 1, 'no quiet look');
+  assert.equal(single.sessions.main.calls.length, calls, 'no early check-in');
+  await single.clock.advance(5000);
+  assert.equal(single.sessions.main.calls.length, calls + 1, 'the normal silence check');
+
+  const rig = makeRig({ createParser: patienceParser });
+  await greet(rig);
+  await deliver(rig, 'Take your time.<wait s="30"/>');
+  await speak(rig, 'so the first step is', 'w');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  const before = rig.sessions.main.calls.length;
+  await rig.clock.advance(15000);
+  assert.equal(rig.sessions.main.calls.length, before, 'no check-in at 10 s: the interviewer said it would wait 30 s');
+});
+
+test('smart turn bands at their edges: 0.49 holds, 0.5 and 0.84 are unsure, 0.85 is sure', async () => {
+  const expected = { 0.49: [true, false], 0.5: [false, true], 0.84: [false, true], 0.85: [false, false] };
+  for (const [prob, [held, unsure]] of Object.entries(expected)) {
+    const rig = makeRig({ ear: makeEar({ endOfTurn: () => Number(prob) }) });
+    await greet(rig);
+    await speak(rig, 'I built a scheduler');
+    await flush();
+    await rig.clock.advance(300);
+    assert.deepEqual(rig.of('turn-model').map(event => [event.held, event.unsure === true]), [[held, unsure]], `p = ${prob}`);
+  }
+  const edge = await commitPointFor(0.5);
+  assert(edge.at >= 1800 && edge.at <= 1900, `p = 0.5 commits at ${edge.at} ms`);
+});
+
+test('a late unfinished verdict gets its quiet look at least quietRelookMinGapMs after it', async () => {
+  const rig = makeRig({ thresholds: { quietRelookMs: 1500 } }); // due 1.5 s after the vad end, but the verdict comes at 1 s
+  await greet(rig);
+  await speculate(rig); // 600 ms after the vad end
+  await rig.clock.advance(400);
+  rig.sessions.opener.answer('<listen/>'); // 1000 ms
+  await flush();
+  await rig.clock.advance(600); // 1600 ms: past quietRelookMs, inside the gap
+  assert.equal(rig.of('quiet-relook').length, 0);
+  await rig.clock.advance(400); // 2000 ms: a second after the verdict
+  assert.equal(rig.of('quiet-relook').length, 1);
+  assert.equal(rig.of('quiet-relook')[0].quietMs, 2000);
+});
+
+test('a typed message after an unfinished verdict cancels the quiet look', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(1000);
+  rig.engine.typed('Here is my answer');
+  await flush();
+  await rig.clock.advance(5000);
+  assert.equal(rig.of('quiet-relook').length, 0);
+  assert(!rig.sessions.opener.calls.some(call => call.message.includes('quiet for')), 'no stale quiet note on any look');
+});
+
+test('typing across the quiet-look point holds it off; it comes once the typing lapses', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(1400); // 2000 ms
+  rig.engine.typing(true);
+  await rig.clock.advance(2000); // 4000 ms: due, but the candidate is typing
+  assert.equal(rig.of('quiet-relook').length, 0);
+  await rig.clock.advance(4000); // 8000 ms: typing lapsed (6 s), the look is armed a gap later
+  assert.equal(rig.of('quiet-relook').length, 0);
+  await rig.clock.advance(1000); // 9000 ms
+  assert.equal(rig.of('quiet-relook').length, 1, 'the held-off look is not lost');
+});
+
+test('a pause clears the early check-in: resuming waits the normal silence again', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400); // the quiet look
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  const before = rig.sessions.main.calls.length;
+  rig.engine.setPaused(true);
+  await rig.clock.advance(30000);
+  rig.engine.setPaused(false);
+  await flush();
+  await rig.clock.advance(1000);
+  assert.equal(rig.sessions.main.calls.length, before, 'no check-in the moment the call resumes');
+  await rig.clock.advance(19100);
+  assert.equal(rig.sessions.main.calls.length, before + 1, 'the normal 20 s check after the resume');
+});
+
+test('a quiet look that replies arms no early check-in', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('<listen/>');
+  await flush();
+  await rig.clock.advance(2400);
+  rig.sessions.opener.answer('Okay.');
+  await flush();
+  await flush();
+  rig.sessions.main.answer('Tell me more about it.');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(0);
+  await flush();
+  const id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  const before = rig.sessions.main.calls.length;
+  await rig.clock.advance(15000);
+  assert.equal(rig.sessions.main.calls.length, before, 'no 10 s check-in after a reply');
+  await rig.clock.advance(5100);
+  assert.equal(rig.sessions.main.calls.length, before + 1, 'the normal 20 s check');
 });
 
 test('a voice note from the ear decorates the main message only', async () => {
