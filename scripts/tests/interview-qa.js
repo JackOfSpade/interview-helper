@@ -8,6 +8,7 @@ import {
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
 import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
+import { routedCall } from '../../electron/ipc/aiCallProviders.js';
 import { PARALLEL_RESEARCH_TOOLS, PARALLEL_EXHAUSTED_CODE, parallelBlocked, parallelExhaustedError, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
 
@@ -199,7 +200,8 @@ export default [
     let replies = ['not json', '{"ok":false}', '{"ok":true}'];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
       runStage: async args => { runs.push(args); return { text: replies.shift(), model: 'claude-opus-5-5' }; },
-      runResearchStage: async args => { research.push(args); return { text: 'Research prose with https://x.test', model: 'claude-opus-5-5' }; } });
+      runResearchStage: async args => { research.push(args); return { text: 'Research prose with https://x.test', model: 'claude-opus-5-5' }; },
+      routeFor: () => null });
     const value = await transport.callText('PROMPT', { task: 'interview-answer-bank', responseSchema: { type: 'object' }, responseValidator: v => { if (!v.ok) throw new Error('not ok'); } });
     assert.deepEqual(value, { ok: true });
     assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['opus', 'medium', false, ''], ['opus', 'medium', true, ''], ['opus', 'medium', true, '']]);
@@ -215,7 +217,8 @@ export default [
     assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'low', '']);
     runs.length = 0; replies = ['{}'];
     await transport.callText('C', { task: 'interview-answer-bank', claudeStage: 'qa-technical-topics', responseSchema: { type: 'object' } });
-    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['sonnet', 'low', ''], 'the technical-topics stage is Sonnet low');
+    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['sonnet', 'low', ''], 'the technical-topics stage keeps Sonnet low as its Claude profile');
+    assert.deepEqual([routedCall('qa:qa-technical-topics')?.route, routedCall('qa:qa-technical-topics')?.reasoning], ['deepseek-flash', 'low'], 'and is routed to DeepSeek Flash low');
     replies = ['bad', 'bad', 'bad'];
     await assert.rejects(transport.callText('X', { task: 'interview-answer-bank', responseSchema: { type: 'object' } }), error => /no JSON object/.test(error.message) && error.code === 'VALIDATION_FAILED');
   } },
@@ -294,7 +297,8 @@ export default [
     const noRoute = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; }, routeFor: () => null });
     for (const stage of ['typed-job-intake', 'typed-job-posting', 'typed-job-listing']) await noRoute.callText('P', { claudeStage: stage, responseSchema: { type: 'object' } });
-    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['haiku', 'medium', ''], ['sonnet', 'low', ''], ['opus', 'medium', '']]);
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['haiku', 'medium', ''], ['haiku', 'medium', ''], ['opus', 'medium', '']]);
+    assert.deepEqual(['typed-job-intake', 'typed-job-posting', 'typed-job-listing'].map(stage => routedCall(`qa:${stage}`)?.route ?? null), ['deepseek-flash', null, 'deepseek-flash'], 'intake and listing are routed; posting stays on Claude');
     research.length = 0;
     await assert.rejects(make(false).callRaw('R', { claudeStage: 'typed-job-research' }), error => error.code === 'PARALLEL_SEARCH_EXHAUSTED');
     assert.equal(research.length, 0, 'no research session starts when Parallel is out');
@@ -309,7 +313,7 @@ export default [
       offloadCall: async () => { throw new Error('career-file-to-text must never offload'); },
       recordSample: sample => { assert.equal(JSON.stringify(sample).includes('AAAA'), false, 'image data is never recorded'); } });
     await transport.callText('Copy the text.', { claudeStage: 'career-file-to-text', task: 'career-file-to-text', pageImages: images, responseSchema: { type: 'object' } });
-    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['sonnet', 'low', ''], ['sonnet', 'low', '']]);
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['haiku', 'high', ''], ['haiku', 'high', '']]);
     assert.deepEqual(runs[0].pageImages, images);
     assert.equal(runs[1].pageImages, undefined, 'a resumed correction round carries no image again');
   } },
@@ -362,6 +366,8 @@ export default [
     const jobs = [];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
       runStage: async () => ({ text: '{"ok":true}', model: 'claude-x' }),
+      // qa-brief is routed to DeepSeek; with routing off (INTERVIEW offload disabled) both stages answer on Claude and are measured.
+      routeFor: () => null,
       shadow: { enabled: true, measure: job => jobs.push(job) } });
     const validator = (value) => { if (value.ok !== true) throw Object.assign(new Error('no'), { code: 'NOT_OK' }); };
     await transport.callText('P', { claudeStage: 'qa-brief', responseValidator: validator });

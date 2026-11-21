@@ -46,9 +46,10 @@ export const COVER_ONLY_WRITE_PROFILE = Object.freeze({ model: CLAUDE_OPUS_MODEL
 // Opus xhigh in blind judging on three postings at 18-47% less cost; every low and medium
 // setting lost real content (docs/ai-model-selection.md).
 export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
+  // Since 2026-11-20 the stages below marked [routed] run on DeepSeek with no Claude fallback (aiCallProviders.js, `qa:` keys); their profile here is what they ran on before.
   'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   // qa-brief, 2026-11-10: Opus low scored within the noise of an Opus medium rerun in blind judging of 4 real Prepare briefs (7.5 vs 8.0; two production runs differ by 0.75) at 39% less cost; Sonnet medium and Haiku medium scored 7.0 (docs/ai-model-selection.md).
-  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
+  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }), // [routed]
   // qa-disclosures, 2026-11-12: Sonnet low matched Opus low's extraction and mapping answers on 2 real prompts x 2 runs at about 43% less; Haiku dropped extracted questions (docs/ai-model-selection.md).
   'qa-disclosures': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
   // qa-practice-order, 2026-11-12: Blind judge gave Opus low reruns 10 and 10, production 9; every Sonnet and Haiku setting scored 2-8, and one Haiku answer repeated a question (docs/ai-model-selection.md).
@@ -59,26 +60,26 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Planning of an in-app practice call (cast, questions, time, probes and prepared problems, one call per practice): Opus high, not yet tested (docs/ai-model-selection.md).
-  'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }), // [routed]
   // practice-call-draft-answer (testing aid: the candidate's chat reply to the latest question, put in the chat box and never sent on its own; electron/practiceCall/draftAnswer.js): Sonnet low, chosen by reasoning, not measured. The person waits on it mid-call and accuracy is not checked, so speed wins; Sonnet low writes the call's acknowledgements without leaking content, and Haiku drops supplied detail in qa-disclosures.
   'practice-call-draft-answer': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
   // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a short reminder (docs/ai-model-selection.md).
-  'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // qa-gap-answers (which unanswered questions the career text cannot answer, and the honest admission, closest experience and reminders for those; one call per Prepare that has unanswered cards): Opus medium, not yet tested. It reads the whole career text against every open question and a wrong "gap" tells the person to deny real experience, so it gets the same thought as qa-approach-reminders.
-  'qa-gap-answers': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }), // [routed]
+  // qa-gap-answers (which unanswered questions the career text cannot answer, and the honest admission, closest experience and reminders for those; one call per Prepare that has unanswered cards). 2026-11-20: on 3 real prompts x 2 runs, blind-judged, Opus low tied Opus medium (7.50 vs 7.50, reruns 7.33 and 7.67) with no false gaps, at about 15% less; every Sonnet, Haiku and DeepSeek setting scored lower or called real experience a gap (docs/ai-model-selection.md).
+  'qa-gap-answers': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   // qa-technical-topics (the list of technical subjects a posting's interview would test, one call per posting): Sonnet low, not yet tested. Chosen by analogy with qa-disclosures, another extraction from supplied text where Sonnet low kept everything and Haiku dropped items.
-  'qa-technical-topics': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  'qa-technical-topics': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }), // [routed]
   // Typed-job stages (a typed link, or a company and role, turned into a job for Prepare; electron/ipc/interviewTypedJob.js). All four are chosen by analogy and need a test (docs/ai-model-selection.md).
   // typed-job-intake: short-text understanding into JSON, like job-preference-interpretation, where Haiku medium was judged best.
-  'typed-job-intake': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
-  // typed-job-posting: reads a whole fetched page and copies the posting text out; like qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content.
-  'typed-job-posting': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  'typed-job-intake': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }), // [routed]
+  // typed-job-posting: reads a whole fetched page and copies the posting text out. 2026-11-20: on 3 real pages plus 3 planted ones (closed notice, job list) x 2 runs, blind-judged, Haiku medium copied the most complete posting (9.19 against 6.54 for Sonnet low, which cut benefits and closing sections, as production did) at a tenth of the cost; every setting classified closed and non-posting pages correctly (docs/ai-model-selection.md).
+  'typed-job-posting': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
   // typed-job-research: Parallel web research about one company; same task shape as qa-research (Opus high, within noise of xhigh).
   'typed-job-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   // typed-job-listing: realistic stand-in posting written from research alone; like qa-write, where cheaper settings invented specifics.
-  'typed-job-listing': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // career-file-to-text: Claude reads one dropped image (or document) and copies its text out verbatim, in reading order, with [unreadable] for a part it cannot read (electron/ipc/interviewCareerFileConversion.js). Sonnet low, not yet tested; chosen by analogy with typed-job-posting and qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content (docs/ai-model-selection.md).
-  'career-file-to-text': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  'typed-job-listing': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }), // [routed]
+  // career-file-to-text: Claude reads one dropped image (or document) and copies its text out verbatim, in reading order, with [unreadable] for a part it cannot read (electron/ipc/interviewCareerFileConversion.js). 2026-11-20: on 3 rendered résumé images (one column, two columns, rotated and blurred) x 2 runs, Haiku high copied every word exactly, as Sonnet low and medium did, at about a fifteenth of the cost; Haiku medium dropped a word once. Synthetic images only; re-check on a real photo or scan (docs/ai-model-selection.md).
+  'career-file-to-text': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'high' }),
 });
 export const CAREER_WRITING_STAGE_PROFILES = Object.freeze({ ...APPLICATION_STAGE_PROFILES, ...INTERVIEW_QA_STAGE_PROFILES });
 

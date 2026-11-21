@@ -2520,8 +2520,9 @@ test('solo: a default call is unchanged and records an empty panel', async () =>
 });
 
 // Measured 2026-11-19 (25 turns of a real call): Haiku at low effort leaked content in about 5 of 25
-// reactions, Sonnet at low effort in 0 of 25, at about +0.1 s to the first word.
-test('the acknowledgement session runs on Sonnet at low effort, the reply and the classifier on Opus, also after a restart', async () => {
+// reactions, Sonnet at low effort in 0 of 25, at about +0.1 s to the first word. The classifier: 2026-11-20, every
+// setting 100% right, Haiku low fastest (p95 770 ms against 2.58 s on Opus low).
+test('the acknowledgement session runs on Sonnet at low effort, the reply on Opus and the classifier on Haiku, also after a restart', async () => {
   const made = [];
   let restart;
   const { service } = await liveCall({ deps: {
@@ -2530,7 +2531,7 @@ test('the acknowledgement session runs on Sonnet at low effort, the reply and th
   } });
   await service.start(ARGS);
   await service.answer();
-  assert.deepEqual(made, [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }, { model: 'opus', effort: 'low' }]);
+  assert.deepEqual(made, [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }, { model: 'haiku', effort: 'low' }]);
   await restart('opener', {});
   await restart('main', {});
   assert.deepEqual(made.slice(3), [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }]);

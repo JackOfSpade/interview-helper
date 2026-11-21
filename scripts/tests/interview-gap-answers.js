@@ -36,7 +36,7 @@ export default [
   { name: 'interview gap: only career pieces are offered, a structured piece keeps its label, and the stage is registered', run() {
     assert.deepEqual(gapCareerPieces(evidence), [{ id: 'evidence-long-hash-1', text: PIECE }, { id: 'evidence-long-hash-2', text: 'Engineer · Old Health: Wrote the billing export.' }]);
     assert.deepEqual(gapCareerPieces(null), []);
-    assert.deepEqual(careerWritingStageProfile('qa-gap-answers'), { model: 'opus', effort: 'medium' });
+    assert.deepEqual(careerWritingStageProfile('qa-gap-answers'), { model: 'opus', effort: 'low' });
   } },
   { name: 'interview gap: only gap questions get a card, and every line passes the host checks or is dropped', async run() {
     const units = [{ id: 'a', question: 'Tell me about your Kubernetes experience.' }, { id: 'b', question: 'Walk me through a project.' },

@@ -287,7 +287,7 @@ if (!app.requestSingleInstanceLock()) {
       const practiceCallText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
         signal, task: 'practice-review', claudeStage: 'qa-practice-review', responseSchema: schema,
       });
-      // The careful planning step before a practice call: its own stage, Opus at high effort.
+      // The careful planning step before a practice call: its own stage, routed to DeepSeek Flash at high reasoning (aiCallProviders.js).
       const practicePlanText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
         signal, task: 'practice-plan', claudeStage: 'practice-call-plan', responseSchema: schema,
       });

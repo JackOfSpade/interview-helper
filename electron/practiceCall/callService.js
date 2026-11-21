@@ -1453,13 +1453,16 @@ export function createPracticeCallService(deps = {}) {
     const sessionsFactory = await resolve('sessionsFactory');
     const prompts = await resolve('prompts');
     // The real factory is async (it resolves to the session); a stand-in may return one directly.
-    // The reply and the interruption classifier run on Opus at low effort. The acknowledgement is a
+    // The reply runs on Opus at low effort. The interruption classifier runs on Haiku at low effort: measured
+    // 2026-11-20 with the production instructions on 36 overlaps x 2 passes, every setting was 100% right, and Haiku low
+    // answered at p95 770 ms against 2.58 s for Opus low, which reached the 2.5 s timeout that counts as an
+    // acknowledgement (docs/ai-model-selection.md). The acknowledgement is a
     // 4-to-9-word reaction to how the line was received, from a small instruction with no content.
     // Live probe (25 turns of a real call, 2026-11-19): Haiku at low effort leaked content in about
     // 5 of 25 reactions ("that's a clear reason"), Sonnet at low effort in 0 of 25, at about +0.1 s
     // to the first word; with Sonnet the whole reaction took 794 ms at p95.
     // The reply's model is MAIN_REPLY_MODELS[mainModel] (see there for what each costs in time).
-    const SESSION_MODELS = { opener: { model: 'sonnet', effort: 'low' }, main: { model: mainReply.model, effort: mainReply.effort }, classifier: { model: 'opus', effort: 'low' } };
+    const SESSION_MODELS = { opener: { model: 'sonnet', effort: 'low' }, main: { model: mainReply.model, effort: mainReply.effort }, classifier: { model: 'haiku', effort: 'low' } };
     const create = async kind => watchSession(kind, await sessionsFactory(SESSION_MODELS[kind] || SESSION_MODELS.main));
     const created = await Promise.all([create('opener'), create('main'), create('classifier')]);
     let opener = created[0];
