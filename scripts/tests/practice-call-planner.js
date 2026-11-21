@@ -52,7 +52,6 @@ const tests = [
       const mutate = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };
       assert.match(mutate(p => { delete p.lead.interrupting; }), /lead\.interrupting must be a string/u);
       assert.match(mutate(p => { p.panel[0].interrupting = ''; }), /panel\[0\]\.interrupting must be at least 1 character/u);
-      assert.match(mutate(p => { p.panel[0].interrupting = 'x'.repeat(401); }), /panel\[0\]\.interrupting is 401 characters long and the limit is 400/u);
       assert.equal(check(goodPlan()).plan.lead.interrupting, goodPlan().lead.interrupting);
       assert.equal(check(goodPlan()).plan.panel[0].interrupting, goodPlan().panel[0].interrupting);
       assert(PLAN_SCHEMA.properties.lead.required.includes('interrupting'));
@@ -72,17 +71,14 @@ const tests = [
       assert.match(mutate(p => { p.panel[0].voice = 'V1'; }), /voice V1 is used by both lead and panel\[0\]/u);
       assert.match(mutate(p => { p.lead.temperament = 'angry'; }), /lead\.temperament must be one of warm, neutral, tough/u);
       assert.match(mutate(p => { p.lead.role = ''; }), /lead\.role must be at least 1 character/u);
-      assert.match(mutate(p => { p.lead.role = 'x'.repeat(61); }), /lead\.role is 61 characters long and the limit is 60/u);
       assert.match(mutate(p => { p.questions[0].askedBy = 'V3'; }), /questions\[0\]\.askedBy is V3, who is neither the lead nor a panel member/u);
       assert.match(mutate(p => { p.questions[0].number = 99; }), /questions\[0\]\.number is 99, which is not a question number in the pool/u);
       assert.match(mutate(p => { p.questions[2].number = 1; }), /number 1 appears twice/u);
-      assert.match(mutate(p => { p.questions[0].minutes = 0.1; }), /questions\[0\]\.minutes is 0\.1 and must be between 0\.5 and 20/u);
-      assert.match(mutate(p => { p.questions[0].probes = ['a', 'b', 'c', 'd', 'e']; }), /probes has 5 items and the limit is 4/u);
+      assert.match(mutate(p => { p.questions[0].minutes = 0.1; }), /questions\[0\]\.minutes is 0\.1 and must be at least 0\.5/u);
       assert.match(mutate(p => { p.questions = []; }), /at least one pool question/u);
       assert.match(mutate(p => { p.questions.splice(1, 1); }), /exactly one question of your own/u);
       assert.match(mutate(p => { p.questions.push({ number: 0, text: 'Another question of my own here.', askedBy: 'V1', minutes: 1, probes: [] }); }), /number 0 appears twice/u);
       assert.match(mutate(p => { p.questions[1].text = 'short'; }), /text \(the question you wrote\) must be at least 10/u);
-      assert.match(mutate(p => { p.questions[1].text = 'x'.repeat(401); }), /is 401 characters long and the limit is 400/u);
       assert.match(mutate(p => { delete p.questions[1].text; }), /text \(the question you wrote\) must be a string/u);
       assert.match(mutate(p => { p.questions[0].text = 'A reworded pool question.'; }), /pool question 1 and must not carry a text field/u);
       assert.match(mutate(p => { p.questions = p.questions.slice(0, 2); }), /panel\[0\] \(V2\) asks no question/u);
@@ -92,7 +88,6 @@ const tests = [
       assert.match(mutate(p => { p.problems[0].parts = []; }), /parts must list at least one part/u);
       assert.match(mutate(p => { p.problems[0].parts[0].content = ''; }), /parts\[0\]\.content must not be empty/u);
       assert.match(mutate(p => { p.problems[0].solution = ''; }), /solution must not be empty/u);
-      assert.match(mutate(p => { p.problems[0].hints = Array(6).fill('h'); }), /hints has 6 items and the limit is 5/u);
       assert.match(mutate(p => { p.panel = Array(5).fill(p.panel[0]); }), /panel has 5 members and the limit is 4/u);
       assert.match(mutate(p => { delete p.interviewKind; }), /interviewKind must be a string/u);
       assert.match(mutate(p => { p.lead.stability = 'high'; }), /lead\.stability must be a number/u);
@@ -113,6 +108,45 @@ const tests = [
       assert.equal(plan.interviewKind, 'A screen today');
       assert.deepEqual([plan.lead.stability, plan.lead.room, plan.panel[0].stability, plan.panel[0].room], [0.75, 0, 0.15, 1]);
       assert.equal(plan.problems[0].parts[0].content, 'Write a cache.\n\n- keep it small', 'line breaks inside content are kept');
+    },
+  },
+  {
+    name: 'practice call planner: long text and long lists are kept whole, never trimmed or rejected; only the panel, screen content and visuals keep a limit',
+    async run() {
+      const raw = goodPlan();
+      raw.interviewKind = `${'A hiring-manager screen that opens with introductions and a walk through the resume. '.repeat(3)}It ends with ten minutes for your own questions at the close.`;
+      raw.lead.role = 'Senior Engineering Manager, Platform Reliability and Developer Infrastructure';
+      raw.lead.manner = 'm'.repeat(900);
+      raw.panel[0].interrupting = 'i'.repeat(900);
+      raw.panel[0].focus = 'f'.repeat(500);
+      raw.questions[0].probes = ['a', 'b', 'c', 'd', 'e', 'f'];
+      raw.questions.forEach(question => { question.minutes = 1; });
+      raw.questions[0].minutes = 25; // over the old 20-minute ceiling, still inside the call length
+      raw.questions[1].text = `${'q'.repeat(700)}?`;
+      raw.problems[0].hints = Array(9).fill('h'.repeat(400));
+      raw.problems[0].edgeCases = Array(12).fill('e'.repeat(300));
+      raw.problems[0].solution = 's'.repeat(9000);
+      raw.problems[0].language = 'TypeScript with a little SQL for the queries';
+      raw.problems[0].parts = Array(6).fill(raw.problems[0].parts[0]);
+      const result = check(raw);
+      assert.deepEqual(result.problems, []);
+      assert.equal(result.plan.interviewKind, raw.interviewKind, 'kept whole, the ending included');
+      assert.equal(result.plan.lead.manner.length, 900);
+      assert.equal(result.plan.panel[0].interrupting.length, 900);
+      assert.equal(result.plan.questions[0].probes.length, 6);
+      assert.equal(result.plan.questions[1].text.length, 701);
+      assert.equal(result.plan.problems[0].hints.length, 9);
+      assert.equal(result.plan.problems[0].solution.length, 9000);
+      assert.equal(result.plan.problems[0].parts.length, 6);
+      assert.deepEqual([...JSON.stringify(PLAN_SCHEMA).matchAll(/"maxLength":(\d+)/gu)].map(match => Number(match[1])), [6000], 'the schema asks for no text length but the screen\'s');
+      // The limits that protect something real stay.
+      const problemsOf = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };
+      assert.match(problemsOf(p => { p.problems[0].parts[0].content = 'c'.repeat(6001); }), /content is 6001 characters long and the limit is 6000/u, 'the shared screen cuts past 6000');
+      assert.match(problemsOf(p => { p.panel = Array(5).fill(p.panel[0]); }), /panel has 5 members and the limit is 4/u, 'four colleague seats');
+      raw.interviewKind = 5;
+      assert.match(check(raw).problems.join('\n'), /interviewKind must be a string/u);
+      raw.interviewKind = '   ';
+      assert.match(check(raw).problems.join('\n'), /interviewKind must be at least 1 character/u);
     },
   },
   {

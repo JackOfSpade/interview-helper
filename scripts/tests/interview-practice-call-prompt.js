@@ -214,7 +214,11 @@ const base = [
       assert(opener.endsWith('Reply only READY now.'));
       assert.match(OPENER_BLOCK, /ONE short spoken reaction/u);
       assert.match(OPENER_BLOCK, /Choose the length a real listener would naturally say after THIS line:/u, 'it picks its own natural length');
-      assert(!/at most \d+ words|\d+ to \d+ words/u.test(OPENER_BLOCK), 'no word count anywhere');
+      assert.match(OPENER_BLOCK, /At most about 8 words/u, 'a short reaction is a hard rule');
+      assert.doesNotMatch(OPENER_BLOCK, /\d+ to \d+ words/u);
+      assert.doesNotMatch(OPENER_BLOCK, /I hear you, thank|Ah, okay, I hear you|Yeah, good question|Right, yeah, got it/u, 'no copyable sample phrases');
+      assert.match(OPENER_BLOCK, /No "thank you" or "thanks" unless the candidate shared something long or personal, and never in two reactions running/u);
+      assert.match(OPENER_BLOCK, /Never praise how an answer was laid out/u);
       assert.match(OPENER_BLOCK, /Never pad it to fill time/u);
       assert.doesNotMatch(OPENER_BLOCK, /Say about|this time/u, 'there is no word target');
       assert.doesNotMatch(OPENER_BLOCK, /one to three words/u);

@@ -210,6 +210,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
       transcript,
       candidateProsody: list(callRecord.candidateProsody),
       baselineSnapshot: callRecord.voiceBaseline ?? null,
+      pauseSpans: list(callRecord.pauseSpans),
       ...(callRecord.voicedBaseline ? { voicedBaselineSnapshot: callRecord.voicedBaseline } : {}),
     });
     event('metrics', { ms: elapsed(metricsStarted), keys: metrics && typeof metrics === 'object' ? Object.keys(metrics).slice(0, 30) : [] });

@@ -93,9 +93,16 @@ function interviewerRuns(entries) {
   return runs;
 }
 
+// Paused time inside [fromMs, toMs]: the recording ran through a pause, but the candidate was not on the clock.
+function pausedOverlapMs(pauseSpans, fromMs, toMs) {
+  return (Array.isArray(pauseSpans) ? pauseSpans : []).reduce((sum, span) => (
+    finite(span?.startMs) && finite(span?.endMs) ? sum + Math.max(0, Math.min(span.endMs, toMs) - Math.max(span.startMs, fromMs)) : sum
+  ), 0);
+}
+
 // `voicedBaselineSnapshot` is the baseline of the synthetic voice: an answer made only of voiced lines
 // is compared with it, never with the microphone baseline (a different voice).
-export function callMetrics({ transcript = [], candidateProsodyByTurn = null, candidateProsody = null, baselineSnapshot = null, voicedBaselineSnapshot = null } = {}) {
+export function callMetrics({ transcript = [], candidateProsodyByTurn = null, candidateProsody = null, baselineSnapshot = null, voicedBaselineSnapshot = null, pauseSpans = [] } = {}) {
   const entries = Array.isArray(transcript) ? transcript : [];
   const prosodyMap = Array.isArray(candidateProsody) ? prosodyByEntry(entries, candidateProsody) : candidateProsodyByTurn;
   const groups = [];
@@ -116,7 +123,8 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     group.turnIndexes.push(index);
     group.startMs = Math.min(group.startMs, entry.startMs);
     group.endMs = Math.max(group.endMs, entry.endMs);
-    group.words += countWords(entry.text);
+    // A voiced line's known sent words are counted when the call kept them: the recogniser's text can repeat itself.
+    group.words += countWords(entry.voiced === true && typeof entry.sentText === 'string' ? entry.sentText : entry.text);
   });
 
   const answers = groups.map((answer, answerIndex) => {
@@ -127,10 +135,19 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     const pitchRangeSt = median(prosody.map(item => item.pitchRangeSt));
     const base = answer.voicedOnly ? voicedBaselineSnapshot : baselineSnapshot;
     const prior = answer.turnIndexes[0] - 1;
-    let responseLatencyMs = null;
+    // The question is the contiguous run of spoken interviewer entries just before the answer. A back-channel
+    // laid over it (an overlay) ends early and is not the question, so the latest end of the run counts, and paused time does not.
+    let questionEndMs = null;
     for (let i = prior; i >= 0; i -= 1) {
-      if (entries[i]?.speaker === 'interviewer' && entries[i].channel !== 'chat') { responseLatencyMs = Math.max(0, answer.startMs - entries[i].endMs); break; }
+      const before = entries[i];
+      if (before?.speaker === 'interviewer' && before.channel !== 'chat' && !before.overlay) questionEndMs = Math.max(questionEndMs ?? -Infinity, before.endMs);
+      else if (before?.overlay === true && before.speaker === 'interviewer') continue;
+      // A back-channel ("mm-hm") said right after the question is not the end of an earlier answer.
+      else if (before?.speaker === 'candidate' && before.acknowledgement) continue;
+      else if (questionEndMs !== null || before?.speaker === 'candidate') break;
     }
+    const responseLatencyMs = finite(questionEndMs)
+      ? Math.max(0, answer.startMs - questionEndMs - pausedOverlapMs(pauseSpans, questionEndMs, answer.startMs)) : null;
     return {
       index: answerIndex,
       turnIndexes: answer.turnIndexes.slice(),

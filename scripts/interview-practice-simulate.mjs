@@ -613,7 +613,8 @@ export async function runScenario(scenario, { thresholds = DEFAULT_CALL_THRESHOL
   let ids = 0;
   const engine = createPracticeCallEngine({
     clock, sessions, restartSession, audio: helper.audio, voice, ear: fakeEar,
-    thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...thresholds },
+    // The fake opener writes the same fixed reaction every turn to measure timing, so the live repeat guard is off here.
+    thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...thresholds, reactionGuard: 0 },
     onEvent: event => {
       events.push({ ...event, atClockMs: clock.now() });
       if (event.type === 'ended') world.engineEnded = true;

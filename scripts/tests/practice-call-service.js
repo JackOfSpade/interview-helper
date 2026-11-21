@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCallStore } from '../../electron/practiceCall/callStore.js';
 import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
-import { createPracticeCallService, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
+import { createPracticeCallService, generatedRunFor, stampInjectedLines, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
 import { createPanelVoiceFactory } from '../../electron/practiceCall/eleven/panelVoice.js';
 import { createReplayHandler } from '../../electron/practiceCall/replayProtocol.js';
@@ -1851,6 +1851,35 @@ test('the interviewer playing lights the speaking marker and candidate voice act
   assert.equal(service.getState().speaking, 'candidate');
   engine()({ type: 'phase', phase: 'committed' });
   assert.equal(service.getState().speaking, 'candidate');
+});
+
+test('the candidate tile lights for their microphone and for a line in their AI voice, even over the interviewer', async () => {
+  let helperEvent;
+  const { service, engine } = await liveCall({ deps: {
+    helperFactory: ({ onEvent }) => {
+      helperEvent = onEvent;
+      return { start: async () => ({ ok: true }), play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, stop: async () => { onEvent({ type: 'recording', state: 'closed' }); } };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.equal(service.getState().candidateSpeaking, false);
+  helperEvent({ type: 'vad', speaking: true });
+  assert.equal(service.getState().candidateSpeaking, true, 'speaking into the microphone');
+  helperEvent({ type: 'vad', speaking: false });
+  assert.equal(service.getState().candidateSpeaking, false);
+  helperEvent({ type: 'inject', utteranceId: 'u1', state: 'started', positionMs: 0, atMs: 1 });
+  assert.equal(service.getState().candidateSpeaking, true, 'the AI voice speaking for the candidate');
+  engine()({ type: 'phase', phase: 'playing' });
+  assert.equal(service.getState().speaking, 'interviewer');
+  assert.equal(service.getState().candidateSpeaking, true, 'talking over the interviewer still lights the candidate');
+  helperEvent({ type: 'inject', utteranceId: 'u1', state: 'position', positionMs: 50, atMs: 51 });
+  assert.equal(service.getState().candidateSpeaking, true);
+  helperEvent({ type: 'inject', utteranceId: 'u1', state: 'finished', positionMs: 900, atMs: 901 });
+  assert.equal(service.getState().candidateSpeaking, false);
+  helperEvent({ type: 'inject', utteranceId: 'u2', state: 'started', positionMs: 0, atMs: 950 });
+  helperEvent({ type: 'inject', utteranceId: 'u2', state: 'cancelled', positionMs: 10, atMs: 960 });
+  assert.equal(service.getState().candidateSpeaking, false, 'a cut-off line ends the highlight');
 });
 
 test('engine voice errors show a notice that clears when the next reply plays', async () => {
@@ -4543,4 +4572,46 @@ test('draftAnswer: one at a time, a failure reads as a retryable error, and hang
   await service.hangUp({ feedback: false });
   assert.equal(aborted, true, 'hanging up aborts the call in flight');
   assert.deepEqual(await first, { error: 'The call has ended.' });
+});
+
+test('a line the AI voice spoke through the microphone is stamped voiced and generated on the transcript, without overwriting what is set', () => {
+  const spans = [
+    { startMs: 10000, endMs: 20000, generated: true, whole: true, text: 'Plan two words.' },
+    { startMs: 40000, endMs: 50000, generated: false, whole: true, text: 'typed by hand' },
+    { startMs: 60000, endMs: 70000, generated: true, whole: false, text: 'cut line' },
+  ];
+  const transcript = [
+    { speaker: 'interviewer', text: 'Question.', startMs: 0, endMs: 9000 },
+    { speaker: 'candidate', text: 'Plan plan two words words.', startMs: 10500, endMs: 19500 },
+    { speaker: 'candidate', text: 'my own words', startMs: 30000, endMs: 35000 },
+    { speaker: 'candidate', text: 'hand line', startMs: 40500, endMs: 49000 },
+    { speaker: 'candidate', text: 'cut', startMs: 61000, endMs: 66000, voiced: true },
+    { speaker: 'candidate', text: 'straddles', startMs: 19000, endMs: 30000 },
+  ];
+  const stamped = stampInjectedLines(transcript, spans);
+  assert.deepEqual(stamped[1], { ...transcript[1], voiced: true, generated: true, sentText: 'Plan two words.' });
+  assert.equal(stamped[0], transcript[0]);
+  assert.equal(stamped[2], transcript[2], 'live speech is untouched');
+  assert.equal(stamped[3], transcript[3], 'a line that was not generated is not stamped');
+  assert.deepEqual(stamped[4], { ...transcript[4], generated: true }, 'a cut line is stamped but has no sent text, and voiced stays as it was');
+  assert.equal(stamped[5], transcript[5], 'an entry mostly outside the span is not the line');
+  assert.equal(stampInjectedLines(transcript, []), transcript);
+  // Two entries inside one span: the sent text belongs to neither.
+  const split = stampInjectedLines([
+    { speaker: 'candidate', text: 'a', startMs: 10000, endMs: 14000 }, { speaker: 'candidate', text: 'b', startMs: 15000, endMs: 19000 },
+  ], [spans[0]]);
+  assert.equal(split.every(entry => entry.generated === true && entry.sentText === undefined), true);
+});
+
+test('the engine\'s spoken line is matched back to the sent messages it was joined from', () => {
+  const fresh = () => [{ text: 'one', generated: false }, { text: 'two', generated: true }, { text: 'three', generated: true }];
+  assert.equal(generatedRunFor(fresh(), 'two three'), true);
+  assert.equal(generatedRunFor(fresh(), 'one'), false);
+  assert.equal(generatedRunFor(fresh(), 'one two'), false, 'one typed message in the run makes it not generated');
+  assert.equal(generatedRunFor(fresh(), 'nothing sent'), null);
+  // The same words sent twice, typed then suggested: each spoken line takes its own message, newest first, once.
+  const twice = [{ text: 'Yes, absolutely.', generated: false }, { text: 'Yes, absolutely.', generated: true }];
+  assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), true);
+  assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), false);
+  assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), null, 'a used message is not matched again');
 });

@@ -28,27 +28,39 @@ const clip = (value, max) => {
 };
 const list = values => (Array.isArray(values) ? values : []).filter(item => typeof item === 'string' && item.trim());
 
-/** The conversation so far, oldest first, as the candidate would remember it. */
-export function transcriptLines(transcript, { interviewerName = 'Interviewer' } = {}) {
+/**
+ * The conversation so far, oldest first, as the candidate would remember it. `participants`
+ * ({ id, name } each) names who said what: on a panel each line, and each part of a reply two of
+ * them shared, carries that interviewer's name; a line with no speaker id is the lead's.
+ */
+export function transcriptLines(transcript, { interviewerName = 'Interviewer', participants = [] } = {}) {
+  const names = new Map((Array.isArray(participants) ? participants : [])
+    .filter(item => item && typeof item.id === 'string' && typeof item.name === 'string' && item.name.trim())
+    .map(item => [item.id, clip(item.name, 80)]));
+  const lead = (Array.isArray(participants) && typeof participants[0]?.name === 'string' && participants[0].name.trim()) ? clip(participants[0].name, 80) : interviewerName;
+  const nameOf = id => (typeof id === 'string' && names.get(id)) || lead;
   const entries = (Array.isArray(transcript) ? transcript : [])
     .filter(entry => entry && typeof entry.text === 'string' && entry.text.trim() && !entry.acknowledgement);
   return entries.slice(-TRANSCRIPT_TURNS).map(entry => {
-    const who = entry.speaker === 'candidate' ? 'Candidate' : interviewerName;
     // A sent message the candidate's voice spoke on the call was heard, not read.
     const how = entry.channel === 'chat' && !entry.voiced ? ' (typed in chat)' : '';
-    return `${who}${how}: ${clip(entry.text, TURN_MAX)}`;
+    if (entry.speaker === 'candidate') return `Candidate${how}: ${clip(entry.text, TURN_MAX)}`;
+    const parts = Array.isArray(entry.segments) ? entry.segments.filter(item => item && typeof item.text === 'string' && item.text.trim()) : [];
+    if (parts.length > 1) return parts.map(item => `${nameOf(item.speakerId)}${how}: ${clip(item.text, TURN_MAX)}`).join('\n');
+    return `${nameOf(entry.speakerId)}${how}: ${clip(entry.text, TURN_MAX)}`;
   });
 }
 
 /**
  * The prompt. `context` holds what the call already has: the brief (company, role, summary,
  * themes), the listing text, the career text, the submitted résumé and cover letter, the
- * candidate's name, the transcript, the open pad and the prepared questions with their answers.
+ * candidate's name, the transcript with the interviewers' names, the open pad and the prepared
+ * questions with their answers.
  */
 export function draftAnswerPrompt(context = {}) {
   const brief = context.brief || {};
   const name = String(context.candidateName || '').trim();
-  const lines = transcriptLines(context.transcript, { interviewerName: 'Interviewer' });
+  const lines = transcriptLines(context.transcript, { interviewerName: 'Interviewer', participants: context.participants });
   const career = clip(context.careerText, CAREER_MAX);
   const resume = clip(context.application?.resume, CAREER_MAX);
   const coverLetter = clip(context.application?.coverLetter, 6000);
@@ -74,10 +86,10 @@ export function draftAnswerPrompt(context = {}) {
     '- Every sentence is one a person would actually say. Never open a sentence with a label and a colon the way notes or slides do ("Short version: I was wrong", "Leading explanation: the meter", "What\'s changed: the current fell", "To the ground:"); say it as speech instead ("The short version is that I was wrong", "My leading explanation is the meter", "What\'s changed is that the current fell", "and to the ground I\'d say"). The same goes for a dash or semicolon used to stitch notes together. One flowing reply, no paragraph breaks.',
     '- Say numbers and units the way people say them aloud when it reads oddly otherwise ("about 170 kilograms an hour", "two point nine amps").',
     '- Stay in character the whole time. You are this person speaking from memory, not an assistant reading files: never mention documents, notes, a résumé as a source, a prompt, being an AI, or what you can or cannot say, and never hedge or refuse because something is not written down.',
-    '- Build on the career documents below: they are your history, so use their employers, projects, tools and results. Where they do not cover what was asked (why you left a job, a specific story, a number, an opinion, a hobby), make up plausible, specific details that fit them. This reply is for rehearsing the interview, so sounding like a real, well-prepared candidate matters more than sticking to what is written.',
+    '- Build on the career documents below: they are your history, so use their employers, projects, tools and results. Where they do not cover what was asked (why you left a job, a specific story, a number, an opinion, a hobby), make up plausible, specific details that fit them, one or two, not a list. This reply is for rehearsing the interview, so sounding like a real, well-prepared candidate matters more than sticking to what is written.',
     '- Keep anything you make up consistent with the documents (do not contradict their employers, titles or dates) and with what you have already said in the conversation.',
     '- Answer the question that was asked, directly, the way a strong candidate would.',
-    '- Fit the length to the question: a greeting or small talk gets one or two sentences; a behavioural or experience question gets a short story (situation, what you did, the result) in about 80 to 180 words; a technical question gets a clear, direct explanation. Never more than 250 words.',
+    '- Fit the length to what was asked, the way a real candidate on a call does, and stop once it is answered. A greeting or small talk gets one or two sentences. A behavioural or experience question, or a request to talk them through a plan, gets a story (situation, what you did, the result) in about 80 to 180 words. A technical question gets a clear, direct explanation. A yes/no or one-fact question (a qualification, a number, a tool, a date, "did you ever") is answered in the first sentence, with a sentence or two of context at most and no story. A follow-up or clarifying question gets the answer first and the reason after, without starting a new story unless one was asked for. When the interviewer says "briefly", "quick one", "in a sentence" or that time is short, keep it to a sentence or two. Never more than 250 words.',
     '- If the interviewer asked you to write code or work in the shared pad, describe your approach briefly; the pad text, if any, is below.',
     '- The interviewer may be sharing their screen (a problem, a diagram, data, a timeline); its text is below. You can see it, so work from it directly: use its actual numbers, names and details, and never say you cannot see it or ask them to share or paste it.',
     '- If the last thing said is not a question (for example, they are wrapping up or asking if you have questions), reply as a candidate naturally would, using the listing and company to ask one good question when that fits.',
@@ -87,7 +99,7 @@ export function draftAnswerPrompt(context = {}) {
     section('career-documents', career),
     section('submitted-resume', resume && resume !== career ? resume : ''),
     section('submitted-cover-letter', coverLetter),
-    section('prepared-answers (your own notes; use one when it fits the question, reworded as you would say it)', pool.join('\n\n')),
+    section('prepared-answers (your own notes; take the idea from one when it fits, in a few sentences, never the whole thing)', pool.join('\n\n')),
     section(context.screen?.current === false ? 'screen-the-interviewer-shared-earlier' : 'interviewer-shared-screen', screen),
     section('shared-pad', pad),
     section('conversation-so-far', lines.length ? lines.join('\n') : '(nothing has been said yet)'),

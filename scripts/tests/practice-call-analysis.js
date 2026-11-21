@@ -60,7 +60,7 @@ export default [
       const result = await analyzeCall({ callDir: dir, callRecord, plan, brief, deps });
       assert.equal(calls.scribe.length, 1);
       assert.equal(calls.scribe[0].path, path.join(dir, 'candidate.wav'), 'Scribe reads the candidate track');
-      assert.deepEqual(calls.metrics[0], { transcript, candidateProsody: callRecord.candidateProsody, baselineSnapshot: callRecord.voiceBaseline });
+      assert.deepEqual(calls.metrics[0], { transcript, candidateProsody: callRecord.candidateProsody, baselineSnapshot: callRecord.voiceBaseline, pauseSpans: [] });
       assert.equal(calls.review.length, 1, 'exactly one review call');
       assert.deepEqual(calls.review[0].profile, { model: 'opus', effort: 'medium' });
       assert.equal(calls.review[0].schema, REVIEW_SCHEMA);
@@ -575,7 +575,7 @@ export default [
     },
   },
   {
-    name: 'practice call analysis: a call answered by the candidate\'s voice is a spoken call: measured delivery, no typed wording, no mention of the AI voice, and the interviewer\'s cut-in is visible',
+    name: 'practice call analysis: a call answered by the candidate\'s voice is a spoken call: measured delivery, no typed wording, a generated line read like any other, and the interviewer\'s cut-in is visible',
     async run() {
       const voiced = [
         { speaker: 'interviewer', text: 'Tell me about a mistake.', startMs: 0, endMs: 3000 },
@@ -589,9 +589,10 @@ export default [
       assert.match(prompt, /DETERMINISTIC METRICS/u);
       assert.match(prompt, /CANDIDATE PROSODY BY TURN/u);
       assert.doesNotMatch(prompt, /^\[\d+\] .*\(chat\)/mu, 'the voiced line is not marked as chat');
-      assert.match(prompt, /\[1\] candidate 00:04-00:12:/u);
+      assert.match(prompt, /\[1\] candidate 00:04-00:12:/u, 'a generated line reads as the candidate speaking, unflagged');
+      assert.doesNotMatch(prompt, /AI-voiced|AI-drafted|synthetic voice/u, 'no special treatment for the AI voice');
       assert.match(prompt, /the interviewer had to stop the candidate here/u);
-      assert.doesNotMatch(prompt, /"voiced"|voiced: true|generated|suggest|AI voice|synthetic/iu);
+      assert.doesNotMatch(prompt, /"voiced"|voiced: true|"generated"/iu);
       assert.doesNotMatch(prompt, /while the candidate typed/u);
       // A typed line next to it is still typed; the call is not typed-only.
       const mixed = buildReviewPrompt({ callRecord: { ...record, transcript: [...voiced, { speaker: 'candidate', channel: 'chat', text: 'typed bit', startMs: 14000, endMs: 14000 }] }, plan, brief, metrics: {} });

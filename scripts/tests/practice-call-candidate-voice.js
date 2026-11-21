@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { askedParser, flush, greet, makeRig, speak } from './interview-practice-call-engine.js';
-import { acceptTags, candidateTagPrompt, createCandidateVoice, tagCandidateLine, wordsOf, CANDIDATE_VOICE_STAGE, DEFAULT_CANDIDATE_VOICE_GENDER } from '../../electron/practiceCall/candidateVoice.js';
+import { applyTags, splitSentences, candidateTagPrompt, createCandidateVoice, tagCandidateLine, wordsOf, CANDIDATE_VOICE_STAGE, DEFAULT_CANDIDATE_VOICE_GENDER } from '../../electron/practiceCall/candidateVoice.js';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { createPracticeVoiceStore, registerPracticeVoiceHandlers } from '../../electron/interviewApp/practiceVoiceSetting.js';
@@ -357,17 +357,29 @@ test('a line that ends during a pause is answered when the call resumes; hanging
   assert(voice.lines[1].signal.aborted);
 });
 
-test('tags keep every word: a reply that changes one is dropped, a slow one is not waited for', async () => {
-  assert.equal(acceptTags('I led the team.', '[confident] I led the team.'), '[confident] I led the team.');
-  assert.equal(acceptTags('I led the team.', '[confident] I led a team.'), null);
-  assert.equal(acceptTags('I led the team.', '<line>\nI led the team.\n</line>'), 'I led the team.');
+test('tags are inserted by code before the named sentences: the words never change, a slow or useless reply is not waited for', async () => {
+  const line = 'I led the team.  We shipped in May! Did that help? Yes';
+  assert.equal(splitSentences(line).join(''), line, 'the pieces rejoin to the exact line');
+  assert.equal(splitSentences(line).length, 4);
+  const numbers = 'I ran about 2.9 amps at 3.5 kg. Then it held.';
+  assert.deepEqual(splitSentences(numbers), ['I ran about 2.9 amps at 3.5 kg. ', 'Then it held.'], 'a decimal point is not a sentence end');
+  assert.equal(applyTags(numbers, '2: [warmly]'), 'I ran about 2.9 amps at 3.5 kg. [warmly] Then it held.', 'no tag lands inside a number');
+  assert.equal(applyTags(line, '1: [confident]\n3: [warmly]'), '[confident] I led the team.  We shipped in May! [warmly] Did that help? Yes');
+  assert.equal(applyTags('I led the team.', '1: [confident]'), '[confident] I led the team.');
+  assert.equal(applyTags('One. Two.', '2) [brightening]\n2: [earnest]'), 'One. [brightening] Two.', 'lenient separator; the first tag for a sentence wins');
+  assert.equal(applyTags('One. Two.', 'none'), null);
+  assert.equal(applyTags('One. Two.', '9: [warmly]\n0: [warmly]\nsentence 1: warmly\n1: warmly\n1: [' + 'x'.repeat(90) + ']'), null, 'out of range or malformed rows are ignored');
+  assert.equal(applyTags('One. Two.', '[confident] One. Two.'), null, 'a re-typed line is not a tag list');
+  for (const reply of ['1: [warmly]', '2: [light laugh]\n1: [engaged]', 'Sure!\n1: [a]\n2: [b]']) {
+    assert.equal(applyTags(line, reply).replace(/\[[^\]]*\] ?/gu, ''), line, 'removing the tags gives the original back');
+  }
   assert.equal(wordsOf('[warmly] Hi  there [light laugh] yes'), 'Hi there yes');
   const prompt = candidateTagPrompt({ text: 'Thanks for having me.', transcript: [{ speaker: 'interviewer', text: '[warm] Hi Sam.' }], role: 'Backend Engineer' });
-  assert(prompt.includes('Interviewer: Hi Sam.') && prompt.includes('Thanks for having me.') && prompt.includes('Backend Engineer'));
-  const tagged = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => '[warmly] Thanks for having me.' });
+  assert(prompt.includes('Interviewer: Hi Sam.') && prompt.includes('1. Thanks for having me.') && prompt.includes('Backend Engineer'));
+  const tagged = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => '1: [warmly]' });
   assert.deepEqual(tagged, { text: '[warmly] Thanks for having me.', tagged: true });
-  const changed = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => 'Thank you for having me.' });
-  assert.deepEqual(changed, { text: 'Thanks for having me.', tagged: false });
+  const retyped = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => 'Thank you for having me.' });
+  assert.deepEqual(retyped, { text: 'Thanks for having me.', tagged: false });
   const failed = await tagCandidateLine({ text: 'Thanks.', tagText: async () => { throw new Error('down'); } });
   assert.deepEqual(failed, { text: 'Thanks.', tagged: false });
   let timer = null;
@@ -389,7 +401,7 @@ test('the voice speaks the setting\'s gender, falls back to the other one, and s
     return stream;
   } });
   let wanted = 'male';
-  const voice = createCandidateVoice({ factories: { female: factory('female'), male: factory('male') }, gender: () => wanted, tagText: async () => '[confident] Yes, I did.' });
+  const voice = createCandidateVoice({ factories: { female: factory('female'), male: factory('male') }, gender: () => wanted, tagText: async () => '1: [confident]' });
   const line = voice.open({ utteranceId: 'u1', text: 'Yes, I did.' });
   assert.equal(line.gender, 'male');
   await line.done;
@@ -497,6 +509,7 @@ async function interviewerSpeaking(rig) {
   return reply;
 }
 
+const lastOpener = rig => rig.sessions.opener.calls.at(-1).message;
 const injectOps = (rig, id) => rig.ops.filter(item => item.id === id).map(item => item.op);
 const injectCancels = (rig, id) => rig.ops.filter(item => item.op === 'injectCancel' && item.id === id);
 const LONG = 'So the first thing we did was move every job onto one queue';
@@ -539,13 +552,14 @@ test('injected: the turn ends by vad and speculation like speech, with the micro
   await rig.clock.advance(300);
   rig.h.vad(false);
   await rig.clock.advance(600);
-  assert.equal(rig.sessions.main.calls.length, before + 1, 'speculated on the heard words');
+  assert.equal(rig.sessions.main.calls.length, before, 'a pause while the line is still playing starts nothing');
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(10);
+  assert.equal(rig.sessions.main.calls.length, before + 1, 'speculated on the heard words once the line is over');
   const message = lastMain(rig);
   assert(message.includes("Candidate: 'I rebuilt the billing service in Go.'"), message);
   assert(!message.includes('typed in chat') && !message.includes('[voice: warm'), message);
-  rig.h.inject(line.utteranceId, 'finished', 3000);
-  await flush();
-  assert.equal(rig.sessions.main.calls.length, before + 1, 'the end of the line adds no second turn');
   rig.sessions.main.answer('Nice. What was the hardest part?');
   rig.streams.at(-1).audio(3200);
   await flush();
@@ -554,6 +568,126 @@ test('injected: the turn ends by vad and speculation like speech, with the micro
   assert.notEqual(entry.channel, 'chat', 'a microphone entry, not a sent message');
   assert(!entry.voiced && !entry.interrupted);
   assert.equal(ear.calls.prepared.length + ear.calls.noted.length, 0, 'the ear measures candidate.wav, not the AI voice');
+});
+
+test('injected: the end of the AI voice line is a sure finish, however the turn model scores it', async () => {
+  const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
+  const { rig, voice } = await injectRig({ ear });
+  const before = rig.sessions.main.calls.length;
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await flush();
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'speculated at the normal point, not the held one');
+  assert(!lastOpener(rig).includes('sounds unfinished'), lastOpener(rig));
+  assert.equal(rig.of('turn-model').filter(event => event.held).length, 0);
+  assert.equal(rig.sessions.main.calls.length, before + 1);
+});
+
+test('injected: the turn model is not even asked about a vad end that belongs to the AI voice line', async () => {
+  const asked = [];
+  const ear = { ...voicedEar(), endOfTurn: async atMs => { asked.push(atMs); return 0.05; } };
+  const { rig, voice } = await injectRig({ ear });
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(300);
+  rig.h.vad(false); // the line is still playing when the vad end arrives
+  await flush();
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(600);
+  assert.equal(asked.length, 0);
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  assert(!lastOpener(rig).includes('sounds unfinished'), lastOpener(rig));
+});
+
+test('injected: a long pause inside a line still playing is not a turn end: nothing speculates or commits until the line finishes', async () => {
+  const ear = { ...voicedEar(), endOfTurn: async () => 0.9 };
+  const { rig, voice } = await injectRig({ ear });
+  const before = rig.sessions.main.calls.length;
+  rig.engine.typed('I rebuilt the billing service in Go. [slightly slower] Then we cut costs.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(300);
+  rig.h.vad(false); // a gap between the line's sentences, longer than the commit wait
+  await flush();
+  await rig.clock.advance(2000);
+  assert.equal(rig.sessions.opener.calls.length, 0, 'no speculative reply on a pause inside the line');
+  assert.equal(rig.sessions.main.calls.length, before, 'no commit while the candidate\'s voice is still playing');
+  rig.h.inject(line.utteranceId, 'finished', 5000);
+  await flush();
+  await rig.clock.advance(1300);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the turn ends once the line is over');
+  assert.equal(rig.sessions.main.calls.length, before + 1);
+});
+
+test('injected: a line cut short after a pause inside it still ends the turn on the usual schedule', async () => {
+  const ear = { ...voicedEar(), endOfTurn: async () => 0.9 };
+  const { rig, voice } = await injectRig({ ear });
+  const before = rig.sessions.main.calls.length;
+  rig.engine.typed('I rebuilt the billing service in Go. Then we cut costs.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(300);
+  rig.h.vad(false); // armed nothing: the line is still playing
+  await flush();
+  rig.h.inject(line.utteranceId, 'cancelled', 1200); // the line stops part-way, with no interviewer reply in flight
+  await flush();
+  await rig.clock.advance(1300);
+  assert.equal(rig.sessions.main.calls.length, before + 1, 'the turn ends instead of waiting for the silence check-in');
+});
+
+test('injected: live speech right after a line is judged as live speech, not as the line\'s end', async () => {
+  const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
+  const { rig, voice } = await injectRig({ ear });
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await speak(rig, 'and also I', 'live'); // the candidate goes on in their own voice within the line's window
+  await flush();
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 0, 'held by the turn model, as live speech is');
+  assert(rig.of('turn-model').some(event => event.held));
+});
+
+test('injected: timers from a live pause just before a sent line do not fire while it starts playing', async () => {
+  const { rig } = await injectRig();
+  const before = rig.sessions.main.calls.length;
+  await speak(rig, 'Let me think', 'a'); // arms the 500 / 1200 ms timers
+  await rig.clock.advance(100);
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' }); // its voice is still being made
+  await flush();
+  await rig.clock.advance(1500);
+  assert.equal(rig.sessions.opener.calls.length, 0);
+  assert.equal(rig.sessions.main.calls.length, before, 'nothing is said over the line that is about to play');
+});
+
+test('live microphone speech with an unsure verdict is still held', async () => {
+  const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
+  const { rig } = await injectRig({ ear });
+  await speak(rig, 'I built a scheduler', 'a');
+  await flush();
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 0, 'held past the normal speculation point');
+  await rig.clock.advance(900);
+  assert(lastOpener(rig).includes('[audio: sounds unfinished]'), lastOpener(rig));
 });
 
 test('injected: a long line gets the live-speech looks, and a cut-in makes the candidate yield after a reaction time at the end of the word', async () => {

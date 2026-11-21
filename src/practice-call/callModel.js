@@ -73,6 +73,14 @@ export const levelPercent = level => {
   return Math.min(100, Math.max(0, Math.round(value * 100)));
 };
 
+// How far the candidate's speaking glow reaches for a microphone level (RMS, 0..1). The level
+// arrives every 100 ms; a square root lifts quiet speech so ordinary talking moves it visibly.
+export function selfPulse(level) {
+  const value = Number(level);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(1, Math.sqrt(value / 0.2));
+}
+
 export function humanizeKey(key) {
   return String(key).replace(/Ms$/u, '').replace(/([a-z0-9])([A-Z])/gu, '$1 $2').replace(/[-_]+/gu, ' ').toLowerCase();
 }

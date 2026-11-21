@@ -455,6 +455,27 @@ export default [
     },
   },
   {
+    name: 'practice call render: the candidate tile rings while they speak and its glow follows the sound level',
+    async run() {
+      const bundle = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, InCall } = bundle.module;
+        const render = extra => renderToStaticMarkup(React.createElement(InCall, { state: { ...IN_CALL_STATE, speaking: 'interviewer', ...extra }, api: {} }));
+        const self = markup => markup.slice(markup.indexOf('aria-label="Your camera"'), markup.indexOf('</section>', markup.indexOf('aria-label="Your camera"')));
+        const quiet = self(render({ candidateSpeaking: false, level: 0.3 }));
+        assert(quiet.includes('data-self-speaking="false"') && quiet.includes('outline-transparent') && !quiet.includes('box-shadow:'), 'no ring or glow while silent');
+        const soft = self(render({ candidateSpeaking: true, level: 0.01 }));
+        const loud = self(render({ candidateSpeaking: true, level: 0.2 }));
+        for (const markup of [soft, loud]) assert(markup.includes('data-self-speaking="true"') && markup.includes('outline-[#8ab4f8]') && markup.includes(' speaking</span>'), 'a steady ring while speaking');
+        const spread = markup => Number(/box-shadow:0 0 0 (\d+)px/.exec(markup)?.[1]);
+        assert(spread(loud) > spread(soft), `the glow grows with the level (${spread(soft)} -> ${spread(loud)})`);
+        assert(!loud.includes('pc-ring') && !loud.includes('pc-bars') && !loud.includes('pc-breathe'), 'no timed animation on the candidate tile');
+        const chip = render({ candidateSpeaking: true, level: 0.1, screen: { title: 'Q', content: 'Body', speakerId: 'A' } });
+        assert(/data-chip="you" data-self-speaking="true"/.test(chip), 'the presenting bar chip rings too');
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
     name: 'practice call render: in-call shows the speaking interviewer, timer, call controls and keeps video, captions, cards and chat off by default',
     async run() {
       const bundle = await loadServerBundle();
@@ -781,6 +802,12 @@ export default [
             assert(time === 440, 'the third part starts after the pause, on the recording clock');
             await act(() => byLabel('Previous part').click());
             assert(time === 120, 'Previous part right at the start of a part goes back one');
+            const chip = name => window.document.querySelector(`[data-part-chip="${name}"]`);
+            assert(chip('question')?.tagName === 'BUTTON' && chip('answer')?.tagName === 'BUTTON', 'the Question and Your answer pills are buttons');
+            await act(() => chip('answer').click());
+            assert(time > 120 && time < 200 && chip('answer').getAttribute('aria-current') === 'true', `Your answer jumps to where the answer starts (${time})`);
+            await act(() => chip('question').click());
+            assert(time === 120 && chip('question').getAttribute('aria-current') === 'true', 'Question jumps back to the start of the part');
             await key(slider, 'ArrowDown');
             assert(time === 440, 'ArrowDown goes to the next part');
             await key(slider, 'ArrowUp');
@@ -1104,72 +1131,78 @@ export default [
     },
   },
   {
-    name: 'practice call render: Suggest a reply fills the chat box without sending, reports typing meanwhile, and shows a failure; no button without the bridge call',
+    name: 'practice call render: the wand in the call bar writes a reply and says it at once, never through the chat box, reports typing meanwhile, holds it through a pause and shows a failure',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
       await withDom(async window => {
         const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
         try {
           const sent = [];
-          const sentOptions = [];
           const typing = [];
           let answer = null;
           let release;
+          let pushState = null;
+          const base = { phase: 'in-call', persona: PERSONA, chat: [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }] };
+          let paused = false;
           window.practiceCallAPI = {
-            getState: async () => ({ phase: 'in-call', persona: PERSONA, chat: [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }] }),
-            onState: () => () => {},
+            getState: async () => ({ ...base, paused }),
+            onState: listener => { pushState = listener; return () => {}; },
             onEvent: () => () => {},
-            sendChat: async (text, options) => { sent.push(text); sentOptions.push(options); },
+            sendChat: async (text, options) => { if (paused) return { ...base, paused: true }; sent.push({ text, options }); return { ...base }; },
             setTyping: async value => { typing.push(value); },
             draftAnswer: () => new Promise(resolve => { release = () => resolve(answer); }),
           };
           const root = bundle.module.createRoot(window.document.getElementById('root'));
           const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
           const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = () => act(() => new Promise(resolve => setTimeout(resolve, 5)));
           try {
             await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
-            await act(() => byLabel('Chat').click());
             const button = byLabel('Suggest a reply');
-            assert(button, 'the chat has a Suggest a reply button');
-            await act(() => button.click());
-            assert(byLabel('Suggest a reply').disabled === true, 'the button waits while the reply is written');
-            assert(byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the button shows a loading spinner while the reply is written');
+            assert(button && button.closest('footer'), 'the wand sits in the call bar at the bottom');
+            await act(() => byLabel('Chat').click());
+            assert(window.document.querySelectorAll('[aria-label="Suggest a reply"]').length === 1, 'the chat panel has no wand of its own');
+            await act(() => byLabel('Suggest a reply').click());
+            assert(byLabel('Suggest a reply').disabled === true && byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the button shows a spinner while the reply is written');
             assert(typing.includes(true), 'the candidate counts as typing while the reply is written');
             answer = { text: 'Your fleet work matches what I did at Northwind.' };
             await act(() => release());
-            await act(() => new Promise(resolve => setTimeout(resolve, 5)));
-            assert(byLabel('Chat message').value === 'Your fleet work matches what I did at Northwind.', 'the reply is put in the box');
-            assert(sent.length === 0, 'the reply is not sent');
-            assert(byLabel('Suggest a reply').disabled === false && !byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the button is back to the wand once the reply is in the box');
-            assert(window.document.activeElement === byLabel('Chat message'), 'the box has focus, ready for Enter');
+            await settle();
+            assert(sent.length === 1 && sent[0].text === 'Your fleet work matches what I did at Northwind.' && sent[0].options?.generated === true, 'the reply is sent at once, marked generated');
+            assert(byLabel('Chat message').value === '', 'the chat box is never filled');
+            assert(typing.at(-1) === false, 'typing ends once the reply is ready');
+            assert(byLabel('Suggest a reply').disabled === false && !byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'the wand is back');
             assert(!/practice|\bAI\b/iu.test(window.document.body.textContent), 'the call screen never says practice or AI');
+            // Ready while paused: held, and said on resume.
+            paused = true;
+            await act(() => pushState?.({ ...base, paused: true }));
+            await act(() => byLabel('Suggest a reply').click());
+            answer = { text: 'Held line.' };
+            await act(() => release());
+            await settle();
+            assert(sent.length === 1, 'nothing is said while paused');
+            paused = false;
+            await act(() => pushState?.({ ...base, paused: false }));
+            await settle();
+            assert(sent.length === 2 && sent[1].text === 'Held line.' && sent[1].options?.generated === true, 'the held reply is said on resume');
             answer = { error: 'Could not suggest a reply. Try again.' };
             await act(() => byLabel('Suggest a reply').click());
             await act(() => release());
-            assert(window.document.body.textContent.includes('Could not suggest a reply. Try again.'), 'a failure is shown');
-            assert(byLabel('Chat message').value === 'Your fleet work matches what I did at Northwind.', 'a failure keeps the draft');
-            // A sent suggestion, even edited, is marked so it never counts as practice; the candidate's own words are not.
-            const key = (node, init) => node.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
-            const setValue = (node, value) => {
-              Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(node, value);
-              node.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-            };
-            await act(() => setValue(byLabel('Chat message'), 'Your fleet work matches what I did at Northwind, mostly.'));
-            await act(() => key(byLabel('Chat message'), { key: 'Enter' }));
-            assert(sentOptions.at(-1)?.generated === true && Object.keys(sentOptions.at(-1)).length === 1, 'a sent suggestion is marked generated');
-            await act(() => setValue(byLabel('Chat message'), 'My own answer.'));
-            await act(() => key(byLabel('Chat message'), { key: 'Enter' }));
-            assert(sentOptions.at(-1) === undefined, 'typed by hand is not marked');
-            assert(JSON.stringify(sent.slice(-2)) === JSON.stringify(['Your fleet work matches what I did at Northwind, mostly.', 'My own answer.']), 'both are sent');
+            assert(window.document.querySelector('[data-testid="suggest-error"]')?.textContent.includes('Could not suggest a reply. Try again.'), 'a failure is shown');
+            assert(sent.length === 2, 'a failure says nothing');
           } finally { await act(() => root.unmount()); }
         } finally { await bundle.dispose(); }
       });
       const server = await loadServerBundle();
       try {
-        const { React, renderToStaticMarkup, ChatPanel } = server.module;
-        assert(!renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], onSend: () => {}, onTyping: () => {} })).includes('Suggest a reply'));
-        const paused = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [], paused: true, onSend: () => {}, onTyping: () => {}, onSuggest: async () => ({}) }));
-        assert(!/<button[^>]*aria-label="Suggest a reply"[^>]*disabled=""/.test(paused), 'the button stays enabled while paused');
+        const { React, renderToStaticMarkup, InCall } = server.module;
+        assert(!renderToStaticMarkup(React.createElement(InCall, { state: IN_CALL_STATE, api: { sendChat: () => {} } })).includes('Suggest a reply'), 'no wand without the bridge call');
+        const left = renderToStaticMarkup(React.createElement(InCall, { state: { ...IN_CALL_STATE, interviewerLeft: true }, api: { sendChat: () => {}, draftAnswer: async () => ({}) } }));
+        assert(/<button[^>]*aria-label="Suggest a reply"[^>]*disabled=""/.test(left), 'the wand is off once everyone left');
+        const { ChatPanel } = server.module;
+        const cut = renderToStaticMarkup(React.createElement(ChatPanel, { chat: [{ from: 'candidate', text: 'I rebuilt the billing —', cutOff: true, sent: 'I rebuilt the billing service in Go and cut costs.', atMs: 1 }, { from: 'candidate', text: 'Whole line.', atMs: 2 }] }));
+        assert(cut.includes('I rebuilt the billing —') && cut.includes('Show full message') && cut.includes('I rebuilt the billing service in Go and cut costs.'), 'a cut-off line keeps its full text to copy');
+        assert((cut.match(/data-chat-full="true"/g) || []).length === 1, 'only the cut-off line has it');
       } finally { await server.dispose(); }
     },
   },

@@ -258,9 +258,61 @@ function shiftTimes(value, byMs) {
   }
   return out;
 }
+/**
+ * Whether the sent messages that make up `line` were all written by Suggest a reply. The engine joins the messages
+ * waiting to be spoken into one line with spaces, so the line is matched against a run of consecutive sent messages.
+ * Null when no run matches (a line the service did not see sent).
+ */
+export function generatedRunFor(sent, line) {
+  const target = String(line ?? '').trim();
+  // Newest first, and a run once matched is used up: the same words sent twice (typed once, suggested once) each get their own flag.
+  for (let first = sent.length - 1; first >= 0; first -= 1) {
+    let joined = '';
+    for (let last = first; last < sent.length && !sent[last].used; last += 1) {
+      joined = joined ? `${joined} ${sent[last].text}` : sent[last].text;
+      if (joined === target) {
+        const run = sent.slice(first, last + 1);
+        for (const item of run) item.used = true;
+        return run.every(item => item.generated);
+      }
+      if (joined.length >= target.length) break;
+    }
+  }
+  return null;
+}
+
+/**
+ * Stamp the candidate's recognised speech that is really an AI-voice line. The voice goes out through the microphone
+ * path, so the recogniser records it like live speech with no flag; the helper's inject events say when each line
+ * played. A candidate entry mostly inside a generated line's span is that line: `voiced` and `generated` are set
+ * (never over a value already there), so the metrics and the review never judge it as the candidate's own delivery.
+ * A line that played whole and was recognised as a single entry also carries `sentText`, the known words, which are
+ * counted instead of the recogniser's text.
+ */
+export function stampInjectedLines(transcript, spans) {
+  const entries = Array.isArray(transcript) ? transcript : [];
+  const generatedSpans = (Array.isArray(spans) ? spans : []).filter(span => span?.generated === true && Number.isFinite(span.startMs) && Number.isFinite(span.endMs));
+  if (!generatedSpans.length) return entries;
+  const overlapOf = (entry, span) => Math.min(entry.endMs, span.endMs) - Math.max(entry.startMs, span.startMs);
+  const mine = entries.map(entry => (entry?.speaker === 'candidate' && !entry.acknowledgement && entry.channel !== 'chat' && Number.isFinite(entry.startMs) && Number.isFinite(entry.endMs)
+    ? generatedSpans.filter(span => overlapOf(entry, span) > 0 && overlapOf(entry, span) >= (entry.endMs - entry.startMs) / 2) : []));
+  return entries.map((entry, index) => {
+    const spansHere = mine[index];
+    if (!spansHere.length) return entry;
+    const only = spansHere.length === 1 && spansHere[0].whole === true && typeof spansHere[0].text === 'string'
+      && mine.filter(list => list.includes(spansHere[0])).length === 1;
+    return {
+      ...entry,
+      voiced: entry.voiced ?? true,
+      generated: entry.generated ?? true,
+      ...(only && entry.sentText === undefined ? { sentText: spansHere[0].text } : {}),
+    };
+  });
+}
+
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null,
+    phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
@@ -332,7 +384,7 @@ export function createPracticeCallService(deps = {}) {
     dbg('phase', { from: state.phase, phase, elapsedMs: state.elapsedMs });
     state.phase = phase;
     if (phase !== 'precheck') state.setup = null;
-    if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.speakingId = null; clearOver(); }
+    if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.candidateSpeaking = false; state.speakingId = null; clearOver(); }
     publish();
   };
   /** Names the setup step now running (and the planner's attempt) for the window's progress list. */
@@ -840,6 +892,9 @@ export function createPracticeCallService(deps = {}) {
   /** The interviewer playing wins over the candidate's voice activity: the highlight follows who has the floor. */
   function refreshSpeaking(self) {
     state.speaking = self.interviewerPlaying ? 'interviewer' : self.candidateVad ? 'candidate' : null;
+    // The candidate's own tile lights whenever their voice is going out, whoever has the floor: the
+    // microphone's voice activity, or a line in their AI voice mixed into the microphone.
+    state.candidateSpeaking = !!self.candidateVad || !!self.injecting?.size;
     publish();
   }
 
@@ -848,6 +903,21 @@ export function createPracticeCallService(deps = {}) {
     if (!self) return;
     if (event?.type === 'vad' || event?.type === 'status' || event?.type === 'error' || event?.type === 'recording' || (event?.type === 'transcript' && event.final)) { const { type, ...fields } = event; dbg('helper', { type, ...fields }); }
     // Injected-line states (never the 50 ms positions), no text and no audio: tells in the debug log that a line went through the microphone.
+    if (event?.type === 'inject' && typeof event.utteranceId === 'string') {
+      const lines = (self.injecting ||= new Set());
+      const had = lines.size;
+      if (event.state === 'started') lines.add(event.utteranceId);
+      else if (event.state === 'finished' || event.state === 'cancelled') lines.delete(event.utteranceId);
+      if (lines.size !== had) refreshSpeaking(self);
+    }
+    // Where each injected line sat on the recording's clock, and whether it was generated, for stamping the transcript.
+    if (event?.type === 'inject' && typeof event.utteranceId === 'string' && Number.isFinite(event.atMs)) {
+      const spans = (self.injectSpans ||= new Map());
+      const span = spans.get(event.utteranceId) ?? { startMs: event.atMs, endMs: event.atMs };
+      if (event.state === 'started') span.startMs = event.atMs;
+      if (event.state === 'finished' || event.state === 'cancelled') { span.endMs = event.atMs; span.whole = event.state === 'finished'; }
+      if (event.state !== 'position') spans.set(event.utteranceId, span);
+    }
     if (event?.type === 'inject' && event.state !== 'position') dbg('inject', { state: event.state, utteranceId: event.utteranceId, positionMs: event.positionMs, atMs: event.atMs, ...(event.reason ? { reason: event.reason } : {}) });
     try { self.audioMirror?.helperEvent(event); } catch { /* track writer is best effort */ }
     // The recording's clock starts when capture starts, a few seconds after the helper is
@@ -1959,13 +2029,28 @@ export function createPracticeCallService(deps = {}) {
       const createCandidateVoice = await resolve('candidateVoice');
       const factories = {};
       for (const [gender, voice] of Object.entries(ids)) factories[gender] = voiceFactory({ key: self.key, voiceId: voice.voiceId, tier: self.tier });
-      return createCandidateVoice({
+      const voice = createCandidateVoice({
         factories, clock,
         gender: () => (typeof deps.candidateVoiceGender === 'function' ? deps.candidateVoiceGender() : undefined),
         tagText: typeof deps.candidateTagText === 'function' ? deps.candidateTagText : null,
         context: () => ({ transcript: self.engine?.state?.().transcript ?? [], brief: self.brief }),
         onEvent: event => dbg('candidate-voice-line', event),
       });
+      // The engine names each line it speaks; the sent messages it was made from say whether Suggest a reply wrote it.
+      if (!voice || typeof voice.open !== 'function') return voice;
+      return {
+        ...voice,
+        open(args) {
+          try {
+            const generated = generatedRunFor(self.sentLines || [], args?.text);
+            if (generated !== null && typeof args?.utteranceId === 'string') {
+              const spans = (self.injectSpans ||= new Map());
+              spans.set(args.utteranceId, { ...(spans.get(args.utteranceId) ?? { startMs: NaN, endMs: NaN }), generated, text: String(args.text).trim() });
+            }
+          } catch { /* stamping is best effort */ }
+          return voice.open(args);
+        },
+      };
     } catch (error) {
       warn(`[PracticeCall] candidate voice unavailable: ${error?.message || error}`);
       return null;
@@ -2136,7 +2221,10 @@ export function createPracticeCallService(deps = {}) {
         ...(self.setup ? { setup: self.setup } : {}),
         ...(unprepared ? { unpreparedQuestion: unprepared } : {}),
         askedQuestions: asked, askedQuestionIds: askedIds, answeredQuestions: answered,
-        steering: self.steering || null, transcript: onCallClock(engineState.transcript || []),
+        steering: self.steering || null, transcript: onCallClock(stampInjectedLines(engineState.transcript || [], [...(self.injectSpans?.values() ?? [])]
+          // A line still playing when the call ended has no end event: it ran to the end of the recording.
+          .map(span => (Number.isFinite(span.startMs) && !(span.endMs > span.startMs) && Number.isFinite(endOnTimelineMs) && endOnTimelineMs > span.startMs
+            ? { ...span, endMs: endOnTimelineMs, whole: false } : span)))),
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
         pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
@@ -2550,6 +2638,7 @@ export function createPracticeCallService(deps = {}) {
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
       const generated = options?.generated === true;
       dbg('user', { action: 'chat', text: value, ...(generated ? { generated } : {}) });
+      if (call) (call.sentLines ||= []).push({ text: value, generated });
       const chatId = `m${(state.chat.length + 1).toString(36)}-${clock.now().toString(36)}`;
       state.chat.push({ id: chatId, from: 'candidate', text: value, atMs: Math.round(clock.now() - (call?.startedAt || clock.now())) });
       // While the interviewers are still leaving the line is typed into as in a real call: the message shows
@@ -2631,6 +2720,8 @@ export function createPracticeCallService(deps = {}) {
           callText: deps.draftText, signal: abort.signal,
           brief: self.promptBrief || promptBrief(self.brief), listingText: sources.listingText, careerText: sources.careerText,
           application, candidateName: self.candidateName, transcript: engineState.transcript, pad: state.pad,
+          // Who said what: the interviewers introduced themselves, so the reply can tell them apart and use their names.
+          participants: (state.participants || []).map(item => ({ id: item.id, name: item.name })),
           // What is on the shared screen now; when nothing is, the last screen shown (the question may still be about it).
           screen: sharedScreenForDraft(self),
           pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),

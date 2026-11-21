@@ -199,13 +199,21 @@ function PartFeedbackMain({ chapter, hasFeedback }) {
   </div>;
 }
 
-function PartChips({ chapter, part }) {
+// Question and Your answer are also buttons: each jumps to where that half of the part starts.
+function PartChips({ chapter, part, onJump }) {
   const asker = chapter.asker;
   const label = chapter.hasAnswer ? null : 'Interviewer';
+  const chip = (key, text, ms) => {
+    const now = part === key;
+    return <button type="button" data-part-chip={key} aria-current={now ? 'true' : undefined} disabled={!onJump}
+      aria-label={`Jump to the start of ${key === 'answer' ? 'your answer' : 'the question'}`} title={key === 'answer' ? 'Jump to your answer' : 'Jump to the question'}
+      onClick={() => onJump?.(ms)}
+      className={`px-3 py-1 transition-colors duration-150 -outline-offset-2 ${RING} ${now ? 'bg-white text-[#202124]' : 'text-white/55 enabled:hover:bg-white/10 enabled:hover:text-white/85'} disabled:cursor-default`}>{text}</button>;
+  };
   return <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-part-now={part}>
     <div role="group" aria-label="Where we are in this part" className="inline-flex overflow-hidden rounded-full border border-white/15 text-sm">
-      <span data-part-chip="question" aria-current={part === 'question' ? 'true' : undefined} className={`px-3 py-1 ${part === 'question' ? 'bg-white text-[#202124]' : 'text-white/55'}`}>{label || 'Question'}</span>
-      {chapter.hasAnswer && <span data-part-chip="answer" aria-current={part === 'answer' ? 'true' : undefined} className={`px-3 py-1 ${part === 'answer' ? 'bg-white text-[#202124]' : 'text-white/55'}`}>Your answer</span>}
+      {chip('question', label || 'Question', chapter.activeStartMs)}
+      {chapter.hasAnswer && chip('answer', 'Your answer', chapter.activeQuestionEndMs)}
     </div>
     {asker?.name && <p className="text-sm text-white/65">Asked by <span className="text-white/90">{asker.name}</span>{asker.role ? <span className="text-white/50"> · {asker.role}</span> : null}</p>}
   </div>;
@@ -421,7 +429,7 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
       {showOverview
         ? <Overview model={model} replay={replay} overview={overview} typedOnly={typedOnly} hasAudio={!!audioUrl} summaryOpen={summaryOpen} onSummaryOpen={setSummaryOpen} showAll={showAll} onShowAll={setShowAll} callTitle={callTitle} />
         : <article key={chapter.index} data-focus-part={chapter.index} className="pc-fade mx-auto w-full max-w-6xl space-y-5">
-          {chapter.synthetic ? null : <PartChips chapter={chapter} part={part} />}
+          {chapter.synthetic ? null : <PartChips chapter={chapter} part={part} onJump={audioUrl ? seekActive : undefined} />}
           <h2 data-focus-title="true" className="text-3xl font-normal leading-tight text-white min-[1000px]:text-4xl">{partTitle}</h2>
           <div className={`grid gap-6 ${showScreen || showPad ? 'min-[1000px]:grid-cols-2' : 'max-w-3xl'}`}>
             <div className="min-w-0"><PartFeedback chapter={chapter} hasFeedback={hasFeedback} /></div>

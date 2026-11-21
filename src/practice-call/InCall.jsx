@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Captions, CaptionsOff, ListChecks, MessageSquare, Mic, MicOff, MonitorUp, PhoneOff, Video, VideoOff, X } from 'lucide-react';
-import ChatPanel from './ChatPanel.jsx';
+import { Captions, CaptionsOff, ListChecks, LoaderCircle, MessageSquare, Mic, MicOff, MonitorUp, PhoneOff, Video, VideoOff, WandSparkles, X } from 'lucide-react';
+import ChatPanel, { CHAT_MAX_LENGTH, TYPING_REFRESH_MS } from './ChatPanel.jsx';
 import Avatar from './Avatar.jsx';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
@@ -8,6 +8,7 @@ import { clampScreen } from './screenMarkup.js';
 import { firstNameOf, participantsOf, roleLine } from './persona.js';
 import { playJoinChime, playLeaveChime } from './ringtone.js';
 import { formatTime } from './replayModel.js';
+import { selfPulse } from './callModel.js';
 import { shouldTogglePause } from './pauseKey.js';
 import { PANEL_DEFAULT_WIDTH, PANEL_KEY_STEP, PANEL_MIN_WIDTH, STAGE_MIN_WIDTH, clampPanelWidth, readPanelWidth, savePanelWidth, startDrag } from './panelSize.js';
 
@@ -76,17 +77,35 @@ export default function InCall({ state, api }) {
   };
   const resetPanel = () => { setPanelWidth(PANEL_DEFAULT_WIDTH); savePanelWidth(PANEL_DEFAULT_WIDTH); };
   const [chatDraft, setChatDraft] = useState('');
-  // Whether the text in the box was written by Suggest a reply (edited or not). It lives with the draft, so
-  // closing the panel keeps it; clearing the box ends it. A sent suggestion is heard but never counts as practice.
-  const [draftGenerated, setDraftGenerated] = useState(false);
-  const changeDraft = (value, meta) => {
-    setChatDraft(value);
-    if (meta?.generated) setDraftGenerated(true);
-    else if (typeof value === 'string' && !value.trim()) setDraftGenerated(false);
+  const sendChat = typeof api?.sendChat === 'function' ? text => api.sendChat(text) : undefined;
+  // The wand (testing aid): a reply to the latest question is written and spoken in the candidate's
+  // voice at once, without going through the chat box. It is sent marked generated, so it is heard
+  // but never counts as practice. While it is written the candidate counts as typing, so the
+  // interviewer waits; a reply that is ready while the call is paused is spoken on resume.
+  const canSuggest = typeof api?.draftAnswer === 'function' && typeof api?.sendChat === 'function';
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestError, setSuggestError] = useState('');
+  const heldReplyRef = useRef('');
+  const apiRef = useRef(api);
+  useEffect(() => { apiRef.current = api; });
+  const reportTyping = value => { try { apiRef.current?.setTyping?.(!!value); } catch { /* bridge gone */ } };
+  useEffect(() => {
+    if (!suggesting) return undefined;
+    reportTyping(true);
+    const timer = setInterval(() => reportTyping(true), TYPING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [suggesting]);
+  useEffect(() => {
+    if (!suggestError) return undefined;
+    const timer = setTimeout(() => setSuggestError(''), TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [suggestError]);
+  const deliverReply = async text => {
+    let result;
+    try { result = await apiRef.current.sendChat(text, { generated: true }); } catch { result = null; }
+    // The window hears about a pause a moment after the shortcut: a reply refused for it waits for the resume.
+    if (result?.paused) heldReplyRef.current = text;
   };
-  const sendChat = typeof api?.sendChat === 'function'
-    ? text => { const generated = draftGenerated; setDraftGenerated(false); return generated ? api.sendChat(text, { generated: true }) : api.sendChat(text); }
-    : undefined;
   const [cards, setCards] = useState([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState(null);
@@ -161,7 +180,20 @@ export default function InCall({ state, api }) {
     return () => clearTimeout(timer);
   }, [joinToast]);
   const muted = !!state?.muted;
+  // The candidate's voice going out (their microphone or their AI voice): a steady ring, with a
+  // glow that grows and shrinks with the sound itself rather than on a timer.
+  const selfSpeaking = !!state?.candidateSpeaking;
+  const pulse = selfSpeaking ? selfPulse(state?.level) : 0;
+  const glow = spread => (selfSpeaking ? `0 0 0 ${Math.round(spread * pulse)}px rgba(138,180,248,${(0.12 + 0.2 * pulse).toFixed(2)})` : undefined);
   const paused = !!state?.paused;
+  const pausedRef = useRef(paused);
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (paused || !heldReplyRef.current) return;
+    const text = heldReplyRef.current;
+    heldReplyRef.current = '';
+    deliverReply(text);
+  }, [paused]);
   // The key listener is installed once; this ref lets it see the current pause state and bridge.
   const pauseRef = useRef({ paused, setPaused: api?.setPaused });
   useEffect(() => { pauseRef.current = { paused, setPaused: api?.setPaused }; });
@@ -180,6 +212,20 @@ export default function InCall({ state, api }) {
   const interviewerLeft = !!state?.interviewerLeft;
   // The other side dropped out instead of saying goodbye.
   const connectionLost = interviewerLeft && !!state?.connectionLost;
+  const suggestReply = async () => {
+    if (!canSuggest || suggesting || interviewerLeft) return;
+    setSuggesting(true);
+    setSuggestError('');
+    let result;
+    try { result = await api.draftAnswer(); } catch { result = null; }
+    const text = typeof result?.text === 'string' ? result.text.trim().slice(0, CHAT_MAX_LENGTH) : '';
+    if (!mountedRef.current) return;
+    setSuggesting(false);
+    reportTyping(false);
+    if (!text) { setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.'); return; }
+    if (pausedRef.current) { heldReplyRef.current = text; return; }
+    await deliverReply(text);
+  };
   const chatOpen = panel === 'chat';
   // The service names who is speaking; without it the lead's tile follows the plain speaking flag.
   // A panel call names who is speaking. A solo call never does (speakingId stays null), so its one tile follows the plain flag.
@@ -281,8 +327,8 @@ export default function InCall({ state, api }) {
                 <div data-strip="true" data-tiles={shown.length} className="flex shrink-0 items-center gap-1.5">
                   {participants.map((item, index) => (shown.includes(item) ? renderTile(item, index, true) : null))}
                 </div>
-                {!cameraOn && <p data-chip="you" aria-hidden="true" className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[#3c4043] pl-1 text-xs font-medium text-white ${tightBar && !muted ? 'pr-1' : 'pr-3'}`}>
-                  <span className="grid h-6 w-6 place-items-center rounded-full bg-[#00796b] text-[9px]">You</span>{muted ? <MicOff size={12} /> : tightBar ? null : 'You'}
+                {!cameraOn && <p data-chip="you" data-self-speaking={selfSpeaking ? 'true' : 'false'} aria-hidden="true" className={`flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[#3c4043] pl-1 text-xs font-medium text-white outline outline-2 -outline-offset-2 transition-[outline-color] duration-200 ${selfSpeaking ? 'outline-[#8ab4f8]' : 'outline-transparent'} ${tightBar && !muted ? 'pr-1' : 'pr-3'}`}>
+                  <span className="grid h-6 w-6 place-items-center rounded-full bg-[#00796b] text-[9px] transition-[box-shadow] duration-100 ease-out" style={{ boxShadow: glow(5) }}>You</span>{muted ? <MicOff size={12} /> : tightBar ? null : 'You'}
                 </p>}
               </div>
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
@@ -298,17 +344,19 @@ export default function InCall({ state, api }) {
             ? (panelCall ? "Everyone else lost their connection. You're the only one here." : `${leadName} lost their connection. You're the only one here.`)
             : (panelCall ? "Everyone left the call. You're the only one here." : `${leadName} left the call. You're the only one here.`)}</p>}
           {joinToast && <p key={joinToast.key} role="status" aria-label="Participant joined" data-testid="join-toast" className="pc-rise absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-full bg-[#202124]/90 px-4 py-2 text-sm text-white shadow-lg">{joinToast.name} joined</p>}
-          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'} data-self={alone && !presenting ? 'full' : 'corner'}
-            className={`absolute z-10 grid place-items-center ${presenting ? (cameraOn ? 'bottom-2 right-2 aspect-video w-32' : 'hidden') : alone ? 'pc-expand inset-0' : 'bottom-3 right-3 aspect-video w-[22%] min-w-36 max-w-60'} overflow-hidden rounded-xl bg-[#4a4e51] shadow-[0_2px_10px_rgba(0,0,0,0.45)]`}>
+          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'} data-self={alone && !presenting ? 'full' : 'corner'} data-self-speaking={selfSpeaking ? 'true' : 'false'}
+            className={`absolute z-10 grid place-items-center ${presenting ? (cameraOn ? 'bottom-2 right-2 aspect-video w-32' : 'hidden') : alone ? 'pc-expand inset-0' : 'bottom-3 right-3 aspect-video w-[22%] min-w-36 max-w-60'} overflow-hidden rounded-xl bg-[#4a4e51] shadow-[0_2px_10px_rgba(0,0,0,0.45)] outline outline-[3px] -outline-offset-[3px] transition-[outline-color] duration-200 ${selfSpeaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
             {cameraOn && <video ref={videoRef} autoPlay playsInline muted aria-label="Local camera preview" className="h-full w-full -scale-x-100 object-cover" />}
-            {!cameraOn && <div className={`grid place-items-center rounded-full bg-[#00796b] font-medium text-white ${alone && !presenting ? 'h-28 w-28 text-3xl' : 'h-12 w-12 text-base'}`} aria-hidden="true">You</div>}
+            {!cameraOn && <div className={`grid place-items-center rounded-full bg-[#00796b] font-medium text-white transition-[box-shadow] duration-100 ease-out ${alone && !presenting ? 'h-28 w-28 text-3xl' : 'h-12 w-12 text-base'}`} style={{ boxShadow: glow(alone && !presenting ? 22 : 12) }} aria-hidden="true">You</div>}
+            {cameraOn && selfSpeaking && <span aria-hidden="true" className="pointer-events-none absolute inset-0 rounded-xl transition-[box-shadow] duration-100 ease-out" style={{ boxShadow: `inset 0 0 ${Math.round(6 + 18 * pulse)}px rgba(138,180,248,${(0.25 + 0.35 * pulse).toFixed(2)})` }} />}
             {!cameraOn && <span className="sr-only">Camera off</span>}
             {muted && <span aria-hidden="true" className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full bg-[#202124]/70 text-white"><MicOff size={13} /></span>}
-            <p className={`absolute font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)] ${alone && !presenting ? 'bottom-3 left-4 text-sm' : 'bottom-1.5 left-2 text-xs'}`}>You</p>
+            <p className={`absolute font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)] ${alone && !presenting ? 'bottom-3 left-4 text-sm' : 'bottom-1.5 left-2 text-xs'}`}>You{selfSpeaking && <span className="sr-only"> speaking</span>}</p>
           </section>
         </div>
         {notice && <p role="alert" data-testid="call-notice" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-xs text-[#fdd663]">{notice}</p>}
         {cameraError && <p role="alert" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-xs text-[#fdd663]">{cameraError}</p>}
+        {suggestError && <p role="alert" data-testid="suggest-error" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-xs text-[#fdd663]">{suggestError}</p>}
         {/* A reversed column keeps the scroll position at the newest caption without any script:
             the list sits in one child, so the reading order stays oldest to newest. */}
         {captionsOn && <section aria-label="Live captions" data-follow="newest" className="pc-rise flex max-h-28 flex-col-reverse overflow-y-auto px-2 text-[15px] leading-snug text-white">
@@ -328,7 +376,7 @@ export default function InCall({ state, api }) {
           className="group absolute -left-4 top-0 z-10 flex h-full w-4 cursor-col-resize touch-none items-center justify-center outline-none">
           <span aria-hidden="true" className="h-10 w-1 rounded-full bg-white/20 transition-colors group-hover:bg-[#8ab4f8] group-focus-visible:bg-[#8ab4f8] group-active:bg-[#8ab4f8]" />
         </div>
-        {chatOpen && <ChatPanel chat={chat} draft={chatDraft} onDraftChange={changeDraft} disabled={interviewerLeft} paused={paused} onSend={sendChat} onTyping={api?.setTyping} onSuggest={typeof api?.draftAnswer === 'function' ? api.draftAnswer : undefined} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} />}
+        {chatOpen && <ChatPanel chat={chat} draft={chatDraft} onDraftChange={setChatDraft} disabled={interviewerLeft} paused={paused} onSend={sendChat} onTyping={api?.setTyping} interviewerName={panelCall ? '' : firstNameOf(participants[0])} onClose={() => setPanel(null)} />}
         {cardsOpen && <section aria-label="Notes" className="flex h-full flex-col rounded-2xl bg-white text-[#202124]">
           <header className="flex items-center justify-between px-5 pb-2 pt-4">
             <h2 className="text-lg font-normal">Notes</h2>
@@ -349,6 +397,8 @@ export default function InCall({ state, api }) {
       </p>
       <div className="flex items-center gap-3">
         <button type="button" className={roundClass(muted ? 'off' : 'idle')} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}</button>
+        {canSuggest && <button type="button" className={`${roundClass(suggesting ? 'active' : 'idle')} disabled:cursor-not-allowed`} aria-label="Suggest a reply" title="Suggest a reply and say it" aria-busy={suggesting}
+          disabled={suggesting || interviewerLeft} onClick={suggestReply}>{suggesting ? <LoaderCircle size={20} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={20} aria-hidden="true" />}</button>}
         <button type="button" className={roundClass(cameraOn ? 'idle' : 'off')} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <Video size={20} aria-hidden="true" /> : <VideoOff size={20} aria-hidden="true" />}</button>
         <button type="button" className={roundClass(captionsOn ? 'active' : 'idle')} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}>{captionsOn ? <Captions size={20} aria-hidden="true" /> : <CaptionsOff size={20} aria-hidden="true" />}</button>
         <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" onClick={leave}><PhoneOff size={20} aria-hidden="true" /></button>

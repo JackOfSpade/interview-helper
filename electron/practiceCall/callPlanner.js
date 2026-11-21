@@ -20,16 +20,16 @@ const REF = /^[A-Za-z0-9_-]{1,20}$/u;
 const STABILITY_MIN = 0.15;
 const STABILITY_MAX = 0.75;
 const MINUTES_MIN = 0.5;
-const MINUTES_MAX = 20;
 const MINUTES_SLACK = 1.25;
 const TEXT_MIN = 10;
-const TEXT_MAX = 400;
 const REJECTED_CAP = 60000;
 
-const INTERRUPTING_MAX = 400;
 const INTERRUPTING_DESCRIPTION = 'How this person interrupts a candidate who is talking, in plain words: what makes them jump in, how readily, how it sounds and when in the speech. Describes the person, never fixed lines.';
 
-const str = (min, max, description) => ({ type: 'string', minLength: min, maxLength: max, ...(description ? { description } : {}) });
+// Text has a floor but no ceiling: a plan that runs a little long reads fine, and a rejected one costs a whole second plan.
+// The shared screen is the one place with a real limit (SCREEN_CONTENT_MAX), so screen content keeps its cap.
+const SCREEN_CONTENT_LIMIT = 6000;
+const str = (min, description, max) => ({ type: 'string', minLength: min, ...(max ? { maxLength: max } : {}), ...(description ? { description } : {}) });
 
 /** The JSON schema given to the model; it mirrors the plan object validatePlan checks. */
 export const PLAN_SCHEMA = Object.freeze({
@@ -37,18 +37,18 @@ export const PLAN_SCHEMA = Object.freeze({
   additionalProperties: false,
   required: ['interviewKind', 'lead', 'panel', 'questions', 'problems'],
   properties: {
-    interviewKind: str(1, 300, 'What kind of interview this is and how it flows, in a sentence or two.'),
+    interviewKind: str(1, 'What kind of interview this is and how it flows, in a sentence or two.'),
     lead: {
       type: 'object', additionalProperties: false,
       required: ['voice', 'role', 'temperament', 'stability', 'room', 'manner', 'interrupting'],
       properties: {
         voice: { type: 'string', pattern: '^V[1-9]$', description: 'The key of one drawn voice.' },
-        role: str(1, 60, 'The lead\'s job title.'),
+        role: str(1, 'The lead\'s job title.'),
         temperament: { type: 'string', enum: TEMPERAMENTS },
         stability: { type: 'number', minimum: STABILITY_MIN, maximum: STABILITY_MAX },
         room: { type: 'number', minimum: 0, maximum: 1 },
-        manner: str(0, 300, 'How this person carries themselves as an interviewer. Manner only.'),
-        interrupting: str(1, INTERRUPTING_MAX, INTERRUPTING_DESCRIPTION),
+        manner: str(0, 'How this person carries themselves as an interviewer. Manner only.'),
+        interrupting: str(1, INTERRUPTING_DESCRIPTION),
       },
     },
     panel: {
@@ -58,59 +58,59 @@ export const PLAN_SCHEMA = Object.freeze({
         required: ['voice', 'role', 'focus', 'stability', 'room', 'manner', 'interrupting'],
         properties: {
           voice: { type: 'string', pattern: '^V[1-9]$' },
-          role: str(1, 60),
-          focus: str(1, 200, 'What this colleague will ask about.'),
+          role: str(1),
+          focus: str(1, 'What this colleague will ask about.'),
           stability: { type: 'number', minimum: STABILITY_MIN, maximum: STABILITY_MAX },
           room: { type: 'number', minimum: 0, maximum: 1 },
-          manner: str(0, 300),
-          interrupting: str(1, INTERRUPTING_MAX, INTERRUPTING_DESCRIPTION),
+          manner: str(0),
+          interrupting: str(1, INTERRUPTING_DESCRIPTION),
         },
       },
     },
     questions: {
-      type: 'array', minItems: 2, maxItems: 31,
+      type: 'array', minItems: 2,
       items: {
         type: 'object', additionalProperties: false,
         required: ['number', 'askedBy', 'minutes', 'probes'],
         properties: {
           number: { type: 'integer', minimum: 0, description: 'The number of a question in the pool, or 0 for the one question you write yourself (exactly one entry has number 0).' },
-          text: str(TEXT_MIN, TEXT_MAX, 'Only on the entry with number 0: the question you wrote, as the interviewer would ask it. Never on a pool question.'),
+          text: str(TEXT_MIN, 'Only on the entry with number 0: the question you wrote, as the interviewer would ask it. Never on a pool question.'),
           askedBy: { type: 'string', pattern: '^V[1-9]$', description: 'The voice key of the lead or of a panel member.' },
-          minutes: { type: 'number', minimum: MINUTES_MIN, maximum: MINUTES_MAX },
-          probes: { type: 'array', minItems: 0, maxItems: 4, items: str(1, 240) },
+          minutes: { type: 'number', minimum: MINUTES_MIN },
+          probes: { type: 'array', minItems: 0, items: str(1) },
         },
       },
     },
     problems: {
-      type: 'array', minItems: 0, maxItems: 10,
+      type: 'array', minItems: 0,
       items: {
         type: 'object', additionalProperties: false,
         required: ['ref', 'question', 'language', 'parts', 'solution', 'edgeCases', 'hints'],
         properties: {
           ref: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,20}$', description: 'A short reference such as p1.' },
           question: { type: 'integer', minimum: 0, description: 'The number of the picked question this problem belongs to (0 for the question you wrote).' },
-          language: str(0, 30, 'Short label of the language the candidate would code in, or empty.'),
+          language: str(0, 'Short label of the language the candidate would code in, or empty.'),
           parts: {
-            type: 'array', minItems: 1, maxItems: 4,
+            type: 'array', minItems: 1,
             items: {
               type: 'object', additionalProperties: false, required: ['title', 'content'],
               properties: {
-                title: str(1, 120), content: str(1, 6000),
+                title: str(1), content: str(1, '', SCREEN_CONTENT_LIMIT),
                 visual: {
                   type: 'object', additionalProperties: false, required: ['kind', 'shows'],
                   description: 'Only when a picture or diagram makes this screen clearer than its text alone; leave it out otherwise.',
                   properties: {
                     kind: { type: 'string', enum: ['picture', 'diagram'] },
-                    search: str(0, 80, 'For a picture: a few plain image search words, such as "lunar surface Apollo".'),
-                    shows: str(1, 300, 'What it should show and why that makes the question clearer.'),
+                    search: str(0, 'For a picture: a few plain image search words, such as "lunar surface Apollo".'),
+                    shows: str(1, 'What it should show and why that makes the question clearer.'),
                   },
                 },
               },
             },
           },
-          solution: str(1, 6000),
-          edgeCases: { type: 'array', minItems: 0, maxItems: 8, items: str(1, 240) },
-          hints: { type: 'array', minItems: 0, maxItems: 5, items: str(1, 300) },
+          solution: str(1),
+          edgeCases: { type: 'array', minItems: 0, items: str(1) },
+          hints: { type: 'array', minItems: 0, items: str(1) },
         },
       },
     },
@@ -127,9 +127,9 @@ function planVisual(value, path, bad) {
   const kind = value.kind;
   if (kind !== 'picture' && kind !== 'diagram') { bad(`${path}.kind must be "picture" or "diagram"`); return null; }
   const shows = clean(value.shows);
-  if (!shows || shows.length > 300) { bad(`${path}.shows must say in 1 to 300 characters what it shows and why it helps`); return null; }
+  if (!shows) { bad(`${path}.shows must say what it shows and why it helps`); return null; }
   const search = clean(value.search);
-  if (kind === 'picture' && (!search || search.length > 80)) { bad(`${path}.search must give 1 to 80 characters of search words for a picture`); return null; }
+  if (kind === 'picture' && !search) { bad(`${path}.search must give search words for a picture`); return null; }
   return { kind, shows, ...(kind === 'picture' ? { search } : {}) };
 }
 /** Multi-line text keeps its line breaks (screen content is laid out with them). */
@@ -228,7 +228,7 @@ export function buildPlanPrompt(inputs = {}) {
     '',
     'Work through these steps in this order.',
     '(a) QUESTIONS FROM THE POOL. Pick the questions from the pool below that this call will ask, for its length, as one believable interview in the order you mean to ask them. Never the whole pool and never a random draw. Each pool item shows timesAsked: how many earlier calls for this same job asked it. Favour questions that were never asked before. A staple, such as the background question, may repeat. When every question has been asked, favour the least asked. Choose by judgment. A pool item that starts with "[Technical topic, not a fixed question]" is a subject, not a question: pick it like any other item when the interview would test that subject, and the person who asks it makes up a fresh question or hands-on exercise on it for this call (write its prepared problem under (i) when it needs a shared screen). A real interview tests only a few technical subjects, so pick a few topics, not all of them.',
-    '(b) ONE QUESTION OF YOUR OWN. Besides the pool questions you picked, the plan has exactly one more question that is not in the pool, written by you. First read the WHOLE pool, every question, the ones you picked and the ones you left out, and note what ground each one covers. Then write one question that a real interviewer would realistically ask in this interview for this role and that covers ground none of the pool questions covers. It must not be a rewording, a narrower version or a follow-up of any pool question. Base it on the role, the company and the focus note below, never on what the application shows the candidate can or cannot answer. Write it as the interviewer would say it, 10 to 400 characters, in the "text" field of an entry with number 0. Put it where it fits most naturally in the order of questions, which is often not the end. It has an owner, minutes and probes like any other question. The candidate is never told which question this is, so do not mark it in any way inside the text.',
+    '(b) ONE QUESTION OF YOUR OWN. Besides the pool questions you picked, the plan has exactly one more question that is not in the pool, written by you. First read the WHOLE pool, every question, the ones you picked and the ones you left out, and note what ground each one covers. Then write one question that a real interviewer would realistically ask in this interview for this role and that covers ground none of the pool questions covers. It must not be a rewording, a narrower version or a follow-up of any pool question. Base it on the role, the company and the focus note below, never on what the application shows the candidate can or cannot answer. Write it as the interviewer would say it, in the "text" field of an entry with number 0. Put it where it fits most naturally in the order of questions, which is often not the end. It has an owner, minutes and probes like any other question. The candidate is never told which question this is, so do not mark it in any way inside the text.',
     '(c) THE LEAD\'S JOB TITLE. The lead is the person who OWNS this interview: the one who set it up and answers for the hiring decision or for running the process, such as the manager hiring for this seat, the lead of the team, or a recruiter. Decide the job title that person would really hold at this company for this role. Decide it FIRST, from who would own this interview, before you look at which questions you could cover. Never choose or stretch a title so that the lead can cover every question. The lead is not the practitioner who is brought in to assess one skill in depth (a hands-on exercise, a specific technology, a specialist discipline): when the call needs that person, they are a colleague.',
     '(d) WHO ELSE IS ON THE CALL. For each question you picked, including your own, ask whether a person with the lead\'s title would really ask it and could judge the answer in depth. The owner of an interview covers the candidate\'s history, motivation, how the candidate works with others and how the work was done. A hands-on exercise or a deep specialist question is asked and judged by someone who practises that specialty day to day. Group the questions the lead could not cover by the expertise they need. Each group is ONE colleague, whose focus is that group. If one person would really cover several groups, they hold them all. If nothing you picked is outside the lead\'s role, the call is solo and the panel is empty. Cast only for the questions you picked, never for the whole pool. Never state or assume a usual number of interviewers and never tie the number of people to the interview round or stage. If the candidate\'s focus note says who should be on the call, that overrides this reasoning. If more kinds of expertise are needed than there are colleagues available, the extra topics go to the closest colleague, who then holds several areas. You can use at most as many people as there are drawn voices.',
     '(e) FIT VOICES TO PEOPLE. The voices below are already drawn and are all you have: you can never ask for more, so make do with them. Choose which drawn voice is the lead and which are the colleagues by how each voice is described (its gender, age, accent and character), so that each person sounds like their role. Use each voice at most once. A drawn voice may stay unused.',
@@ -239,7 +239,7 @@ export function buildPlanPrompt(inputs = {}) {
     '',
     'THE CANDIDATE MAY NOT FIT THIS JOB. This interview is held whether or not the candidate would really have been invited: their background may match the role closely, partly or not at all. Plan the interview this company would really hold for this role, the same for any candidate. Choose the questions, your own question, the people on the call, the difficulty and the prepared problems from the role, the company and the focus note alone. Never pick, drop, soften or reword a question because of what the application shows the candidate has or has not done. The application is for the probes in (h) only, and a question the application does not cover simply gets probes from the question itself. Being asked about something the candidate has never done is a normal part of a real interview.',
     '',
-    'Also write interviewKind: what kind of interview this is and how it flows, in a sentence or two.',
+    'Also write interviewKind: what kind of interview this is and how it flows, in a sentence or two, at most 250 characters.',
     '',
     'Answer only with the structured plan. Use the voice keys exactly as listed under THE DRAWN VOICES for the lead, the panel and askedBy, and the question numbers exactly as in the pool. Your own question is the one entry with number 0 and a "text" field; pool questions never carry a "text" field.',
     '',
@@ -293,30 +293,28 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
   const poolNumbers = new Set((Array.isArray(pool) ? pool : []).map(item => item?.number));
   const voiceKeys = new Set((Array.isArray(voices) ? voices : []).map(voice => voice?.key));
 
-  const text = (value, path, min, max) => {
+  const text = (value, path, min) => {
     if (typeof value !== 'string') { bad(`${path} must be a string`); return ''; }
     const out = clean(value);
     if (out.length < min) bad(`${path} must be at least ${min} character${min === 1 ? '' : 's'}${min > 0 ? ' and is empty' : ''}`);
-    else if (out.length > max) bad(`${path} is ${out.length} characters long and the limit is ${max}`);
     return out;
   };
-  const block = (value, path, min, max) => {
+  const block = (value, path, min, max = Infinity) => {
     if (typeof value !== 'string') { bad(`${path} must be a string`); return ''; }
     const out = cleanBlock(value);
     if (out.length < min) bad(`${path} must not be empty`);
     else if (out.length > max) bad(`${path} is ${out.length} characters long and the limit is ${max}`);
     return out;
   };
-  const number = (value, path, lo, hi, { clampIt = false } = {}) => {
+  const number = (value, path, lo, hi = Infinity, { clampIt = false } = {}) => {
     if (typeof value !== 'number' || !Number.isFinite(value)) { bad(`${path} must be a number`); return lo; }
     if (clampIt) return clamp(value, lo, hi);
-    if (value < lo || value > hi) bad(`${path} is ${value} and must be between ${lo} and ${hi}`);
+    if (value < lo || value > hi) bad(hi === Infinity ? `${path} is ${value} and must be at least ${lo}` : `${path} is ${value} and must be between ${lo} and ${hi}`);
     return value;
   };
-  const strings = (value, path, maxItems, min, max) => {
+  const strings = (value, path) => {
     if (!Array.isArray(value)) { bad(`${path} must be an array`); return []; }
-    if (value.length > maxItems) bad(`${path} has ${value.length} items and the limit is ${maxItems}`);
-    return value.map((item, index) => text(item, `${path}[${index}]`, min, max));
+    return value.map((item, index) => text(item, `${path}[${index}]`, 1));
   };
   const voiceKey = (value, path, quietIfIn) => {
     if (typeof value !== 'string' || !VOICE_KEY.test(value.trim())) { bad(`${path} must be a voice key such as V1 (got ${JSON.stringify(value)})`); return ''; }
@@ -325,16 +323,16 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
     return key;
   };
 
-  const interviewKind = text(raw.interviewKind, 'interviewKind', 1, 300);
+  const interviewKind = text(raw.interviewKind, 'interviewKind', 1);
 
   const person = (value, path, extra) => {
     if (!isObject(value)) { bad(`${path} must be an object`); return null; }
-    const out = { voice: voiceKey(value.voice, `${path}.voice`), role: text(value.role, `${path}.role`, 1, 60) };
+    const out = { voice: voiceKey(value.voice, `${path}.voice`), role: text(value.role, `${path}.role`, 1) };
     extra(value, out);
     out.stability = number(value.stability, `${path}.stability`, STABILITY_MIN, STABILITY_MAX, { clampIt: true });
     out.room = number(value.room, `${path}.room`, 0, 1, { clampIt: true });
-    out.manner = text(value.manner === undefined ? '' : value.manner, `${path}.manner`, 0, 300);
-    out.interrupting = text(value.interrupting, `${path}.interrupting`, 1, INTERRUPTING_MAX);
+    out.manner = text(value.manner === undefined ? '' : value.manner, `${path}.manner`, 0);
+    out.interrupting = text(value.interrupting, `${path}.interrupting`, 1);
     return out;
   };
 
@@ -348,7 +346,7 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
   else {
     if (raw.panel.length > 4) bad(`panel has ${raw.panel.length} members and the limit is 4`);
     raw.panel.forEach((value, index) => {
-      const member = person(value, `panel[${index}]`, (v, out) => { out.focus = text(v.focus, `panel[${index}].focus`, 1, 200); });
+      const member = person(value, `panel[${index}]`, (v, out) => { out.focus = text(v.focus, `panel[${index}].focus`, 1); });
       if (member) panel.push(member);
     });
   }
@@ -384,13 +382,13 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
       else if (numbers.has(questionNumber)) bad(`${path}.number ${questionNumber} appears twice; each question may be picked once`);
       numbers.add(questionNumber);
       let ownText;
-      if (own) ownText = text(value.text, `${path}.text (the question you wrote)`, TEXT_MIN, TEXT_MAX);
+      if (own) ownText = text(value.text, `${path}.text (the question you wrote)`, TEXT_MIN);
       else if (value.text !== undefined) bad(`${path} is pool question ${JSON.stringify(questionNumber)} and must not carry a text field; only the entry with number 0 has one`);
       // A voice already reported on its person is not reported again on each question it asks.
       const askedBy = voiceKey(value.askedBy, `${path}.askedBy`, owners);
       if (peopleKnown && askedBy && voiceKeys.has(askedBy) && !owners.has(askedBy)) bad(`${path}.askedBy is ${askedBy}, who is neither the lead nor a panel member`);
-      const minutes = number(value.minutes, `${path}.minutes`, MINUTES_MIN, MINUTES_MAX);
-      const probes = value.probes === undefined ? [] : strings(value.probes, `${path}.probes`, 4, 1, 240);
+      const minutes = number(value.minutes, `${path}.minutes`, MINUTES_MIN);
+      const probes = value.probes === undefined ? [] : strings(value.probes, `${path}.probes`);
       questions.push(own ? { number: 0, text: ownText, askedBy, minutes, probes } : { number: questionNumber, askedBy, minutes, probes });
     });
     if (ownCount === 0) bad('questions must include exactly one question of your own: an entry with number 0 and a text field, on ground no pool question covers');
@@ -411,7 +409,6 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
   const problemsOut = [];
   if (!Array.isArray(raw.problems)) bad('problems must be an array (empty when no question needs the shared screen)');
   else {
-    if (raw.problems.length > 10) bad(`problems has ${raw.problems.length} items and the limit is 10`);
     const refs = new Set();
     const pickedNumbers = new Set(questions.map(question => question.number));
     raw.problems.forEach((value, index) => {
@@ -422,21 +419,20 @@ export function validatePlan(raw, { pool, voices, targetMinutes } = {}) {
       else if (refs.has(ref)) bad(`${path}.ref ${ref} is used twice; refs must be distinct`);
       refs.add(ref);
       if (questions.length > 0 && (!Number.isInteger(value.question) || !pickedNumbers.has(value.question))) bad(`${path}.question is ${JSON.stringify(value.question)}, which is not one of the picked questions (${[...pickedNumbers].join(', ')}; 0 is your own question)`);
-      const language = text(value.language === undefined ? '' : value.language, `${path}.language`, 0, 30);
+      const language = text(value.language === undefined ? '' : value.language, `${path}.language`, 0);
       const parts = [];
       if (!Array.isArray(value.parts) || value.parts.length < 1) bad(`${path}.parts must list at least one part`);
       else {
-        if (value.parts.length > 4) bad(`${path}.parts has ${value.parts.length} parts and the limit is 4`);
         value.parts.forEach((part, partIndex) => {
           const partPath = `${path}.parts[${partIndex}]`;
           if (!isObject(part)) { bad(`${partPath} must be an object`); return; }
           const visual = part.visual === undefined || part.visual === null ? null : planVisual(part.visual, `${partPath}.visual`, bad);
-          parts.push({ title: text(part.title, `${partPath}.title`, 1, 120), content: block(part.content, `${partPath}.content`, 1, 6000), ...(visual ? { visual } : {}) });
+          parts.push({ title: text(part.title, `${partPath}.title`, 1), content: block(part.content, `${partPath}.content`, 1, SCREEN_CONTENT_LIMIT), ...(visual ? { visual } : {}) });
         });
       }
-      const solution = block(value.solution, `${path}.solution`, 1, 6000);
-      const edgeCases = value.edgeCases === undefined ? [] : strings(value.edgeCases, `${path}.edgeCases`, 8, 1, 240);
-      const hints = value.hints === undefined ? [] : strings(value.hints, `${path}.hints`, 5, 1, 300);
+      const solution = block(value.solution, `${path}.solution`, 1);
+      const edgeCases = value.edgeCases === undefined ? [] : strings(value.edgeCases, `${path}.edgeCases`);
+      const hints = value.hints === undefined ? [] : strings(value.hints, `${path}.hints`);
       problemsOut.push({ ref, question: value.question, language, parts, solution, edgeCases, hints });
     });
     const visuals = problemsOut.reduce((sum, problem) => sum + problem.parts.filter(part => part.visual).length, 0);

@@ -7,6 +7,8 @@ import * as callPrompt from './interviewPracticeCallPrompt.js'; // formatWatchMe
 import { CUT_IN_OVERLAP_MS, fadeOutTail, firstSpeechSample, mixHeadInto, msSamples } from './practiceCall/audio/cutInMix.js';
 
 export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
+  // How many recent quick reactions a new one must not repeat (see repeatsRecentReaction); 0 turns the guard off.
+  reactionGuard: 3,
   speculateMs: 500,
   commitMs: 1200,
   interruptWords: 2,
@@ -125,6 +127,8 @@ const ACK_WORD_ESTIMATE_MS = 390;
 const ACK_TAIL_ESTIMATE_MS = 150;
 const JOIN_GAP_MIN_MS = 60;
 const LEADING_TAGS = /^(?:\s*\[[^\]]*\])+\s*/u;
+const INJECT_END_MS = 1500; // a candidate-voice line that finished this near a vad end is what that end was
+const RECENT_REACTIONS = 4; // spoken quick reactions kept for the opener message
 const SUPERSEDE_COVER = 0.9; // share of a volatile result's range a newer result must cover to replace it
 const MAX_SILENCE_CHECKS = 3; // unanswered check-ins before the interviewer gives up and the line drops
 const nonSpace = text => String(text ?? '').replace(/\s/g, '').length; // the overlay position unit: whitespace never counts
@@ -310,6 +314,11 @@ export function createPracticeCallEngine({
   let voicedHeld = false; // a voice line ended during a pause: the interviewer answers it on resume
   let cancelling = null; // reply stopped, waiting for the helper's cancelled event
   let overlap = null;
+  let recentReactions = []; // the last spoken quick reactions { speaker, text }, so the next one is not the same words again
+  // Candidate-voice lines are the engine's own audio, which the turn model scores by prosody and finds unfinished: when the
+  // vad end is theirs the verdict is sure. Clock ms of the last line heard whole; whether the current turn ended on one.
+  let injectFinishedAt = null;
+  let injectTurn = false;
   let audioHint = false; // Smart Turn said the candidate sounds unfinished: opener-only [audio: ...] hint
   // The answer text an "unfinished" verdict (<listen/>) judged at a turn end. The recogniser can still be finishing the
   // last words when the turn is looked at (found live on 2026-11-21: the look saw "...rather than be surpris", the
@@ -524,7 +533,7 @@ export function createPracticeCallEngine({
 
   /** After an unfinished verdict: one more look once the candidate has been quiet quietRelookMs from the vad end. */
   function armQuietRelook() {
-    if (quietRelookUsed || !(th.quietRelookMs > 0)) return;
+    if (quietRelookUsed || injectTurn || !(th.quietRelookMs > 0)) return; // an injected line is known to be over: nothing to wait out
     const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
     arm('quietRelook', Math.max(th.quietRelookMinGapMs, th.quietRelookMs - since), onQuietRelook);
   }
@@ -658,7 +667,7 @@ export function createPracticeCallEngine({
       reply.pausedAck = pausedAck;
       reply.messages = {
         // The short opening reaction never needs the pad's code or the unheard rest of a cut-off reply, so only the main message carries them.
-        ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint }) } : {}),
+        ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint, recentReactions: recentReactions.slice() }) } : {}),
       };
       if (!withOpener) reply.openerSettled = true;
     }
@@ -730,6 +739,10 @@ export function createPracticeCallEngine({
     unschedule(reply.openerTimer);
     reply.openerTimer = null;
     if (outcome === 'spoken') reply.ackText = stripAudioTags(written);
+    if (outcome === 'spoken' && written) {
+      recentReactions.push({ speaker: speakers ? castMember(reply.openSpeaker)?.name || 'Interviewer' : 'Interviewer', text: stripAudioTags(written).trim() });
+      recentReactions = recentReactions.slice(-RECENT_REACTIONS);
+    }
     emit({ type: 'opener', text: written, spoken: outcome === 'spoken', words, ms: Math.round(now() - reply.spec.at), outcome });
     if (outcome === 'listen') return;
     maybeStartMain(reply);
@@ -1310,6 +1323,22 @@ export function createPracticeCallEngine({
     return reply.typed && control === 'listen' ? 'pass' : control;
   }
 
+  /**
+   * The opener model copies and recombines the same few phrases however it is told not to (found live on 2026-11-21:
+   * "I hear you, thank you" three times, "Ah, lovely" twice). A reaction that thanks or says "lovely" right after one
+   * that did, or that begins with the same two words as one of the last few, is dropped: the main reply follows alone.
+   */
+  function repeatsRecentReaction(written) {
+    const count = Math.max(0, Math.floor(Number(th.reactionGuard) || 0));
+    const recent = count ? recentReactions.slice(-count) : [];
+    if (!recent.length) return false;
+    const words = line => wordKey(stripAudioTags(line)).split(' ').filter(Boolean);
+    const warm = line => /\b(thank you|thanks|lovely)\b/iu.test(line);
+    if (warm(written) && recent.some(item => warm(item.text))) return true;
+    const head = words(written).slice(0, 2).join(' ');
+    return head !== '' && recent.some(item => words(item.text).slice(0, 2).join(' ') === head);
+  }
+
   async function runOpener(reply) {
     for (let tries = 0; ; tries += 1) {
       if (current !== reply || reply.openerSettled) return;
@@ -1334,7 +1363,7 @@ export function createPracticeCallEngine({
         // The acknowledgement chooses its own length and is spoken as written, however long (the owner's call,
         // 2026-11-19: a word cap was arbitrary and untested). A bare delivery tag with no words makes no sound.
         const words = tokens(stripAudioTags(written)).length;
-        const spoken = words >= 1 ? written : '';
+        const spoken = words >= 1 && !repeatsRecentReaction(written) ? written : '';
         if (spoken) {
           sendVoice(reply, spoken);
           reply.openerChars = nonSpace(spoken);
@@ -2238,6 +2267,10 @@ export function createPracticeCallEngine({
     noteHelperTime(atMs);
     lastVadEndMs = atMs;
     disarm('silence');
+    // A pause inside a line the candidate's own voice is still playing is not the end of their turn: nothing is
+    // armed (a speculative reply would be thrown away, and a commit would talk over the line). The turn ends when
+    // the line finishes whole (endInjected arms the normal schedule from this vad end) or at the next vad end.
+    if (injecting) { injectTurn = true; disarm('spec'); disarm('commit'); return; }
     const since = Math.max(0, now() - (toClock(atMs) ?? now()));
     arm('spec', th.speculateMs - since, onSpeculate);
     arm('commit', th.commitMs - since, onCommitDue);
@@ -2248,7 +2281,15 @@ export function createPracticeCallEngine({
    * Smart Turn: ask the ear, right away, whether the audio that just ended sounds like a finished turn.
    * A held end pushes both timers out (still measured from the vad end) and flags the opener as unfinished audio.
    */
+  /** The vad end at atMs is the end of a line in the candidate's own injected voice, heard whole just now. */
+  function injectEnds(atMs) {
+    if (injectFinishedAt === null) return false;
+    return Math.abs(injectFinishedAt - (toClock(atMs) ?? now())) <= INJECT_END_MS;
+  }
+
   function requestEndOfTurn(atMs) {
+    injectTurn = false;
+    if (injectEnds(atMs)) { injectTurn = true; return; }
     if (typeof ear?.endOfTurn !== 'function') return;
     let settled = false;
     let timer = null;
@@ -2259,6 +2300,8 @@ export function createPracticeCallEngine({
       const value = typeof probability === 'number' && Number.isFinite(probability) ? probability : null;
       // Fenced against a stale answer: the candidate resumed, a newer vad end arrived, or the fast path already began.
       const stale = speaking || lastVadEndMs !== atMs || named.spec === null || current !== null;
+      // The line ended after the question was asked: still the engine's own audio, so the finish is sure.
+      if (!stale && injectEnds(atMs)) { injectTurn = true; return; }
       const held = value !== null && value < th.smartTurnHoldBelow && !stale;
       // An unsure finish: looked at as usual (a listen costs nothing yet) but committed later, so a thinking pause
       // after a complete sentence has more room before the interviewer speaks.
@@ -2282,11 +2325,11 @@ export function createPracticeCallEngine({
   }
 
   function onSpeculate() {
-    if (phase === 'listening' && !current && !said) beginSpoken();
+    if (phase === 'listening' && !current && !said && !injecting) beginSpoken();
   }
 
   function onCommitDue() {
-    if (said) return; // the candidate's own voice is still speaking: the turn ends when it does
+    if (said || injecting) return; // the candidate's own voice is still speaking: the turn ends when it does
     if (phase === 'listening' && !current && !beginSpoken()) return;
     if (current && !current.committed) { current.commitDue = true; tryCommit(current); }
   }
@@ -2665,6 +2708,8 @@ export function createPracticeCallEngine({
       speaking = true; // a bare sound postpones the check-in but is not an answer: the counters stay
       listenedText = null; // the candidate went on: their next pause is a turn end of its own, judged the normal way
       audioHint = false; // the candidate resumed: no stale Smart Turn hint
+      injectTurn = false;
+      if (!injecting) injectFinishedAt = null; // live speech after a line: its end is judged as live speech
       quietRelookUsed = false; // a new quiet stretch gets its own look
       quietHint = null;
       checkInAt = null;
@@ -2741,8 +2786,10 @@ export function createPracticeCallEngine({
    * The helper keys a result by the start of its audio range, and a later result for the same speech can start a little
    * earlier or later. A volatile result that a newer one covers is replaced, not kept beside it: found live on
    * 2026-11-21, where every sentence reached the interviewer twice ("First, prevention. First, prevention.").
-   * Only volatile results are dropped, and only when nearly all of their range lies under the new one: a longer volatile
-   * that runs past a final keeps its words until a result covers them.
+   * Only volatile results are dropped. A final replaces every volatile result that overlaps its range, even one that
+   * runs wider than the final or does not nest in it (found live again the same day: the real ranges did not nest, so
+   * the 90% cover test below kept both copies); a volatile that begins at or after the final's end is the next
+   * sentence and stays. A volatile event replaces only the volatile results it nearly covers.
    */
   function dropSupersededVolatile(event) {
     const start = Number(event.startMs);
@@ -2750,6 +2797,15 @@ export function createPracticeCallEngine({
     if (!Number.isFinite(start) || !Number.isFinite(end)) return;
     for (const [id, item] of segments) {
       if (id === event.segmentId || item.final || !Number.isFinite(item.startMs) || !Number.isFinite(item.endMs)) continue;
+      if (event.final) {
+        // A final replaces the guesses it is the settled version of: one that starts inside it, or one it covers at
+        // least half of (a guess may start a little before it or run past its end). A guess for the sentence before,
+        // which only touches the final's start, stays until its own final arrives.
+        const overlap = Math.min(end, item.endMs) - Math.max(start, item.startMs);
+        const inside = item.startMs >= start && item.startMs < end;
+        if (inside || (overlap > 0 && overlap >= (item.endMs - item.startMs) / 2)) segments.delete(id);
+        continue;
+      }
       const covered = Math.min(end, item.endMs) - Math.max(start, item.startMs);
       const length = item.endMs - item.startMs;
       const supersedes = length > 0 ? covered >= length * SUPERSEDE_COVER : item.startMs >= start && item.startMs < end;
@@ -3084,6 +3140,9 @@ export function createPracticeCallEngine({
       return injectLost(texts, tries);
     }
     injecting = utterance;
+    // Timers from a live pause just before this line must not fire while it plays (its first sound may be a moment away).
+    disarm('spec');
+    disarm('commit');
     utterance.stream = stream;
     utterance.sampleRate = stream.sampleRate;
     stream.onAudio(buffer => {
@@ -3139,6 +3198,18 @@ export function createPracticeCallEngine({
   }
 
   /** As candidateVoiceLost: the interviewer only ever hears the candidate, so a line the voice could not say is never passed on as text. */
+  /**
+   * A vad end that came while a line was still playing armed nothing (scheduleTurnEnd). When that line ends without
+   * being heard whole (cut, stalled or lost), the candidate's turn still has to end: it is scheduled now, the usual
+   * way, turn model included, since a cut line is not known to be a finished thought.
+   */
+  function resumeDeferredTurnEnd() {
+    if (!injectTurn || injecting || paused || phase !== 'listening' || current || speaking || lastVadEndMs === null) return false;
+    if (named.spec !== null || named.commit !== null || !candidateText()) return false;
+    scheduleTurnEnd(lastVadEndMs);
+    return true;
+  }
+
   function injectLost(texts, tries) {
     if (phase === 'ended') return;
     if (tries < 2) {
@@ -3147,6 +3218,7 @@ export function createPracticeCallEngine({
     }
     emit({ type: 'error', code: 'candidate-voice-failed' });
     if (injectQueue.length) return startInject();
+    if (resumeDeferredTurnEnd()) return;
     armSilence();
   }
 
@@ -3230,11 +3302,27 @@ export function createPracticeCallEngine({
       type: 'candidate-voice', state: whole ? 'finished' : 'cut', injected: true, heardChars: whole ? utterance.text.length : heard.length,
       ...(whole ? {} : { messages: heardByMessage([...utterance.texts, ...utterance.extraTexts], heard) }),
     });
+    if (whole) {
+      injectFinishedAt = now();
+      // The line's last vad end came while it was still playing (scheduleTurnEnd armed nothing then), or the turn model
+      // scored it before it finished: a line heard whole is a finished turn, so the timers start on the normal schedule,
+      // measured from that vad end. More lines waiting to be said mean the candidate is not done.
+      const deferred = injectTurn && named.spec === null && named.commit === null;
+      const hinted = audioHint && named.spec !== null;
+      if ((deferred || hinted) && !injectQueue.length && !paused && phase === 'listening' && !current && !speaking && lastVadEndMs !== null) {
+        audioHint = false;
+        injectTurn = true;
+        const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
+        arm('spec', th.speculateMs - since, onSpeculate);
+        arm('commit', th.commitMs - since, onCommitDue);
+      }
+    }
     if (paused || phase === 'ended') return;
     // A person who gave way to an interviewer does not start the next thing they meant to say over them: the rest
     // waits until the interviewer has finished (finishReply starts it).
     if (injectQueue.length && !(utterance.yielded && current)) return startInject();
     // The microphone path takes it from here: a turn ends on the vad end; if nothing was recognised the call waits as ever.
+    if (!whole && resumeDeferredTurnEnd()) return;
     if (phase === 'listening') armSilence();
   }
 

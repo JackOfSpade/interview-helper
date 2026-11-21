@@ -39,7 +39,7 @@ test('the prompt keeps the candidate in character and lets it make up what the d
   const prompt = draftAnswerPrompt(CONTEXT);
   assert(prompt.includes('Stay in character the whole time.'));
   assert(prompt.includes('never mention documents, notes'));
-  assert(prompt.includes('make up plausible, specific details'));
+  assert(prompt.includes('make up plausible, specific details that fit them, one or two, not a list'));
   assert(prompt.includes('consistent with the documents'));
   assert(!/do not invent/iu.test(prompt), 'no rule against inventing detail');
   assert(!/say so plainly/iu.test(prompt), 'no rule telling it to admit the documents lack an answer');
@@ -75,6 +75,44 @@ test('only the last 40 turns are kept', () => {
   assert.equal(lines.at(-1), 'Candidate: turn 59');
 });
 
+test('each interviewer line carries the name of who said it, a shared reply split by speaker', () => {
+  const participants = [{ id: 'A', name: 'Dana Whitfield' }, { id: 'B', name: 'John Park' }];
+  const transcript = [
+    { speaker: 'interviewer', speakerId: 'A', text: 'Welcome, I am Dana.' },
+    { speaker: 'interviewer', speakerId: 'A', text: 'Over to John.', segments: [{ speakerId: 'A', text: 'Over to John.' }, { speakerId: 'B', text: 'Tell me about a launch.' }] },
+    { speaker: 'candidate', text: 'Sure.' },
+    { speaker: 'interviewer', speakerId: 'B', text: 'Nice.', overlay: true },
+    { speaker: 'interviewer', text: 'No id.' },
+    { speaker: 'interviewer', speakerId: 'Z', text: 'Unknown id.' },
+  ];
+  assert.deepEqual(transcriptLines(transcript, { participants }), [
+    'Dana Whitfield: Welcome, I am Dana.',
+    'Dana Whitfield: Over to John.\nJohn Park: Tell me about a launch.',
+    'Candidate: Sure.',
+    'John Park: Nice.',
+    'Dana Whitfield: No id.',
+    'Dana Whitfield: Unknown id.',
+  ]);
+  assert.equal(transcriptLines([{ speaker: 'interviewer', text: 'Hi.' }], { participants: [{ id: 'A', name: 'Dana Whitfield' }] })[0], 'Dana Whitfield: Hi.', 'a solo call names its one interviewer');
+  assert.equal(transcriptLines([{ speaker: 'interviewer', text: 'Hi.' }])[0], 'Interviewer: Hi.', 'with no names known the line reads Interviewer');
+  const prompt = draftAnswerPrompt({ ...CONTEXT, participants, transcript });
+  assert(prompt.includes('John Park: Tell me about a launch.'));
+});
+
+test('the prompt fits the length to the kind of question without cutting realistic stories short', () => {
+  const prompt = draftAnswerPrompt(CONTEXT);
+  assert(prompt.includes('a story (situation, what you did, the result) in about 80 to 180 words'), 'a story keeps its usual length');
+  assert(prompt.includes('Never more than 250 words.'), 'the ceiling is unchanged');
+  assert(prompt.includes('A yes/no or one-fact question') && prompt.includes('no story'), 'a one-fact question gets a short direct answer');
+  assert(prompt.includes('A follow-up or clarifying question gets the answer first'), 'a follow-up does not start a new story');
+  assert(prompt.includes('"briefly", "quick one", "in a sentence"'), 'a request for brevity is honoured');
+});
+
+test('prepared answers are offered as ideas to take in a few sentences, not as scripts', () => {
+  const prompt = draftAnswerPrompt(CONTEXT);
+  assert(prompt.includes('<prepared-answers (your own notes; take the idea from one when it fits, in a few sentences, never the whole thing)>'));
+});
+
 test('cleanDraft drops a label and wrapping quotes and keeps within the chat limit at a sentence end', () => {
   assert.equal(cleanDraft('Reply: "Sure, happy to."'), 'Sure, happy to.');
   assert.equal(cleanDraft('Here is where I land.\n\nMy leading explanation is the meter.\n'), 'Here is where I land. My leading explanation is the meter.', 'spoken as one flowing reply');
@@ -83,6 +121,7 @@ test('cleanDraft drops a label and wrapping quotes and keeps within the chat lim
   const cleaned = cleanDraft(long);
   assert(cleaned.length <= DRAFT_ANSWER_MAX_CHARS);
   assert(cleaned.endsWith('.'));
+  assert.equal(DRAFT_ANSWER_MAX_CHARS, 2000);
 });
 
 test('draftCandidateAnswer sends the prompt with the signal and returns the cleaned text; empty or missing calls fail', async () => {

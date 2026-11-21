@@ -207,7 +207,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
     cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, voicedNoteWaitMs: 300,
-    candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60,
+    candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
   const source = fs.readFileSync(new URL('../../electron/interviewPracticeCallEngine.js', import.meta.url), 'utf8');
@@ -450,7 +450,8 @@ test('a volatile result that a newer one covers is replaced, so no sentence reac
   assert(message.endsWith("Candidate: 'First, prevention. During the pilot, I would run blanks. Second'"), message);
 });
 
-test('a volatile result that runs well past a final keeps its words', async () => {
+test('a volatile result that starts inside a final is replaced by it, its tail with it', async () => {
+  // The next result for the speech past the final carries those words; keeping the volatile kept every sentence twice.
   const rig = makeRig();
   await greet(rig);
   const start = rig.clock.now();
@@ -460,7 +461,90 @@ test('a volatile result that runs well past a final keeps its words', async () =
   await rig.clock.advance(300);
   rig.h.vad(false);
   await rig.clock.advance(600);
-  assert.match(rig.sessions.opener.calls[0].message, /so the rest was'$/, 'the words past the final are not lost');
+  assert.match(rig.sessions.opener.calls[0].message, /Candidate: 'I built a scheduler\.'$/);
+});
+
+test('a final replaces a volatile result that runs wider than it, so the sentence is stored once', async () => {
+  // Found live again on 2026-11-21: the real volatile range ran past its final, so the 90% cover test kept both copies.
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript("My day's going well thanks", 'v', start + 54000, false, start + 56000);
+  rig.h.transcript("My day's going well, thanks.", 'f', start + 54480, true, start + 55920);
+  // A volatile for the next sentence begins at the final's end: it stays.
+  rig.h.transcript('And you', 'n', start + 55920, false, start + 56300);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.endsWith("Candidate: 'My day's going well, thanks. And you'"), message);
+});
+
+test('a final keeps a guess for the sentence before it that only touches its start', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('I moved to Bristol last year', 'p', start + 50000, false, start + 54500);
+  rig.h.transcript('It has been great.', 'f', start + 54480, true, start + 55900);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.endsWith("Candidate: 'I moved to Bristol last year It has been great.'"), message);
+});
+
+test('realistic non-nesting volatile and final ranges leave each sentence once, in the opener message and the transcript', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('A bit nervous in the good way', 'v1', start + 100, false, start + 3000);
+  rig.h.transcript('A bit nervous in the good way because I have been looking forward', 'v2', start + 90, false, start + 4300);
+  rig.h.transcript('A bit nervous in the good way, because I have been looking forward to this.', 'f1', start + 400, true, start + 4000);
+  rig.h.transcript('Thanks for having me', 'v3', start + 4350, false, start + 5200);
+  rig.h.transcript('Thanks for having me.', 'f2', start + 4340, true, start + 5100);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.endsWith("Candidate: 'A bit nervous in the good way, because I have been looking forward to this. Thanks for having me.'"), message);
+  rig.sessions.opener.answer('Right.');
+  await flush();
+  rig.sessions.main.answer('Tell me more.');
+  rig.streams.at(-1).audio(3200);
+  await rig.clock.advance(1200);
+  const entry = rig.engine.state().transcript.find(item => item.speaker === 'candidate');
+  assert.equal(entry.text, 'A bit nervous in the good way, because I have been looking forward to this. Thanks for having me.');
+});
+
+test('the opener message lists the last four spoken reactions with their speaker; none before the first', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  const reactions = ['Right.', 'Mm-hm, okay.', 'Gotcha, fine.', 'Sure, yes.', 'No worries.'];
+  for (const reaction of reactions) await answerTurn(rig, 'Go on.', reaction);
+  const messages = rig.sessions.opener.calls.map(call => call.message);
+  assert(!messages[0].includes('recent reactions'), messages[0]);
+  assert(messages[1].includes("[Your recent reactions, do not reuse their words: Interviewer: 'Right.']"), messages[1]);
+  assert(messages[5 - 1].includes("Interviewer: 'Right.' Interviewer: 'Mm-hm, okay.' Interviewer: 'Gotcha, fine.' Interviewer: 'Sure, yes.'"), messages[4]);
+  assert.equal(rig.of('opener').at(-1).outcome, 'spoken');
+  assert(!rig.sessions.main.calls.at(-1).message.includes('recent reactions'), 'only the opener message carries the list');
+});
+
+test('an opener that thanks right after one that did, or starts like a recent one, is dropped without a re-roll', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await answerTurn(rig, 'Go on.', 'Okay, thank you.');
+  await answerTurn(rig, 'Go on.', 'Sure, thanks for that.');
+  await answerTurn(rig, 'Go on.', 'Ah, lovely.');
+  await answerTurn(rig, 'Go on.', 'Okay, got it.');
+  await answerTurn(rig, 'Go on.', 'Okay, got it again.'); // same first two words as a recent one
+  await answerTurn(rig, 'Go on.', 'Yeah, fine.');
+  assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text]), [
+    ['spoken', 'Okay, thank you.'], ['dropped', 'Sure, thanks for that.'], ['dropped', 'Ah, lovely.'], ['spoken', 'Okay, got it.'], ['dropped', 'Okay, got it again.'], ['spoken', 'Yeah, fine.'],
+  ]);
+  assert.equal(rig.sessions.opener.calls.length, 6, 'no re-roll');
 });
 
 test('listen from main after a finished line: the opener reaction is not spoken, nothing plays, the line stays unconsumed', async () => {
@@ -2099,7 +2183,7 @@ test('F14: the opener restarts at most once, an empty heard text leaves no entry
   whole.h.vad(false);
   await whole.clock.advance(600);
   assert.match(whole.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] Candidate: 'wait what do you mean'$/);
+    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] \[Your recent reactions, do not reuse their words: Interviewer: 'Right, got it\.'\] Candidate: 'wait what do you mean'$/);
 });
 
 test('G5: the cancel fallback timer resolves a stop when the helper never reports cancelled', async () => {
@@ -2261,7 +2345,7 @@ test('G6: resuming one millisecond before commit returns to listening and the ne
   rig.h.vad(false);
   await rig.clock.advance(600);
   assert.match(rig.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] Candidate: 'I built a scheduler and tested it'$/);
+    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] \[Your recent reactions, do not reuse their words: Interviewer: 'Right\.'\] Candidate: 'I built a scheduler and tested it'$/);
 });
 
 const lengthOf = list => list.reduce((sum, text) => sum + text.length, 0);

@@ -439,6 +439,58 @@ export default [
     },
   },
   {
+    name: 'practice call audio: response latency leaves out paused time and ignores overlay back-channels',
+    run() {
+      const question = { speaker: 'interviewer', text: 'Synthetic question.', startMs: 0, endMs: 20000 };
+      const answer = { speaker: 'candidate', text: 'Synthetic answer here.', startMs: 50000, endMs: 60000 };
+      const plain = callMetrics({ transcript: [question, answer] });
+      assert.equal(plain.answers[0].responseLatencyMs, 30000);
+      // A pause inside the gap (and one that starts before the question ended, and one after the answer began) counts only where it overlaps.
+      const paused = callMetrics({
+        transcript: [question, answer],
+        pauseSpans: [{ startMs: 25000, endMs: 45000 }, { startMs: 15000, endMs: 22000 }, { startMs: 49000, endMs: 70000 }],
+      });
+      assert.equal(paused.answers[0].responseLatencyMs, 30000 - 20000 - 2000 - 1000);
+      assert.equal(callMetrics({ transcript: [question, answer], pauseSpans: [{ startMs: 0, endMs: 100000 }] }).answers[0].responseLatencyMs, 0, 'clamped at zero');
+      // A colleague's "Hi" laid over the question ends mid-question: latency runs from the question's real end.
+      const overlaid = callMetrics({
+        transcript: [question, { speaker: 'interviewer', overlay: true, text: 'Hi.', startMs: 11000, endMs: 11000 }, answer],
+      });
+      assert.equal(overlaid.answers[0].responseLatencyMs, 30000);
+      const overlayFirst = callMetrics({
+        transcript: [{ speaker: 'interviewer', overlay: true, text: 'Hi.', startMs: 1000, endMs: 1000 }, question, answer],
+      });
+      assert.equal(overlayFirst.answers[0].responseLatencyMs, 30000);
+      // A back-channel from the candidate right after the question still measures from the question's end.
+      const acked = callMetrics({
+        transcript: [question, { speaker: 'candidate', acknowledgement: true, text: 'Mm-hm.', startMs: 20500, endMs: 21000 }, answer],
+      });
+      assert.equal(acked.answers.at(-1).responseLatencyMs, 30000);
+    },
+  },
+  {
+    name: 'practice call audio: an answer the AI voice gave is measured like any other answer',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Synthetic question one.', startMs: 0, endMs: 10000 },
+        { speaker: 'candidate', voiced: true, generated: true, text: 'Say it. Say it. Plan two words.', sentText: 'Say it. Plan two words.', startMs: 15000, endMs: 20000 },
+        { speaker: 'interviewer', text: 'Synthetic question two.', startMs: 21000, endMs: 30000 },
+        { speaker: 'candidate', text: 'one two three four five six', startMs: 33000, endMs: 39000 },
+      ];
+      const prosody = { 1: [{ speechMs: 4000, pitchRangeSt: 9, loudnessDb: -20, pauses: [{ startMs: 16000, endMs: 17500 }] }], 3: [{ speechMs: 5000, pauses: [] }] };
+      const metrics = callMetrics({ transcript, candidateProsodyByTurn: prosody, baselineSnapshot: { pitchRangeSt: 8, loudnessDb: -20 } });
+      const [generated] = metrics.answers;
+      assert.equal(generated.generatedOnly, undefined, 'no special flag');
+      assert.equal(generated.wordCount, 5, 'the known sent words, not the repeating recogniser text');
+      assert.equal(generated.responseLatencyMs, 5000);
+      assert.equal(generated.speechMs, 4000);
+      assert.equal(generated.pausesOver1s, 1);
+      assert.equal(metrics.responseLatencyMs, 4000, 'the median takes both answers');
+      assert.equal(metrics.pausesOver1s, 1);
+      assert.equal(metrics.candidateTalkMs, 9000, 'both answers count as talk time');
+    },
+  },
+  {
     name: 'practice call audio: only the file modules touch fs and every module has its contract export',
     run() {
       const source = name => fs.readFileSync(new URL(`../../electron/practiceCall/audio/${name}`, import.meta.url), 'utf8');
