@@ -53,7 +53,10 @@ test('the plan may ask for a visual on a screen part, checked and capped', () =>
   const partSchema = PLAN_SCHEMA.properties.problems.items.properties.parts.items;
   assert(partSchema.properties.visual && !partSchema.required.includes('visual'), 'the visual is optional in the schema');
   const prompt = buildPlanPrompt({ brief: { role: 'r' }, application: {}, pool, voices, targetMinutes: 10 });
-  assert(prompt.includes('ONLY when it makes that screen clearer') && prompt.includes('lunar surface'), 'the planner is told a visual is the exception');
+  assert(prompt.includes('Setting the scene is a good reason on its own') && prompt.includes('lunar surface') && prompt.includes('filming a bird on a remote river'), 'a scene-setting photo is asked for');
+  assert(prompt.includes('never add a visual as decoration'), 'code and abstract questions still get none');
+  const pick = pickPrompt({ screen: { title: 'The brief', content: 'Dippers on an upland river.' }, shows: 'a dipper', candidates: [{ title: 'Dipper' }] });
+  assert(pick.includes('or to set its scene') && pick.includes('even when the text already describes it'), 'the picker keeps a scene-setting photo');
 });
 
 test('Commons results become candidates: free licence, raster thumbnail, sensible size, best match first', () => {

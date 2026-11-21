@@ -2,8 +2,8 @@
  * Pictures and diagrams on the interviewer's prepared screens, made during setup so every screen is
  * ready before the call rings, as a real interviewer's would be.
  *
- * The planner decides, per screen part, whether a visual would make the question clearer than text
- * alone (most get none) and asks for one of two kinds:
+ * The planner decides, per screen part, whether a visual would make the question clearer or set its scene
+ * (a real place, animal or object to picture; never decoration on code or abstract questions) and asks for one of two kinds:
  * - picture: a photo found by Parallel's image search across the web (the owner's Parallel account,
  *   2026-11-21: the app is for personal use, so licences do not limit the choice), topped up from Wikimedia
  *   Commons when the web gives too few. Several candidates are downloaded and Claude looks at them with the
@@ -153,7 +153,7 @@ export const PICK_SCHEMA = Object.freeze({
 /** The prompt for choosing a picture among numbered candidates (the images go with it). */
 export function pickPrompt({ screen, shows, candidates }) {
   return [
-    'An interviewer is preparing a screen to share during a job interview. It may include one picture, but only if a picture genuinely makes the question clearer or illustrates it better than the text alone. You are shown candidate images found by an image search, numbered in order.',
+    'An interviewer is preparing a screen to share during a job interview. It may include one picture, to make the question clearer or to set its scene: a photo of the real place, animal, object or site the question is about helps the candidate picture it, as a real interviewer\'s photo would, even when the text already describes it. You are shown candidate images found by an image search, numbered in order.',
     '',
     '<screen>',
     `Title: ${screen.title}`,
