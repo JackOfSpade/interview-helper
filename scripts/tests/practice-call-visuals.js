@@ -35,7 +35,7 @@ test('the plan may ask for a visual on a screen part, checked and capped', () =>
   const voices = [{ key: 'V1', name: 'Alex', gender: 'female', age: '', accent: '', description: '' }];
   const pool = [{ number: 1, question: 'Could you live on the moon?', answer: '', timesAsked: 0 }];
   const plan = visual => ({
-    interviewKind: 'A screen.', lead: { voice: 'V1', role: 'Manager', temperament: 'neutral', stability: 0.3, room: 0.2, manner: 'Plain.' }, panel: [],
+    interviewKind: 'A screen.', lead: { voice: 'V1', role: 'Manager', temperament: 'neutral', stability: 0.3, room: 0.2, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }, panel: [],
     questions: [{ number: 1, askedBy: 'V1', minutes: 5, probes: [] }, { number: 0, text: 'What draws you to remote sites?', askedBy: 'V1', minutes: 5, probes: [] }],
     problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Moon base', content: 'Could you live here for a year?', ...(visual ? { visual } : {}) }], solution: 'Open.', edgeCases: [], hints: [] }],
   });
@@ -101,7 +101,7 @@ test('a picture is kept only when Claude, looking at the candidates, says one fi
   ];
   const made = await makeVisuals({
     parts, fetch,
-    pickText: async request => { picks.push(request); return { choice: 2, description: 'A grey, cratered plain under a black sky.' }; },
+    pickText: async request => { picks.push(request); return { choice: 2, description: 'A grey, cratered plain under a black sky.', lead: '  The photo above shows the lunar surface\n near the south pole.  ' }; },
     diagramText: async request => (request.prompt.includes('Unsafe.') ? { svg: '<svg viewBox="0 0 1 1"><script>x()</script></svg>', description: 'd' } : { svg: SVG, description: 'Two bars.' }),
   });
   assert.equal(picks.length, 1);
@@ -112,6 +112,9 @@ test('a picture is kept only when Claude, looking at the candidates, says one fi
   assert.equal(picture.kind, 'picture');
   assert.equal(picture.description, 'A grey, cratered plain under a black sky.');
   assert.equal(picture.credit, 'NASA, Public domain, via Wikimedia Commons');
+  assert.equal(picture.lead, 'The photo above shows the lunar surface near the south pole.', 'the sentence tying the screen to this picture, on one line');
+  assert(picks[0].prompt.includes('ties the question to this particular picture') && picks[0].schema.properties.lead, 'the pick is asked for a lead');
+  assert(!picks[0].schema.required.includes('lead'), 'a lead is optional');
   assert.equal(made.get('p2.1').svg, SVG);
   assert.equal(made.has('p3.1'), false, 'an unsafe drawing is left out');
   const none = await makeVisuals({ parts: [parts[0]], fetch, pickText: async () => ({ choice: 0, description: '' }) });

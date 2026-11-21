@@ -575,4 +575,101 @@ export default [
       assert.equal(h.events.length, 2, 'unknown states and bad fields are dropped');
     },
   },
+  {
+    name: 'interview practice audio: injection is offered only when the helper says ready with inject:true',
+    run() {
+      const h = started();
+      assert.equal(h.helper.canInject(), false, 'unknown capability is no injection');
+      assert.equal(h.helper.inject('line', 24000), false);
+      assert.equal(h.helper.injectAudio('line', pcm(4)), false);
+      assert.equal(h.helper.injectEnd('line'), false);
+      assert.equal(h.helper.injectCancel('line', 60), false);
+      assert.deepEqual(h.sent(), []);
+      h.send({ type: 'status', state: 'preparing', inject: true });
+      assert.equal(h.helper.canInject(), false, 'only the ready status carries it');
+      h.send({ type: 'status', state: 'ready' });
+      assert.equal(h.helper.canInject(), false, 'an older helper omits it');
+      h.send({ type: 'status', state: 'ready', inject: 'yes' });
+      assert.equal(h.helper.canInject(), false);
+      h.send({ type: 'status', state: 'ready', inject: true });
+      assert.equal(h.helper.canInject(), true);
+      assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true });
+      assert.deepEqual(h.events[0], { type: 'status', state: 'preparing' });
+      h.helper.stop();
+      assert.equal(h.helper.canInject(), false);
+    },
+  },
+  {
+    name: 'interview practice audio: inject commands validate ids, rate and chunking, and clamp the fade',
+    run() {
+      const h = started();
+      h.send({ type: 'status', state: 'ready', inject: true });
+      assert.throws(() => h.helper.inject('bad id', 24000), TypeError);
+      assert.throws(() => h.helper.inject('line', 48000), TypeError);
+      assert.throws(() => h.helper.injectAudio('line', pcm(3)), TypeError);
+      assert.throws(() => h.helper.injectAudio('line', 'x'), TypeError);
+      for (const rate of [16000, 24000, 44100]) assert.equal(h.helper.inject(`line${rate}`, rate), true);
+      assert.equal(h.helper.injectAudio('line44100', pcm(96000 * 2 + 10)), true);
+      assert.equal(h.helper.injectEnd('line44100'), true);
+      assert.equal(h.helper.injectCancel('line44100', 9999), true);
+      assert.equal(h.helper.injectCancel('line44100', -5), true);
+      assert.equal(h.helper.injectCancel('line44100'), true);
+      const lines = h.sent();
+      assert.deepEqual(lines.slice(0, 3).map(item => item.sampleRate), [16000, 24000, 44100]);
+      const audio = lines.filter(item => item.type === 'inject-audio');
+      assert.deepEqual(audio.map(item => Buffer.from(item.pcm, 'base64').length), [96000, 96000, 10], 'chunks of at most 96000 bytes');
+      assert.deepEqual(lines.filter(item => item.type === 'inject-cancel').map(item => item.fadeMs), [500, 0, 60]);
+      assert.equal(lines.filter(item => item.type === 'inject-end').length, 1);
+      assert(lines.every(item => item.type.startsWith('inject')));
+    },
+  },
+  {
+    name: 'interview practice audio: a new inject drops the queued audio of the one before, and a backed-up helper cancels the line locally',
+    run() {
+      const h = started();
+      h.send({ type: 'status', state: 'ready', inject: true });
+      h.children.at(-1).stdin.accept = false; // the helper stops reading
+      h.helper.inject('one', 24000);
+      h.helper.injectAudio('one', pcm(96000));
+      h.helper.inject('two', 24000);
+      h.children.at(-1).stdin.accept = true;
+      h.children.at(-1).stdin.emit('drain');
+      const lines = h.sent();
+      assert(!lines.some(item => item.type === 'inject-audio' && item.utteranceId === 'one' && lines.indexOf(item) > 1), 'the obsolete audio is not sent');
+      assert.deepEqual(lines.filter(item => item.type === 'inject').map(item => item.utteranceId), ['one', 'two']);
+      const full = started();
+      full.send({ type: 'status', state: 'ready', inject: true });
+      full.children.at(-1).stdin.accept = false;
+      full.helper.inject('big', 24000);
+      for (let i = 0; i < 50; i += 1) full.helper.injectAudio('big', pcm(96000));
+      const cancelled = full.events.find(event => event.type === 'inject' && event.state === 'cancelled');
+      assert.equal(cancelled.reason, 'backpressure');
+      assert.equal(cancelled.utteranceId, 'big');
+      assert.equal(full.helper.injectAudio('big', pcm(4)), false, 'the dropped line takes no more audio');
+    },
+  },
+  {
+    name: 'interview practice audio: inject events are validated, copied field by field and forwarded',
+    run() {
+      const h = started();
+      h.send({ type: 'inject', utteranceId: 'line', state: 'started', positionMs: 0, atMs: 100, extra: 'dropped' });
+      h.send({ type: 'inject', utteranceId: 'line', state: 'position', positionMs: 50, atMs: 150 });
+      h.send({ type: 'inject', utteranceId: 'line', state: 'cancelled', positionMs: 400, atMs: 500 });
+      h.send({ type: 'inject', utteranceId: 'line', state: 'finished', positionMs: 3000, atMs: 3100 });
+      assert.deepEqual(h.events, [
+        { type: 'inject', utteranceId: 'line', state: 'started', positionMs: 0, atMs: 100 },
+        { type: 'inject', utteranceId: 'line', state: 'position', positionMs: 50, atMs: 150 },
+        { type: 'inject', utteranceId: 'line', state: 'cancelled', positionMs: 400, atMs: 500 },
+        { type: 'inject', utteranceId: 'line', state: 'finished', positionMs: 3000, atMs: 3100 },
+      ]);
+      for (const value of [
+        { type: 'inject', utteranceId: 'line', state: 'paused', positionMs: 1, atMs: 1 },
+        { type: 'inject', utteranceId: 'bad id', state: 'started', positionMs: 1, atMs: 1 },
+        { type: 'inject', utteranceId: 'line', state: 'started', positionMs: -1, atMs: 1 },
+        { type: 'inject', utteranceId: 'line', state: 'started', positionMs: 1.5, atMs: 1 },
+        { type: 'inject', utteranceId: 'line', state: 'started', positionMs: 1 },
+      ]) h.send(value);
+      assert.equal(h.events.length, 4, 'malformed inject events are dropped');
+    },
+  },
 ];

@@ -21,6 +21,10 @@ export function practiceAudioHelperPath({ packaged = false, resourcesPath = proc
 
 const UTTERANCE_ID = /^[A-Za-z0-9_-]{1,64}$/u;
 const SAMPLE_RATES = Object.freeze([24000, 44100]);
+const INJECT_SAMPLE_RATES = Object.freeze([16000, 24000, 44100]);
+const INJECT_STATES = Object.freeze(['started', 'position', 'finished', 'cancelled']);
+const DEFAULT_INJECT_FADE_MS = 60;
+const MAX_INJECT_FADE_MS = 500;
 const MAX_PCM_CHUNK_BYTES = 96000; // base64 expands to 128000, far under the 262144-byte stdin line cap.
 const MAX_STDOUT_LINE_BYTES = 16384;
 const MAX_QUEUED_BYTES = 4 * 1024 * 1024;
@@ -37,7 +41,9 @@ function validateHelperEvent(value) {
   if (!isObject(value)) return null;
   switch (value.type) {
     case 'status':
-      return value.state === 'preparing' || value.state === 'ready' ? { type: 'status', state: value.state } : null;
+      // `inject: true` on ready: the helper can mix a line into the microphone signal. Anything else is no capability.
+      return value.state === 'preparing' || value.state === 'ready'
+        ? { type: 'status', state: value.state, ...(value.state === 'ready' && value.inject === true ? { inject: true } : {}) } : null;
     case 'level':
       return typeof value.rms === 'number' && value.rms >= 0 && value.rms <= 1 && isMs(value.atMs)
         ? { type: 'level', rms: value.rms, atMs: value.atMs } : null;
@@ -53,6 +59,9 @@ function validateHelperEvent(value) {
       return validId(value.utteranceId) && ['started', 'position', 'paused', 'resumed', 'finished', 'cancelled'].includes(value.state)
         && isMs(value.positionMs) && isMs(value.atMs)
         ? { type: 'playback', utteranceId: value.utteranceId, state: value.state, positionMs: value.positionMs, atMs: value.atMs } : null;
+    case 'inject':
+      return validId(value.utteranceId) && INJECT_STATES.includes(value.state) && isMs(value.positionMs) && isMs(value.atMs)
+        ? { type: 'inject', utteranceId: value.utteranceId, state: value.state, positionMs: value.positionMs, atMs: value.atMs } : null;
     case 'recording':
       return value.state === 'closed' && isMs(value.durationMs)
         ? { type: 'recording', state: 'closed', durationMs: value.durationMs } : null;
@@ -112,6 +121,12 @@ export function createPracticeAudioHelper({
     // The helper cannot keep up: give up on this utterance, never on controls.
     dropQueued(session, utteranceId);
     session.dropped.add(utteranceId);
+    if (payload.type === 'inject-audio') {
+      if (session.injectActive === utteranceId) session.injectActive = null;
+      send(session, 'control', utteranceId, { type: 'inject-cancel', utteranceId, fadeMs: 0 });
+      emit(session, { type: 'inject', utteranceId, state: 'cancelled', positionMs: 0, reason: 'backpressure' });
+      return;
+    }
     if (session.active === utteranceId) session.active = null;
     send(session, 'control', utteranceId, { type: 'cancel', utteranceId });
     emit(session, { type: 'playback', utteranceId, state: 'cancelled', reason: 'backpressure' });
@@ -156,7 +171,10 @@ export function createPracticeAudioHelper({
       return;
     }
     if (event.type === 'error') { fail(session, event.code); return; }
-    if (event.type === 'status') state = { status: event.state === 'ready' ? 'ready' : 'starting', errorCode: null, message: '' };
+    if (event.type === 'status') {
+      state = { status: event.state === 'ready' ? 'ready' : 'starting', errorCode: null, message: '' };
+      if (event.state === 'ready') session.canInject = event.inject === true;
+    }
     deliver(event);
   };
   const attachStdout = session => {
@@ -195,7 +213,7 @@ export function createPracticeAudioHelper({
     generation += 1;
     // A new session fences everything the previous one still had in flight.
     stopping = null;
-    const session = { token: generation, child: null, queue: [], queuedBytes: 0, blocked: false, active: null, dropped: new Set() };
+    const session = { token: generation, child: null, queue: [], queuedBytes: 0, blocked: false, active: null, injectActive: null, canInject: false, dropped: new Set() };
     let child;
     try {
       child = spawn(helperPath, ['--parent-pid', String(process.pid), '--locale', 'en-US', '--recording', recordingPath], {
@@ -297,5 +315,49 @@ export function createPracticeAudioHelper({
     return true;
   };
 
-  return Object.freeze({ start, play, pause, resume, pushAudio, endUtterance, cancel, mute, stop, state: () => ({ ...state }) });
+  // ---- injection: a line mixed into the microphone signal (helper status ready with inject:true) ----
+  const canInject = () => !!current && current.canInject === true;
+  const inject = (utteranceId, sampleRate) => {
+    requireId(utteranceId);
+    if (!INJECT_SAMPLE_RATES.includes(sampleRate)) throw new TypeError('sampleRate must be 16000, 24000 or 44100.');
+    const session = current;
+    if (!session || !session.canInject) return false; // unknown capability: no injection
+    // A new inject cancels the active one in the helper; its queued audio is obsolete.
+    if (session.injectActive) dropQueued(session, session.injectActive);
+    session.injectActive = utteranceId;
+    session.dropped.delete(utteranceId);
+    send(session, 'control', utteranceId, { type: 'inject', utteranceId, sampleRate });
+    return true;
+  };
+  const injectAudio = (utteranceId, pcm) => {
+    requireId(utteranceId);
+    if (!Buffer.isBuffer(pcm) || pcm.length % 2 !== 0) throw new TypeError('pcm must be a Buffer of 16-bit samples with an even length.');
+    const session = current;
+    if (!session || !session.canInject || session.dropped.has(utteranceId)) return false;
+    for (let offset = 0; offset < pcm.length; offset += MAX_PCM_CHUNK_BYTES) {
+      if (!live(session) || session.dropped.has(utteranceId)) return false;
+      const chunk = pcm.subarray(offset, Math.min(offset + MAX_PCM_CHUNK_BYTES, pcm.length));
+      send(session, 'audio', utteranceId, { type: 'inject-audio', utteranceId, pcm: chunk.toString('base64') });
+    }
+    return true;
+  };
+  const injectEnd = utteranceId => {
+    requireId(utteranceId);
+    const session = current;
+    if (!session || !session.canInject || session.dropped.has(utteranceId)) return false;
+    send(session, 'end', utteranceId, { type: 'inject-end', utteranceId });
+    return true;
+  };
+  const injectCancel = (utteranceId, fadeMs = DEFAULT_INJECT_FADE_MS) => {
+    requireId(utteranceId);
+    const session = current;
+    if (!session || !session.canInject) return false;
+    const fade = Number.isFinite(fadeMs) ? Math.round(Math.min(MAX_INJECT_FADE_MS, Math.max(0, fadeMs))) : DEFAULT_INJECT_FADE_MS;
+    dropQueued(session, utteranceId);
+    if (session.injectActive === utteranceId) session.injectActive = null;
+    send(session, 'control', utteranceId, { type: 'inject-cancel', utteranceId, fadeMs: fade });
+    return true;
+  };
+
+  return Object.freeze({ start, play, pause, resume, pushAudio, endUtterance, cancel, mute, canInject, inject, injectAudio, injectEnd, injectCancel, stop, state: () => ({ ...state }) });
 }

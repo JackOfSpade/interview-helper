@@ -353,6 +353,8 @@ if (!app.requestSingleInstanceLock()) {
           draftText: practiceDraftText,
           // Sent chat messages are spoken in the candidate's own voice (off in the unit suites).
           candidateVoices: true,
+          // A warm cut-in watcher session that decides, from the last seconds of an answer, whether the interviewer would cut in (off in the unit suites).
+          watcher: true,
           candidateTagText: practiceCandidateTagText,
           candidateVoiceGender: () => practiceVoice?.read(),
           // Pictures and diagrams on the prepared shared screens (off in the unit suites).

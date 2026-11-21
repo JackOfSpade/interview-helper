@@ -29,6 +29,8 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_SVG_CHARS = 60000;
 export const VISUALS_BUDGET_MS = 90000;
 const DESCRIPTION_MAX = 400;
+// The sentence a chosen picture adds to the top of its screen's text.
+const LEAD_MAX = 240;
 const IMAGE_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
 // Free licences found on Commons; anything else (an unusual or missing licence) is skipped.
 const FREE_LICENCE = /public domain|^pd\b|cc0|cc[ -]?by|creative commons|gfdl|attribution/iu;
@@ -144,6 +146,7 @@ export const PICK_SCHEMA = Object.freeze({
   properties: {
     choice: { type: 'integer', minimum: 0, maximum: CANDIDATES, description: 'The number of the image to show, or 0 for none.' },
     description: { type: 'string', maxLength: DESCRIPTION_MAX, description: 'What the chosen image shows, for the interviewer; empty when none.' },
+    lead: { type: 'string', maxLength: LEAD_MAX, description: 'One short sentence for the top of the screen text that ties the question to this exact image; empty when the text already fits it or for none.' },
   },
 });
 
@@ -164,7 +167,8 @@ export function pickPrompt({ screen, shows, candidates }) {
     '',
     'First, rule out every image with ANY watermark: a stock-agency name or logo across or in a corner of the image, a repeated faint pattern, a "preview" or "sample" stamp, an image ID strip, or any text laid over the photo that is not part of the scene itself. Look closely: a faint or partly hidden watermark still rules the image out. A watermarked picture on an interviewer\'s screen looks unprofessional, so it is never acceptable, however well it fits.',
     'Then choose the one remaining image that best shows what is meant, if one really does. Choose 0 when none fits well: the wrong subject, misleading for the question, poor quality, mostly text, a logo or brand, people who could be identified in an unflattering way, or anything graphic or unsuitable for a professional interview. A screen without a picture is fine; a poor picture is worse than none.',
-    'Reply with JSON: choice (the image number, or 0) and description (one or two plain sentences on what the chosen image shows, which the interviewer will read so they can talk about it; empty for 0).',
+    'Reply with JSON: choice (the image number, or 0), description (one or two plain sentences on what the chosen image shows, which the interviewer will read so they can talk about it; empty for 0) and lead.',
+    'lead: the screen text was written before any picture was found, so on its own it can read as if the picture were an afterthought. Write one short sentence, in the screen\'s own voice, that goes at the top of its text and ties the question to this particular picture, so the screen reads as if it was made around it ("The photo above shows a habitat module on a lunar analogue site in Hawaii; picture yourself living in one for a year."). State only what is plainly visible in the image or certain from its title and page, never a guess about where or what it is, and change nothing about the question itself. Leave it empty when the text already fits the picture, when you are not sure what exactly it shows, or for 0.',
   ].join('\n');
 }
 
@@ -249,6 +253,8 @@ export async function makeVisuals({ parts = [], fetch: fetchImpl, searchImages =
         made.set(part.id, {
           kind: 'picture', mime: chosen.mime, data: chosen.data, width: chosen.width, height: chosen.height,
           description: clip(reply.description || chosen.about || chosen.title, DESCRIPTION_MAX),
+          // The sentence that makes the screen read as written around this picture; it goes above the text.
+          ...(typeof reply.lead === 'string' && reply.lead.trim() ? { lead: clip(reply.lead.replace(/\s+/gu, ' '), LEAD_MAX) } : {}),
           // A Commons file is credited as its licence asks; a web image carries no credit line, like a presenter's own slide.
           ...(chosen.source === 'commons' ? { credit: `${chosen.author ? `${chosen.author}, ` : ''}${chosen.licence}, via Wikimedia Commons` } : {}),
           source: chosen.pageUrl,

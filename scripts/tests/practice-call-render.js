@@ -81,6 +81,34 @@ const REPLAY = {
   analysis: { status: 'ready' },
 };
 
+// A call with feedback the matcher can place: one planned question asked in chapter 1, a small-talk moment in chapter 0.
+const REPLAY_FEEDBACK = {
+  ...REPLAY,
+  persona: { name: 'Dana Whitfield', role: 'Hiring manager' },
+  panel: [],
+  transcript: [
+    { role: 'interviewer', speakerId: 'A', text: 'Hi, how has your day been so far?', startMs: 2_000, endMs: 8_000 },
+    { role: 'candidate', text: 'Good, thanks.', startMs: 10_000, endMs: 14_000 },
+    { role: 'interviewer', speakerId: 'A', text: 'Tell me about onboarding.', startMs: 120_000, endMs: 135_000 },
+    { role: 'candidate', text: 'We rewrote the first-run flow.', startMs: 135_000, endMs: 200_000 },
+  ],
+  chapters: [
+    { title: 'Small talk', questionTurnIndex: 0, startMs: 0, endMs: 120_000, markers: [{ kind: 'pause', label: 'Long pause', atMs: 30_000 }] },
+    { title: 'Onboarding story', questionTurnIndex: 2, startMs: 120_000, endMs: 420_000, markers: [{ kind: 'interruption', label: 'Talked over', atMs: 180_000 }] },
+    { title: 'Your questions', questionTurnIndex: null, startMs: 420_000, endMs: 600_000, markers: [] },
+  ],
+  feedback: {
+    overall: { score: 7, summary: 'Clear story. Tidy close. A third sentence that the overview cuts. A fourth one.' },
+    priorities: ['Name the metric first.', 'Cut the preamble.', 'Close on the ask.', 'A fourth priority that stays out of the overview.'],
+    planned: [
+      { question: 'Tell me about a time you onboarded users.', asked: true, askedAs: 'Tell me about onboarding.', score: 9, covered: 'You named the first-run flow.', improve: 'Give the activation number.', adapted: 'You shortened it for the time left.', extension: 'Mention the pilot with two teams.' },
+    ],
+    moments: [{ kind: 'small-talk', prompt: 'Hi, how has your day been so far?', score: 4, note: 'Warm, but you left the plan unconfirmed.' }],
+    delivery: { wpm: { cited: '168 words per minute' }, pauseCount: 3 },
+  },
+  analysis: { status: 'ready' },
+};
+
 const MARKERS_BY_KIND = ['data-marker-kind="pause"', 'data-marker-kind="interruption"'];
 
 const PRESENT_STATE = {
@@ -279,7 +307,7 @@ export const presentingTests = [
     },
   },
   {
-    name: 'practice call render: the replay shows the screen and pad current at the playback time, and nothing without them',
+    name: 'practice call render: the replay shows the screen and pad current at the playback time beside the feedback, and nothing without them',
     async run() {
       const bundle = await loadServerBundle();
       try {
@@ -291,13 +319,15 @@ export const presentingTests = [
         };
         const at = ms => renderToStaticMarkup(React.createElement(Replay, { replay, api: {}, initialPositionMs: ms }));
         const early = at(50_000);
-        assert(early.includes('data-replay-share-empty="screen"') && early.includes('data-replay-share-empty="pad"') && !early.includes('Problem one'), 'before any screen the area is there, empty, so the layout does not jump later');
-        assert(!at(200_000).includes('data-replay-share-empty'), 'nothing is marked empty while both are shown');
+        assert(!early.includes('data-replay-share') && !early.includes('Problem one') && !early.includes('data-coding-pad'), 'before any screen or code nothing shared is shown');
         const mid = at(200_000);
-        assert(mid.includes('Problem one') && mid.includes('John Park (Presentation)') && mid.includes('def rev(xs):') && mid.includes('data-coding-pad="readonly"'), 'mid call shows the first screen and snapshot');
+        assert(mid.includes('data-replay-share="true"') && mid.includes('Problem one') && mid.includes('John Park (Presentation)') && mid.includes('def rev(xs):') && mid.includes('data-coding-pad="readonly"'), 'mid call shows the first screen and snapshot beside the feedback');
+        assert(mid.includes('min-[1000px]:grid-cols-2'), 'wide windows put the share beside the feedback, narrow ones stack it');
         assert(!mid.includes('Problem two'), 'only the current screen');
         const late = at(500_000);
         assert(late.includes('Problem two') && late.includes('Dana Whitfield (Presentation)') && late.includes('def merge(a, b):') && !late.includes('def rev'), 'late call shows the second screen and the latest snapshot');
+        const screenOnly = renderToStaticMarkup(React.createElement(Replay, { replay: { ...replay, pad: { lang: '', snapshots: [] } }, api: {}, initialPositionMs: 200_000 }));
+        assert(screenOnly.includes('Problem one') && !screenOnly.includes('data-coding-pad'), 'the coding pad shows only when the call had pad snapshots');
         assert(screenMarkup.screenAt([{ atMs: 0, endMs: 10 }], 10) === null, 'a screen ended at the time is gone');
         // Pad keys: Tab writes two spaces, Enter keeps the indentation of the line it leaves.
         assert(screenMarkup.padKeyInsert('Tab', 'x') === '  ', 'tab is two spaces');
@@ -552,58 +582,68 @@ export default [
     },
   },
   {
-    name: 'practice call render: replay binds the recording, draws chapter segments and marker ticks, and seeks from chapters, markers and transcript',
+    name: 'practice call render: replay binds the recording, docks the player and puts the part under the playhead front and center',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, Replay } = bundle.module;
-        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: { deleteRecording: async () => {} }, initialPositionMs: 140_000 }));
+        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY_FEEDBACK, api: { deleteRecording: async () => {} }, initialPositionMs: 140_000 }));
         for (const fragment of [
           'aria-label="Call replay"', '<audio', 'src="file:///tmp/practice-calls/call-dana-1.wav"', 'aria-label="Call recording"',
-          'aria-label="Play recording"', 'role="slider"', 'aria-valuemax="600000"', 'aria-valuenow="140000"', 'aria-valuetext="2:20 of 10:00, Onboarding story"',
-          'data-chapter="0"', 'data-chapter="1"', 'data-chapter="2"', 'style="left:20%;width:calc(50% - 2px);transform:scaleY(0.6)"',
-          ...MARKERS_BY_KIND,
-          'aria-label="Seek to Onboarding story at 2:00"', 'aria-label="Seek to Talked over at 3:00"', 'aria-label="Seek to We rewrote the first-run flow. at 2:15"',
-          'aria-label="Delete recording"', 'aria-label="Call transcript"', 'data-current-turn="true"', 'data-current-turn="false"',
-          'aria-label="Feedback"', 'data-testid="practice-feedback"', 'aria-label="Delivery"', '168 words per minute', 'pause count',
+          'aria-label="Play recording"', 'aria-label="Back 10 seconds"', 'aria-label="Forward 10 seconds"', 'aria-label="Previous part"', 'aria-label="Next part"', 'aria-label="Speed 1.25x"', 'aria-label="Speed 2x"',
+          'role="slider"', 'aria-valuemax="600000"', 'aria-valuenow="140000"', 'aria-valuetext="2:20 of 10:00, Onboarding story"',
+          'data-chapter="0"', 'data-chapter="1"', 'data-chapter="2"', 'style="left:20%;width:max(2px, calc(50% - 2px))"',
+          ...MARKERS_BY_KIND, 'aria-label="Delete recording"', 'aria-label="Overview"',
+          'data-replay-focus="true"', 'data-focus-mode="part"', 'aria-live="polite"', 'data-focus-title="true"',
+          'data-part-now="answer"', 'Asked by', 'Dana Whitfield', 'Hiring manager',
+          'What worked', 'You named the first-run flow.', 'Work on', 'Give the activation number.', 'Adapting', 'You shortened it for the time left.', 'Optional extension', '9<span',
         ]) assert(markup.includes(fragment), `replay view is missing ${fragment}`);
-        const bar = markup.slice(markup.indexOf('aria-label="Replay position"'), markup.indexOf('class="flex min-w-0 items-baseline'));
-        assert(bar.length > 0, 'the seek bar must render before the time row');
-        assert(!bar.includes('title='), 'the seek bar must not fall back to native title tooltips');
-        const selected = markup.slice(markup.indexOf('data-current-turn="true"'));
-        assert(selected.includes('We rewrote the first-run flow.'), 'the turn under the playhead must be the highlighted one');
-        assert(markup.indexOf('data-current-turn="true"') > markup.indexOf('data-current-turn="false"'), 'only the turn containing the playhead is current');
+        assert(markup.indexOf('data-replay-focus') < markup.indexOf('data-replay-player'), 'the player is docked below the focus area');
+        assert(markup.includes('data-replay-announce="true"') && /data-replay-announce="true">Onboarding story</.test(markup), 'the live region announces the part title');
+        assert(!/Transcript|Call transcript|data-current-turn|Chapters/.test(markup), 'no transcript and no chapter list');
+        assert(!markup.includes('Clear story.') && !markup.includes('Work on first'), 'the overview is not shown while a part is in focus');
         assert(!markup.includes('role="alertdialog"'), 'delete must stay behind a confirm step');
+        const moment = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY_FEEDBACK, api: {}, initialPositionMs: 5_000 }));
+        assert(moment.includes('data-feedback-kind="moment"') && moment.includes('Small talk') && moment.includes('Warm, but you left the plan unconfirmed.') && moment.includes('data-score-badge="low"'), 'a moment shows its kind, score and note');
+        assert(moment.includes('data-part-now="question"'), 'before the candidate answers the part is the question');
+        const bare = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY_FEEDBACK, api: {}, initialPositionMs: 500_000 }));
+        assert(bare.includes('data-feedback-empty="true"') && bare.includes('No notes for this part'), 'a part with no feedback says so');
+        const noFeedback = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY_FEEDBACK, feedback: null }, api: {}, initialPositionMs: 140_000 }));
+        assert(noFeedback.includes('Onboarding story') && !noFeedback.includes('No notes for this part') && !noFeedback.includes('What worked'), 'without feedback the focus shows just the part title');
+        const noItem = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY_FEEDBACK, feedback: { ...REPLAY_FEEDBACK.feedback, planned: [{ ...REPLAY_FEEDBACK.feedback.planned[0], adapted: '' }] } }, api: {}, initialPositionMs: 140_000 }));
+        assert(!noItem.includes('Adapting'), 'Adapting is only shown when present');
       } finally { await bundle.dispose(); }
     },
   },
   {
-    name: 'practice call render: the replay is height-bounded with the header and player outside two independent scroll regions',
+    name: 'practice call render: the replay is height-bounded with a slim header, one scrolling focus area and the player docked at the bottom',
     async run() {
       const bundle = await loadServerBundle();
-      const { React, renderToStaticMarkup, Replay } = bundle.module;
-      const html = replay => renderToStaticMarkup(React.createElement(Replay, { replay, api: {} }));
-      const withFeedback = html({ ...REPLAY, feedback: { overall: { score: 7, summary: 'Good call.' } } });
-      const tag = (markup, marker) => { const at = markup.indexOf(marker); return markup.slice(markup.lastIndexOf('<', at), markup.indexOf('>', at) + 1); };
-      const root = tag(withFeedback, 'data-replay-root');
-      assert(root.includes('h-screen') && root.includes('overflow-hidden') && root.includes('flex-col') && !root.includes('min-h-screen'), 'the replay root is exactly one window tall and does not grow');
-      assert(tag(withFeedback, 'data-replay-body').includes('min-h-0') && tag(withFeedback, 'data-replay-body').includes('flex-1'), 'the body takes the remaining height and may shrink');
-      for (const kind of ['feedback', 'chapters']) {
-        const region = tag(withFeedback, `data-replay-scroll="${kind}"`);
-        assert(region.includes('overflow-y-auto') && region.includes('min-h-0') && region.includes('pc-scroll-hidden') && region.includes('tabindex="0"') && region.includes('aria-label='), `the ${kind} column scrolls on its own, has no scrollbar and is keyboard reachable`);
-      }
-      assert((withFeedback.match(/data-replay-scroll=/g) || []).length === 2, 'two scroll regions');
-      const scrollAt = withFeedback.indexOf('data-replay-scroll="feedback"');
-      assert(withFeedback.indexOf('<header') < scrollAt && withFeedback.indexOf('data-replay-player') > scrollAt && withFeedback.indexOf('data-replay-player') < withFeedback.indexOf('data-replay-scroll="chapters"'), 'header and player strip sit outside the scroll regions');
-      assert(!tag(withFeedback, 'data-replay-player').includes('overflow'), 'the player strip never scrolls');
-      const plain = html({ ...REPLAY, audioUrl: null, feedback: null, analysis: null });
-      assert((plain.match(/data-replay-scroll=/g) || []).length === 1 && plain.includes('data-replay-scroll="chapters"'), 'with no feedback one region scrolls; with no recording the strip still renders');
-      const css = await fs.readFile(path.join(ROOT, 'src/index.css'), 'utf8');
-      assert(/\.pc-scroll-hidden\s*\{[^}]*scrollbar-width:\s*none/.test(css) && /\.pc-scroll-hidden::-webkit-scrollbar\s*\{[^}]*display:\s*none/.test(css), 'the scrollbar is hidden by css');
+      try {
+        const { React, renderToStaticMarkup, Replay } = bundle.module;
+        const html = replay => renderToStaticMarkup(React.createElement(Replay, { replay, api: {} }));
+        const withFeedback = html(REPLAY_FEEDBACK);
+        const tag = (markup, marker) => { const at = markup.indexOf(marker); return markup.slice(markup.lastIndexOf('<', at), markup.indexOf('>', at) + 1); };
+        const root = tag(withFeedback, 'data-replay-root');
+        assert(root.includes('h-screen') && root.includes('overflow-hidden') && root.includes('flex-col') && !root.includes('min-h-screen'), 'the replay root is exactly one window tall and does not grow');
+        const region = tag(withFeedback, 'data-replay-focus');
+        assert(region.includes('overflow-y-auto') && region.includes('min-h-0') && region.includes('flex-1') && region.includes('pc-scroll-hidden') && region.includes('tabindex="0"') && region.includes('aria-label='), 'the focus area takes the height, scrolls on its own, has no scrollbar and is keyboard reachable');
+        assert((withFeedback.match(/overflow-y-auto/g) || []).length === 1, 'only the focus area scrolls');
+        assert(withFeedback.indexOf('<header') < withFeedback.indexOf('data-replay-focus') && withFeedback.indexOf('data-replay-focus') < withFeedback.indexOf('data-replay-player'), 'header, focus area, player: top to bottom');
+        const player = tag(withFeedback, 'data-replay-player');
+        assert(player.includes('shrink-0') && !player.includes('overflow'), 'the player strip never scrolls or shrinks');
+        assert(/aria-label="Play recording"[^>]*data-play-button="true"[^>]*class="[^"]*h-14 w-14[^"]*rounded-full/.test(withFeedback), 'the play button is large and round');
+        assert(/data-timeline="true"[^>]*class="[^"]*py-3/.test(withFeedback) && withFeedback.includes('relative h-12 w-full'), 'the timeline bar is a tall 48px target');
+        const plain = html({ ...REPLAY, audioUrl: null, feedback: null, analysis: null });
+        assert(plain.includes('data-replay-focus') && plain.includes('data-replay-player') && plain.includes('aria-disabled="true"'), 'with no recording the player still renders, its timeline disabled');
+        const css = await fs.readFile(path.join(ROOT, 'src/index.css'), 'utf8');
+        assert(/\.pc-scroll-hidden\s*\{[^}]*scrollbar-width:\s*none/.test(css) && /\.pc-scroll-hidden::-webkit-scrollbar\s*\{[^}]*display:\s*none/.test(css), 'the scrollbar is hidden by css');
+        assert(/prefers-reduced-motion[\s\S]*?\.pc-fade[^{]*\{[^}]*animation:\s*none/u.test(css), 'the part transition respects reduced motion');
+      } finally { await bundle.dispose(); }
     },
   },
   {
-    name: 'practice call render: replay reports analysing, failed analysis and a deleted recording without losing the transcript',
+    name: 'practice call render: replay reports analysing, failed analysis and a deleted recording and keeps the feedback overview',
     async run() {
       const bundle = await loadServerBundle();
       try {
@@ -612,12 +652,12 @@ export default [
         assert(analysing.includes('aria-label="Analysis status"') && analysing.includes('Analysis is still running'), 'an analysing call must say the analysis is still running');
         const failed = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, analysis: { status: 'failed', error: 'Tone model unavailable' } }, api: {} }));
         assert(failed.includes('role="alert"') && failed.includes('aria-label="Analysis failed"') && failed.includes('Tone model unavailable'), 'a failed analysis must surface the error');
-        assert(failed.includes('Tell me about onboarding.'), 'a failed analysis keeps the transcript available');
-        const deleted = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, audioUrl: null }, api: {} }));
+        const deleted = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY_FEEDBACK, audioUrl: null }, api: {} }));
         assert(deleted.includes('aria-label="Recording unavailable"') && deleted.includes('The recording for this call is not available.'), 'a missing recording must explain itself');
-        assert(deleted.includes('aria-label="Play recording"') && deleted.includes('disabled'), 'play must be disabled without a recording');
+        assert(/aria-label="Play recording"[^>]*disabled/.test(deleted) && deleted.includes('aria-disabled="true"'), 'play and the timeline are disabled without a recording');
+        assert(deleted.includes('data-focus-mode="overview"') && deleted.includes('Clear story.') && deleted.includes('Work on first'), 'the feedback overview stays visible without audio');
         const pruned = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, audioUrl: null, recordingPruned: true, recordingsKept: 10 }, api: {} }));
-        assert(pruned.includes('Only the 10 most recent calls keep their recording.') && pruned.includes('feedback of this one are kept'), 'an aged-out recording says why it is gone');
+        assert(pruned.includes('Only the 10 most recent calls keep their recording.') && pruned.includes('feedback of this one is kept'), 'an aged-out recording says why it is gone');
       } finally { await bundle.dispose(); }
     },
   },
@@ -656,6 +696,14 @@ export default [
       assert(turnAt(transcript, 100_000) === 3 || turnAt(transcript, 100_000) === 4, 'between turns something stays current');
       assert(turnAt(transcript, 170_000) === 5, 'the last turn stays current to the end');
       assert(turnAt([{ speaker: 'interviewer', overlay: true, startMs: 5000, endMs: 5000 }], 20_000) === -1, 'an overlay alone is never current outside its window');
+      // A chat line the voice spoke has a real span: it is current for that span only, not stretched back like a typed one.
+      const voiced = [
+        { speaker: 'interviewer', text: 'Q.', startMs: 0, endMs: 10_000 },
+        { speaker: 'candidate', channel: 'chat', voiced: true, text: 'Spoken.', startMs: 14_000, endMs: 20_000 },
+        { speaker: 'interviewer', text: 'Next.', startMs: 21_000, endMs: 25_000 },
+      ];
+      assert(turnAt(voiced, 11_000) === 0, 'the gap before a voiced line still belongs to the interviewer turn before it');
+      assert(turnAt(voiced, 15_000) === 1 && turnAt(voiced, 20_500) === 1, 'the voiced line is current from its own start');
     },
   },
   {
@@ -672,25 +720,27 @@ export default [
     },
   },
   {
-    name: 'practice call render: the replay shades paused stretches, shows both lengths and still works without spans',
+    name: 'practice call render: the replay lives in active time, with no pause on the timeline, and still works without spans',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, Replay } = bundle.module;
         const html = replay => renderToStaticMarkup(React.createElement(Replay, { replay, api: {}, initialPositionMs: 450_000 }));
         const paused = html({ ...REPLAY, pauseSpans: [{ startMs: 200_000, endMs: 440_000 }], pausedMs: 240_000, activeMs: 360_000 });
-        assert((paused.match(/data-pause-span=/g) || []).length === 1 && paused.includes('left:33.33') && paused.includes('width:40%'), 'the paused stretch is shaded on the bar at its place');
-        assert(paused.includes('/ 6:00 · recording 10:00'), 'the length reads active time then the recording length');
-        assert(paused.includes('aria-label="Seek to Your questions at 3:20"') && paused.includes('>3:30 / 6:00 · recording 10:00<'), 'times shown leave the paused time out: 7:30 on the recording is 3:30, and the chapter at 7:00 sits in the pause at 3:20');
+        assert(!paused.includes('data-pause-span') && !paused.includes('hatch') && !paused.includes('recording 10:00'), 'a pause is not drawn and the recording length is not shown');
+        assert(paused.includes('aria-valuemax="360000"') && paused.includes('aria-valuenow="210000"'), 'the slider is in active time: 7:30 on the recording is 3:30');
+        assert(paused.includes('>3:30 / 6:00<'), 'the clock reads active time over active length');
+        assert(paused.includes('left:33.33') && paused.includes('width:max(2px, calc(22.22') && paused.includes('left:55.55'), 'the blocks are laid out in active time: the middle chapter loses the paused time');
+        assert(paused.includes('Your questions') && paused.includes('aria-valuetext="3:30 of 6:00, Your questions"'), 'the part under the playhead is found on the active clock');
         const plain = html(REPLAY);
-        assert(!plain.includes('data-pause-span') && !plain.includes('recording 10:00') && plain.includes('7:30 / 10:00'), 'a call with no spans shows one length and no shading');
+        assert(!plain.includes('data-pause-span') && plain.includes('>7:30 / 10:00<'), 'a call with no spans shows one length');
         const same = html({ ...REPLAY, pauseSpans: [], pausedMs: 0, activeMs: 600_000 });
-        assert(!same.includes('data-pause-span') && !same.includes('· recording'), 'no pause, no second length');
+        assert(same.includes('>7:30 / 10:00<') && !same.includes('· recording'), 'no pause, one clock');
       } finally { await bundle.dispose(); }
     },
   },
   {
-    name: 'practice call render: playback skips paused stretches when time passes into one and when seeking into one',
+    name: 'practice call render: playback jumps over paused stretches, and the keys, buttons and timeline seek in active time',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
       const bundle = await bundleComponent(path.resolve('src/practice-call/Replay.jsx'), {});
@@ -698,11 +748,17 @@ export default [
         await withDom(async window => {
           const root = bundle.module.createRoot(window.document.getElementById('root'));
           const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const key = (target, name, extra = {}) => act(() => target.dispatchEvent(new window.KeyboardEvent('keydown', { key: name, bubbles: true, ...extra })));
           try {
             const replay = { ...REPLAY, pauseSpans: [{ startMs: 200_000, endMs: 440_000 }], pausedMs: 240_000, activeMs: 360_000 };
             await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay, api: {} })));
             const audio = window.document.querySelector('audio');
             let time = 0;
+            let plays = 0;
+            let pauses = 0;
+            audio.play = () => { plays += 1; return Promise.resolve(); };
+            audio.pause = () => { pauses += 1; };
             Object.defineProperty(audio, 'currentTime', { configurable: true, get: () => time, set: value => { time = value; } });
             Object.defineProperty(audio, 'readyState', { configurable: true, get: () => 4 });
             Object.defineProperty(audio, 'duration', { configurable: true, get: () => 600 });
@@ -713,26 +769,47 @@ export default [
             await act(() => audio.dispatchEvent(new window.Event('timeupdate')));
             assert(time === 440, 'time passing into a pause jumps to its end');
             const slider = window.document.querySelector('[role="slider"]');
+            assert(slider.getAttribute('aria-valuemax') === '360000', 'the slider runs on active time');
             time = 0;
-            await act(() => { slider.focus(); slider.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'End', bubbles: true })); });
-            assert(time === 600, 'seeking outside a pause is untouched');
-            const chapterSeek = [...window.document.querySelectorAll('button')].find(button => button.getAttribute('aria-label') === 'Seek to Onboarding story at 2:00');
-            await act(() => chapterSeek.click());
-            assert(time === 120, 'a seek before the pause is untouched');
-            const marker = [...window.document.querySelectorAll('button')].find(button => button.getAttribute('aria-label')?.startsWith('Seek to Talked over'));
-            await act(() => marker.click());
-            assert(time === 180, 'a marker before the pause seeks as before');
-            time = 0;
-            await act(() => slider.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'l', bubbles: true })));
-            for (let step = 0; step < 20; step += 1) await act(() => slider.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'l', bubbles: true })));
-            assert(time < 200 || time >= 440, `seeking by key into the pause never rests inside it (got ${time})`);
+            await key(slider, 'End');
+            assert(time === 600, 'End seeks to the end of the call');
+            await key(slider, 'Home');
+            assert(time === 0, 'Home seeks to the start');
+            await act(() => byLabel('Next part').click());
+            assert(time === 120, 'Next part goes to the start of the following part');
+            await act(() => byLabel('Next part').click());
+            assert(time === 440, 'the third part starts after the pause, on the recording clock');
+            await act(() => byLabel('Previous part').click());
+            assert(time === 120, 'Previous part right at the start of a part goes back one');
+            await key(slider, 'ArrowDown');
+            assert(time === 440, 'ArrowDown goes to the next part');
+            await key(slider, 'ArrowUp');
+            assert(time === 120, 'ArrowUp goes to the previous part');
+            await key(slider, 'ArrowDown');
+            await key(slider, 'ArrowLeft');
+            assert(time === 195, 'ArrowLeft goes back five seconds of active time, which is before the pause on the recording');
+            await key(slider, 'Home');
+            await act(() => byLabel('Back 10 seconds').click());
+            assert(time === 0, 'back 10 s clamps at the start');
+            const seen = [];
+            for (let step = 0; step < 80; step += 1) { await key(slider, 'ArrowRight'); seen.push(time); }
+            assert(seen.every(at => at < 200 || at >= 440), 'seeking by key never rests inside the pause');
+            assert(seen[seen.length - 1] === 600 && seen.includes(440), 'five-second steps cross the pause to the end of the recording');
+            await key(slider, ' ');
+            assert(plays === 1, 'Space starts playback');
+            await key(slider, ' ');
+            assert(pauses === 1, 'Space pauses it again');
+            await act(() => byLabel('Speed 1.5x').click());
+            assert(audio.playbackRate === 1.5 && byLabel('Speed 1.5x').getAttribute('aria-pressed') === 'true', 'the speed buttons set the playback rate');
+            await key(window.document.querySelector('main'), 'x');
+            assert(plays === 1 && pauses === 1, 'other keys do nothing');
           } finally { await act(() => root.unmount()); }
         });
       } finally { await bundle.dispose(); }
     },
   },
   {
-    name: 'practice call render: following playback moves only the transcript scroll area and leaves a hand scroll alone',
+    name: 'practice call render: the focus area shows the overview before playback and the part under the playhead after, with an Overview button back',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
       const bundle = await bundleComponent(path.resolve('src/practice-call/Replay.jsx'), {});
@@ -740,32 +817,49 @@ export default [
         await withDom(async window => {
           const root = bundle.module.createRoot(window.document.getElementById('root'));
           const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const focus = () => window.document.querySelector('[data-replay-focus]');
+          const button = text => [...window.document.querySelectorAll('button')].find(item => item.textContent.trim() === text);
           try {
-            const transcript = Array.from({ length: 12 }, (_, index) => ({ speaker: index % 2 ? 'candidate' : 'interviewer', text: `Turn ${index}`, startMs: index * 10_000, endMs: index * 10_000 + 9_000 }));
-            await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay: { ...REPLAY, feedback: null, transcript }, api: {} })));
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay: REPLAY_FEEDBACK, api: {} })));
             const audio = window.document.querySelector('audio');
-            const area = window.document.querySelector('[data-replay-scroll="chapters"]');
-            let intoView = 0;
-            window.Element.prototype.scrollIntoView = () => { intoView += 1; };
-            // jsdom has no layout: report the current turn well below the visible area.
-            area.getBoundingClientRect = () => ({ top: 100, bottom: 300, height: 200, left: 0, right: 0, width: 0 });
-            const rectOfTurn = element => (element.getAttribute?.('data-current-turn') === 'true' ? { top: 900, bottom: 930, height: 30 } : { top: 0, bottom: 0, height: 0 });
-            window.HTMLButtonElement.prototype.getBoundingClientRect = function rect() { return rectOfTurn(this); };
+            audio.play = () => Promise.resolve();
             let time = 0;
             Object.defineProperty(audio, 'currentTime', { configurable: true, get: () => time, set: value => { time = value; } });
-            const play = async () => { await act(() => audio.dispatchEvent(new window.Event('play'))); };
-            const tick = async seconds => { time = seconds; await act(() => audio.dispatchEvent(new window.Event('timeupdate'))); };
-            area.scrollTop = 0;
-            await play();
-            await tick(1);
-            assert(area.scrollTop === 0, 'a turn present from the start does not scroll the area on the first mount');
-            await tick(21);
-            assert(area.scrollTop > 0, 'a new current turn out of view scrolls the transcript area directly');
-            assert(intoView === 0, 'scrollIntoView is never used, it would scroll ancestors');
-            area.scrollTop = 0;
-            await act(() => area.dispatchEvent(new window.WheelEvent('wheel', { bubbles: true })));
-            await tick(31);
-            assert(area.scrollTop === 0, 'right after a hand scroll the area is left alone');
+            Object.defineProperty(audio, 'readyState', { configurable: true, get: () => 4 });
+            Object.defineProperty(audio, 'duration', { configurable: true, get: () => 600 });
+            assert(focus().getAttribute('data-focus-mode') === 'overview', 'before playback the overview is shown');
+            const overview = focus().textContent;
+            assert(overview.includes('Clear story. Tidy close.') && !overview.includes('A third sentence'), 'the summary is cut to two sentences');
+            assert(overview.includes('Name the metric first.') && overview.includes('Close on the ask.') && !overview.includes('A fourth priority'), 'only the top three priorities show');
+            assert(overview.includes('Press play') && !overview.includes('What worked') && !overview.includes('Tell me about a time you onboarded users.'), 'a hint instead of the list');
+            await act(() => button('More').click());
+            assert(focus().textContent.includes('A third sentence that the overview cuts. A fourth one.'), 'More expands the summary');
+            await act(() => button('Less').click());
+            assert(!focus().textContent.includes('A third sentence'), 'Less folds it again');
+            assert(!window.document.querySelector('[data-all-feedback]'), 'the long list is behind a toggle');
+            await act(() => button('All feedback').click());
+            const all = window.document.querySelector('[data-all-feedback]');
+            assert(all && all.textContent.includes('Tell me about a time you onboarded users.') && all.textContent.includes('168 words per minute') && !/Transcript/.test(all.textContent), 'All feedback shows the compact list and the delivery, never a transcript');
+            await act(() => button('Hide all feedback').click());
+            assert(!window.document.querySelector('[data-all-feedback]'), 'hide folds the list');
+
+            await act(() => audio.dispatchEvent(new window.Event('play')));
+            assert(focus().getAttribute('data-focus-mode') === 'part', 'playing leaves the overview');
+            time = 140;
+            await act(() => audio.dispatchEvent(new window.Event('timeupdate')));
+            assert(focus().querySelector('[data-focus-title]').textContent === 'Onboarding story' && focus().querySelector('[data-replay-announce]').textContent === 'Onboarding story', 'the part under the playhead is in focus and announced');
+            assert(focus().querySelector('[data-part-now]').getAttribute('data-part-now') === 'answer', 'past the first candidate turn it is the answer');
+            time = 125;
+            await act(() => audio.dispatchEvent(new window.Event('timeupdate')));
+            assert(focus().querySelector('[data-part-now]').getAttribute('data-part-now') === 'question', 'before it, the question');
+            time = 450;
+            await act(() => audio.dispatchEvent(new window.Event('timeupdate')));
+            assert(focus().querySelector('[data-focus-title]').textContent === 'Your questions' && focus().textContent.includes('No notes for this part'), 'a later part with no feedback says so');
+            await act(() => byLabel('Overview').click());
+            assert(focus().getAttribute('data-focus-mode') === 'overview' && byLabel('Overview').getAttribute('aria-pressed') === 'true', 'the Overview button returns to the overview while the audio plays on');
+            await act(() => byLabel('Next part').click());
+            assert(focus().getAttribute('data-focus-mode') === 'part', 'picking a part leaves the overview again');
           } finally { await act(() => root.unmount()); }
         });
       } finally { await bundle.dispose(); }
@@ -782,16 +876,21 @@ export default [
           communication: { pace: 'Could not be measured.', clarity: 'Mostly clear.', structure: '', confidence: 'Could not be measured.', filler: 'Could not be measured.' },
           delivery: { summary: 'Every answer was typed, so only content was judged.', pace: 'Could not be measured.', fillers: 'Could not be measured.', interruptions: 'None recorded.', blank: '' },
         };
-        const html = analysis => renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback, analysis }, api: {} }));
+        const html = analysis => renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback, analysis }, api: {}, initialShowAll: true }));
         const typed = html({ status: 'ready', metrics: { typedOnly: true } });
         assert(typed.includes('data-delivery-typed-only="true"') && typed.includes('Every answer was typed, so only content was judged.'), 'the review summary is the one delivery line');
         for (const gone of ['Could not be measured', 'None recorded', 'Pace', 'Confidence', 'Filler']) assert(!typed.includes(gone), `typed-only hides ${gone}`);
         assert(typed.includes('Mostly clear.') && !typed.includes('Structure'), 'other communication notes stay, and an empty one is hidden');
-        const bare = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { ...feedback, delivery: {} }, analysis: { status: 'ready', metrics: { typedOnly: true } } }, api: {} }));
+        const bare = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { ...feedback, delivery: {} }, analysis: { status: 'ready', metrics: { typedOnly: true } } }, api: {}, initialShowAll: true }));
         assert(bare.includes('Delivery was not measured: every answer was typed.'), 'with no summary the fallback line is used');
         const chatTranscript = [{ speaker: 'interviewer', text: 'Hi', startMs: 0, endMs: 1000 }, { speaker: 'candidate', channel: 'chat', text: 'Hello', startMs: 5000, endMs: 5000 }];
-        const inferred = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, transcript: chatTranscript, feedback, analysis: { status: 'ready' } }, api: {} }));
+        const inferred = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, transcript: chatTranscript, feedback, analysis: { status: 'ready' } }, api: {}, initialShowAll: true }));
         assert(inferred.includes('data-delivery-typed-only="true"'), 'without the analysis figure, an all-typed transcript is typed-only');
+        // A chat line the call spoke in the candidate's voice is a spoken answer: not typed-only, whatever the figure is missing.
+        const voicedTranscript = [{ speaker: 'interviewer', text: 'Hi', startMs: 0, endMs: 1000 }, { speaker: 'candidate', channel: 'chat', voiced: true, text: 'Hello', startMs: 5000, endMs: 8000 }];
+        const voiced = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, transcript: voicedTranscript, feedback, analysis: { status: 'ready' } }, api: {}, initialShowAll: true }));
+        assert(!voiced.includes('data-delivery-typed-only') && voiced.includes('Could not be measured'), 'a voiced answer keeps the measured delivery rows');
+        assert(!voiced.includes('Delivery was not measured: every answer was typed.'));
         const spoken = html({ status: 'ready', metrics: { typedOnly: false } });
         assert(spoken.includes('Could not be measured') && spoken.includes('None recorded') && !spoken.includes('data-delivery-typed-only'), 'a spoken call keeps every measured row');
         assert(!spoken.includes('>blank<') && !/blank/i.test(spoken), 'a row with an empty value is hidden');
@@ -809,13 +908,13 @@ export default [
           { question: 'Skipped alpha', asked: false },
           { question: 'Skipped beta', asked: false },
         ];
-        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { overall: { score: 5, summary: 'Fine.' }, planned } }, api: {} }));
+        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { overall: { score: 5, summary: 'Fine.' }, planned } }, api: {}, initialShowAll: true }));
         assert(markup.includes('2 prepared questions were not asked') && markup.includes('<details'), 'the unasked ones are one collapsed line');
         assert(!markup.includes('not asked ·') && !markup.includes('No notes.'), 'no empty not-asked cards remain');
         const details = markup.slice(markup.indexOf('data-testid="practice-unasked"'));
         assert(details.includes('Skipped alpha') && details.includes('Skipped beta') && !details.slice(0, details.indexOf('</details>')).includes('Asked one'), 'the titles sit inside the details');
         assert(markup.indexOf('Asked one') < markup.indexOf('practice-unasked') && !/<details[^>]*open/.test(markup), 'asked cards come first and the line starts collapsed');
-        const one = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { overall: { score: 5, summary: 'Fine.' }, planned: planned.slice(0, 2) } }, api: {} }));
+        const one = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, feedback: { overall: { score: 5, summary: 'Fine.' }, planned: planned.slice(0, 2) } }, api: {}, initialShowAll: true }));
         assert(one.includes('1 prepared question was not asked'), 'singular wording for one');
         const { callLengthMs } = bundle.module.replayModel;
         assert(callLengthMs({ durationMs: 5_348_000, pausedMs: 4_767_000 }) === 581_000 && callLengthMs({ durationMs: 5_348_000, activeMs: 581_000 }) === 581_000 && callLengthMs({ durationMs: 60_000 }) === 60_000, 'past calls list the active length when a pause was recorded');
@@ -1222,7 +1321,7 @@ export default [
         assert(merged.captions.length === 1 && merged.phase === 'in-call', 'mergeEvent appends captions without dropping the phase');
         assert(callModel.MODEL_SIZES.length === 2, 'both model sizes are listed once, in the shared module');
         assert(callModel.describeDeliveryValue({ wpm: { cited: '168 words per minute' }, pauseCount: 3 }) === 'wpm: 168 words per minute; pause count: 3', 'describeDeliveryValue labels each metric and keeps cited text');
-        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY }));
+        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, initialShowAll: true }));
         for (const fragment of ['aria-label="Delivery"', '168 words per minute', 'pause count']) {
           assert(markup.includes(fragment), `the replay delivery section is missing ${fragment}`);
         }
@@ -1325,37 +1424,31 @@ export default [
     },
   },
   {
-    name: 'practice call render: the scrubber draws chapter segments, fill layers, a knob and a chapter readout without native tooltips',
+    name: 'practice call render: the timeline draws a block per part split into question and answer, tinted by score, with a playhead and moment ticks',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, Replay } = bundle.module;
-        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: {}, initialPositionMs: 270_000 }));
-        const bar = markup.slice(markup.indexOf('data-scrubber="true"'), markup.indexOf('class="flex min-w-0 items-baseline'));
-        assert(bar.length > 0, 'the seek bar renders before the time row');
-        assert((bar.match(/data-chapter="/g) || []).length === 3, 'one segment element per chapter');
-        assert(bar.includes('data-chapter="1"'), 'the middle chapter has its own segment');
-        assert(bar.includes('style="left:0%;width:calc(20% - 2px);transform:scaleY(0.6)"'), 'the first segment is 2px short and idles at scaleY(0.6)');
-        assert(bar.includes('style="left:20%;width:calc(50% - 2px);transform:scaleY(0.6)"'), 'the middle segment keeps the 2px gap');
-        assert(bar.includes('style="left:70%;width:30%;transform:scaleY(0.6)"'), 'the last segment has no gap after it');
-        assert(bar.includes('transition-transform duration-100 ease-out'), 'segment growth is a 100ms transform transition');
-        assert(bar.includes('class="absolute inset-0 bg-white/20"'), 'each segment draws its unplayed track');
-        assert(bar.includes('class="absolute inset-y-0 left-0 bg-violet-400" style="width:50%"'), 'the current chapter is filled to the playhead');
-        assert(bar.includes('class="absolute inset-y-0 left-0 bg-violet-400" style="width:0%"'), 'a later chapter has no played fill');
-        assert(bar.includes('h-[13px] w-[13px]'), 'the knob is 13px round');
-        assert(bar.includes('data-scrubber-knob="true"'), 'the knob is part of the bar');
-        assert(bar.includes('transform:translate(-50%, -50%) scale(0)'), 'the knob is hidden until the bar is hovered');
-        assert(!bar.includes('title='), 'no native title tooltips anywhere in the bar');
-        assert(bar.includes('data-marker-kind="pause"') && bar.includes('data-marker-kind="interruption"'), 'moment markers stay as coloured ticks');
-        assert(markup.includes('aria-valuetext="4:30 of 10:00, Onboarding story"'), 'aria-valuetext reports the time and chapter');
-        assert(/<span class="[^"]*font-mono[^"]*">4:30 \/ 10:00<\/span>/u.test(markup), 'the time row reads current / duration');
-        assert(/<span class="[^"]*whitespace-nowrap[^"]*">4:30 \/ 10:00<\/span>/u.test(markup), 'the time stays on one line beside a long chapter title');
-        assert(markup.includes('aria-label="Current chapter: Onboarding story. Show chapters"'), 'the time row offers the current chapter');
-        const unchaptered = renderToStaticMarkup(React.createElement(Replay, { replay: { durationMs: 60_000, chapters: [], transcript: [] }, api: {} }));
-        const plainBar = unchaptered.slice(unchaptered.indexOf('data-scrubber="true"'), unchaptered.indexOf('class="flex min-w-0 items-baseline'));
-        assert((plainBar.match(/data-chapter="/g) || []).length === 1, 'a recording without chapters still has one full-width segment');
-        assert(plainBar.includes('style="left:0%;width:100%;transform:scaleY(0.6)"'), 'the fallback segment spans the whole bar');
-        assert(!unchaptered.includes('aria-label="Current chapter:'), 'no chapter readout without chapters');
+        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY_FEEDBACK, api: {}, initialPositionMs: 270_000 }));
+        const bar = markup.slice(markup.indexOf('data-timeline="true"'), markup.indexOf('data-replay-now-title'));
+        assert(bar.length > 0, 'the timeline renders before the part title');
+        assert((bar.match(/data-chapter="/g) || []).length === 3, 'one block per part');
+        assert(bar.includes('data-chapter="0" data-band="low"') && bar.includes('data-chapter="1" data-band="good"') && bar.includes('data-chapter="2" data-band="none"'), 'blocks are tinted by score: red, green, neutral grey when there is none');
+        assert(bar.includes('bg-red-500') && bar.includes('bg-emerald-500') && bar.includes('bg-slate-500'), 'the tints are red, green and grey');
+        assert(bar.includes('data-chapter="1" data-band="good" data-current="true"') && bar.includes('ring-white/90'), 'the part under the playhead is marked');
+        assert(bar.includes('data-part="question" class="absolute inset-y-0 left-0 bg-emerald-500 opacity-40" style="width:5%"') && bar.includes('data-part="answer" class="absolute inset-y-0 right-0 bg-emerald-500" style="width:95%"'), 'the middle part is a light question share (15 s of 300 s) and a solid answer');
+        assert(bar.includes('style="left:0%;width:max(2px, calc(20% - 2px))"') && bar.includes('style="left:70%;width:max(2px, calc(30% - 2px))"'), 'blocks sit side by side with a thin gap');
+        assert(bar.includes('data-playhead="true"') && bar.includes('left:45%') && bar.includes('data-timeline-knob="true"'), 'a playhead line with a knob at 4:30 of 10:00');
+        assert(bar.includes('data-marker-kind="pause"') && bar.includes('data-marker-kind="interruption"'), 'moments are small ticks on the bar');
+        assert(!bar.includes('title='), 'no native tooltips');
+        assert(markup.includes('aria-valuetext="4:30 of 10:00, Onboarding story"'), 'aria-valuetext reports the time and part');
+        assert(/data-replay-clock="true"[^>]*>4:30 \/ 10:00</.test(markup), 'the clock reads current / length');
+        assert(/data-replay-now-title="true"[^>]*truncate[^>]*>Onboarding story</.test(markup), 'the current part title sits under the bar on one truncated line');
+        const unchaptered = renderToStaticMarkup(React.createElement(Replay, { replay: { durationMs: 60_000, chapters: [], transcript: [], persona: { name: 'Sam' } }, api: {}, initialPositionMs: 1_000 }));
+        assert((unchaptered.match(/data-chapter="/g) || []).length === 1 && unchaptered.includes('style="left:0%;width:max(2px, calc(100% - 2px))"'), 'a call without chapters is one block for the whole call');
+        assert(/data-focus-title="true"[^>]*>Interview with Sam</.test(unchaptered) && !unchaptered.includes('data-part-chip'), 'its focus shows the call title and no question/answer chips');
+        const empty = renderToStaticMarkup(React.createElement(Replay, { replay: null, api: {} }));
+        assert(empty.includes('data-focus-mode="overview"') && empty.includes('Practice interview'), 'no replay at all still renders');
       } finally { await bundle.dispose(); }
     },
   },
@@ -1537,33 +1630,36 @@ export default [
     },
   },
   {
-    name: 'practice call render: replay turns name the interviewer, and a multi-speaker turn lists each segment under its speaker',
+    name: 'practice call render: the focus names who asked from the panel, the persona or a multi-speaker turn',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, Replay } = bundle.module;
         const replay = {
-          ...REPLAY,
-          persona: { name: 'Dana Whitfield' },
-          panel: [{ id: 'B', name: 'John Park' }],
+          ...REPLAY_FEEDBACK,
+          persona: { name: 'Dana Whitfield', role: 'Hiring manager' },
+          panel: [{ id: 'B', name: 'John Park', role: 'Senior engineer' }],
           transcript: [
-            { role: 'interviewer', speakerId: 'B', text: 'Walk me through the design.', startMs: 120_000, endMs: 130_000 },
-            { role: 'interviewer', speakerId: 'A', text: 'Thanks. John, over to you.', startMs: 131_000, endMs: 140_000, segments: [{ speakerId: 'A', text: 'Thanks.' }, { speakerId: 'B', text: 'Over to me.' }] },
-            { role: 'interviewer', text: 'Plain turn.', startMs: 150_000, endMs: 160_000 },
+            { role: 'interviewer', speakerId: 'A', text: 'Hi, how has your day been so far?', startMs: 2_000, endMs: 8_000 },
+            { role: 'candidate', text: 'Good, thanks.', startMs: 10_000, endMs: 14_000 },
+            { role: 'interviewer', speakerId: 'B', text: 'Tell me about onboarding.', startMs: 120_000, endMs: 135_000 },
+            { role: 'candidate', text: 'We rewrote the first-run flow.', startMs: 135_000, endMs: 200_000 },
+            { role: 'interviewer', text: 'Mixed.', startMs: 420_000, endMs: 430_000, segments: [{ speakerId: 'A', text: 'Thanks.' }, { speakerId: 'B', text: 'Over to me.' }] },
           ],
+          chapters: [...REPLAY_FEEDBACK.chapters.slice(0, 2), { title: 'Your questions', questionTurnIndex: 4, startMs: 420_000, endMs: 600_000, markers: [] }],
         };
-        const markup = renderToStaticMarkup(React.createElement(Replay, { replay, api: {}, initialPositionMs: 0 }));
-        assert(markup.includes('John Park · 2:00'), 'a turn with speakerId shows the interviewer name');
-        assert(markup.includes('Dana Whitfield · 2:11'), 'the lead is named from the replay persona');
-        assert(markup.includes('data-segment-speaker="A"') && markup.includes('data-segment-speaker="B"') && markup.includes('Over to me.'), 'segments show each speaker');
-        assert(markup.includes('Interviewer · 2:30'), 'a turn without speakerId stays Interviewer');
-        assert(!renderToStaticMarkup(React.createElement(Replay, { replay: { ...replay, panel: undefined, persona: undefined }, api: {} })).includes('John Park'), 'no panel on the replay falls back to Interviewer');
+        const at = (value, ms) => renderToStaticMarkup(React.createElement(Replay, { replay: value, api: {}, initialPositionMs: ms }));
+        const asker = html => (/Asked by <span[^>]*>([^<]*)<\/span>(?:<span[^>]*> · ([^<]*)<\/span>)?/.exec(html) || []).slice(1, 3).filter(Boolean).join(' | ');
+        assert(asker(at(replay, 125_000)) === 'John Park | Senior engineer', 'a part opened by a colleague names that colleague and role');
+        assert(asker(at(replay, 5_000)) === 'Dana Whitfield | Hiring manager', 'the lead comes from the persona');
+        assert(asker(at(replay, 430_000)) === 'Dana Whitfield | Hiring manager', 'a turn several interviewers spoke in is credited to its first speaker');
+        assert(asker(at({ ...replay, panel: undefined, persona: undefined }, 125_000)) === 'Interviewer', 'no panel on the replay falls back to a plain Interviewer');
       } finally { await bundle.dispose(); }
     },
   },
   ...presentingTests,
   {
-    name: 'practice call render: a colleague heard over the speaker rings with them, captions as its own line, and the replay marks the overlay turn',
+    name: 'practice call render: a colleague heard over the speaker rings with them, captions as its own line, and the replay lists no transcript',
     async run() {
       const bundle = await loadServerBundle();
       try {
@@ -1582,9 +1678,7 @@ export default [
         assert((strip.match(/data-speaking="true"/g) || []).length === 2, 'chips in the sharing bar ring too');
         const turns = [...REPLAY.transcript, { speaker: 'interviewer', speakerId: 'B', text: 'Over remark.', startMs: 1000, endMs: 1500, overlay: true }];
         const markup = renderToStaticMarkup(React.createElement(Replay, { replay: { ...REPLAY, transcript: turns }, api: {}, initialPositionMs: 200_000 }));
-        assert(markup.includes('data-over-mark="true"') && markup.includes('Over remark.'), 'the overlay turn carries its marker');
-        const plain = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: {}, initialPositionMs: 200_000 }));
-        assert(!plain.includes('data-over-mark'), 'a call without overlays shows no marker');
+        assert(!markup.includes('Over remark.'), 'the replay shows no transcript, so an overlay line is not listed');
       } finally { await bundle.dispose(); }
     },
   },

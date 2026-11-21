@@ -52,7 +52,7 @@ function memoryHistory(initial = {}) {
 function soloPlan(voices, change = {}) {
   return {
     interviewKind: 'A short screening conversation.',
-    lead: { voice: voices[0].key, role: 'Hiring Manager', temperament: 'neutral', stability: 0.3, room: 0.5, manner: 'Even and direct.' },
+    lead: { voice: voices[0].key, role: 'Hiring Manager', temperament: 'neutral', stability: 0.3, room: 0.5, manner: 'Even and direct.', interrupting: 'Lets people finish and rarely cuts in.' },
     panel: [],
     questions: [{ number: 1, askedBy: voices[0].key, minutes: 10, probes: [] }],
     problems: [],
@@ -1982,6 +1982,32 @@ test('model download bar keeps one total across both models when the store repor
   assert.equal([...totals][0] > 600 * 1000 * 1000, true, 'the total is both model sizes');
 });
 
+test('a voice line cut off by the interviewer is cut short in the chat too, and a message it never reached is marked unsaid', async () => {
+  const flags = [];
+  const { service, engine } = await liveCall({ deps: {
+    engineFactory: options => {
+      engine.listener = options.onEvent;
+      return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }), typed: (text, options) => { flags.push({ ...options }); } };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  service.sendChat('It worries me a little. But if the flow drop were purely a bad sensor, I would expect the temperature to stay put.');
+  service.sendChat('And one more thing.');
+  service.sendChat('Kept whole.');
+  engine.listener({ type: 'candidate-voice', state: 'cut', heardChars: 60, messages: [
+    { chatId: flags[0].chatId, heard: "It worries me a little. But if the flow drop were purely a bad sensor, I'd expect the temperature," },
+    { chatId: flags[1].chatId, heard: '' },
+  ] });
+  const chat = service.getState().chat;
+  assert.equal(chat[0].text, "It worries me a little. But if the flow drop were purely a bad sensor, I'd expect the temperature —");
+  assert.equal(chat[0].cutOff, true);
+  assert.equal(chat[1].text, 'And one more thing.');
+  assert.equal(chat[1].unsaid, true);
+  assert.equal(chat[2].text, 'Kept whole.');
+  assert.equal(chat[2].cutOff, undefined);
+});
+
 test('chat is accepted without an answer while the interviewer is leaving, and ignored once they have left', async () => {
   const flags = [];
   const typed = [];
@@ -1999,7 +2025,9 @@ test('chat is accepted without an answer while the interviewer is leaving, and i
   service.sendChat('before');
   // A sent suggestion is marked, so it never counts as practice; anything else is the candidate's own.
   service.sendChat('suggested', { generated: true, extra: 'ignored' });
-  assert.deepEqual(flags, [{ generated: false }, { generated: true }]);
+  assert.deepEqual(flags.map(flag => flag.generated), [false, true]);
+  assert.deepEqual(flags.map(flag => flag.chatId), service.getState().chat.map(item => item.id), 'each message carries its chat entry id');
+  assert.equal(new Set(flags.map(flag => flag.chatId)).size, 2);
   typed.splice(1);
   engine.listener({ type: 'ended', reason: 'interviewer' });
   // They are still on the line for 2 s: a real call lets you type, and nobody answers.
@@ -2118,6 +2146,48 @@ test('the saved call is on the call clock: the lead is cut from both tracks and 
   assert.equal(record.candidateProsody[0].wordsPerMinute, 150, 'only time fields move');
 });
 
+test('the record holds the voiced turns and their tone on the call clock, beside the microphone ones, and hands the engine an ear with the voiced calls', async () => {
+  let now = 10000;
+  const clock = { now: () => now, setTimeout: () => 1, clearTimeout: () => {} };
+  let engineEar = null;
+  const { service, deps } = await liveCall({ deps: {
+    clock,
+    trimStart: async () => {},
+    earFactory: options => ({
+      noteSpeech() {}, voiceNote: () => null, endOfTurn: async () => 0.5, floorBid: async () => ({ decision: 'pause' }),
+      prepareVoiced() {}, voicedNote: async () => null,
+      toneSamples: () => [],
+      prosodyTurns: () => [
+        { startMs: 6000, endMs: 8000, wordsPerMinute: 150 },
+        { startMs: 9000, endMs: 12000, wordCount: 8, wordsPerMinute: 140, voiced: true },
+      ],
+      baselineSnapshot: () => ({ wordsPerMinute: 150 }), voicedBaselineSnapshot: () => ({ wordsPerMinute: 140 }),
+      settle: async () => { options.onToneSample({ atMs: 9000, endMs: 12000, arousal: 0.5, dominance: 0.5, valence: 0.5, voiced: true }); },
+      close() {},
+    }),
+    engineFactory: request => {
+      engineEar = request.ear;
+      return { start() {}, hangUp() {}, state: () => ({ elapsedMs: 8000, transcript: [
+        { speaker: 'candidate', text: 'Hi.', startMs: 6000, endMs: 8000 },
+        { speaker: 'candidate', channel: 'chat', voiced: true, text: 'Spoken for me.', startMs: 9000, endMs: 12000 },
+      ] }) };
+    },
+  } });
+  await service.start(ARGS);
+  now = 14000;
+  await service.answer();
+  now = 19000;
+  await service.hangUp();
+  assert.equal(typeof engineEar?.prepareVoiced, 'function', 'the engine\'s ear has prepareVoiced');
+  assert.equal(typeof engineEar?.voicedNote, 'function', 'the engine\'s ear has voicedNote');
+  const record = await deps.store.readRecord('call-1');
+  assert.deepEqual(record.candidateProsody.map(turn => [turn.startMs, turn.endMs, turn.voiced === true]), [[2000, 4000, false], [5000, 8000, true]], 'voiced turns sit on the same clock as the transcript');
+  assert.deepEqual(record.transcript.map(turn => [turn.startMs, turn.endMs]), [[2000, 4000], [5000, 8000]]);
+  assert.deepEqual(record.toneSamples.map(sample => [sample.atMs, sample.endMs, sample.voiced]), [[5000, 8000, true]]);
+  assert.deepEqual(record.voicedBaseline, { wordsPerMinute: 140 });
+  assert.deepEqual(record.voiceBaseline, { wordsPerMinute: 150 });
+});
+
 // Seen in the first call made in the built app: a question was asked but never answered, so its
 // score was empty. The review accepted that, but storing the same feedback validated it again
 // and refused it, and the session the call had armed stayed armed and blocked later calls.
@@ -2218,7 +2288,7 @@ function panelHarness({ cast = [{ voice: 'V2', role: 'Senior Engineer', focus: '
     return factory;
   };
   const planner = fakePlanner(drawn => (plan ? plan(drawn) : soloPlan(drawn, {
-    panel: cast.filter(member => drawn.some(voice => voice.key === member.voice)).map(member => ({ stability: 0.3, room: 0.4, manner: 'Plain.', ...member })),
+    panel: cast.filter(member => drawn.some(voice => voice.key === member.voice)).map(member => ({ stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.', ...member })),
   })));
   let made = 0;
   const overrides = {
@@ -2302,6 +2372,9 @@ test('panel: the plan\'s colleagues settle with ids, names, roles and manner, an
   assert.equal(Boolean(callPlan.people[0].voice), true);
   assert.deepEqual(callPlan.people[1].joins === 'late' || callPlan.people[1].joins === 'start', true);
   assert.equal(Boolean(callPlan.people[1].voice), true);
+  assert.deepEqual(callPlan.people.map(item => item.interrupting), ['Lets people finish and rarely cuts in.', 'Rarely cuts in.'], 'how each person interrupts reaches the prompts');
+  assert.equal(mains[0].options.persona.interrupting, 'Lets people finish and rarely cuts in.');
+  assert.deepEqual(mains[0].options.panel.map(item => item.interrupting), ['Rarely cuts in.']);
   assert.deepEqual(callPlan.questions, [{ number: 1, askedBy: 'A', minutes: 10, probes: [] }]);
   assert.deepEqual(callPlan.problems, []);
   assert.deepEqual(mains[0].options.picked, [1]);
@@ -2354,8 +2427,8 @@ test('panel: the lead may be any drawn voice, and only the chosen voices are mad
   const setup = panelHarness({
     voices: ['lib-1', 'lib-2', 'lib-3', 'lib-4', 'lib-5'], random: () => 0.9,
     plan: drawn => soloPlan(drawn, {
-      lead: { voice: 'V3', role: 'Engineering Manager', temperament: 'warm', stability: 0.4, room: 0.2, manner: 'Unhurried.' },
-      panel: [{ voice: 'V1', role: 'Recruiter', focus: 'logistics', stability: 0.3, room: 0.6, manner: 'Brisk.' }, { voice: 'V5', role: 'Designer', focus: 'ux', stability: 0.5, room: 0.3, manner: 'Curious.' }],
+      lead: { voice: 'V3', role: 'Engineering Manager', temperament: 'warm', stability: 0.4, room: 0.2, manner: 'Unhurried.', interrupting: 'Lets people finish and rarely cuts in.' },
+      panel: [{ voice: 'V1', role: 'Recruiter', focus: 'logistics', stability: 0.3, room: 0.6, manner: 'Brisk.', interrupting: 'Lets people finish and rarely cuts in.' }, { voice: 'V5', role: 'Designer', focus: 'ux', stability: 0.5, room: 0.3, manner: 'Curious.', interrupting: 'Lets people finish and rarely cuts in.' }],
       questions: [{ number: 1, askedBy: 'V3', minutes: 8, probes: [] }],
     }),
   });
@@ -2403,7 +2476,7 @@ test('panel: a failed lead draw still fails the call', async () => {
 test('panel: a fixed temperament still wins over the plan and the plan\'s colleagues are still seated', async () => {
   const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, temperament: 'warm' },
-    panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   }) });
   const loadBrief = async args => {
     const loaded = await makeDeps({ tmp: '/unused' }).deps.loadBrief(args);
@@ -2442,7 +2515,7 @@ test('panel: a late colleague joins when the timer fires, once, and the record k
   assert.equal(states.some(item => item.participants.length === 2), true, 'the join is published');
   await service.hangUp();
   const record = await deps.store.readRecord('call-1');
-  assert.deepEqual(record.panel, [{ id: 'B', name: 'Ben Specialist', role: 'Senior Engineer', focus: 'system design', joins: 'late', joinedAtMs: 57000, voiceId: 'lib-2', room: { seed: 'lib-2', rt60Ms: 300 }, roomAmount: 0.4, stability: 0.3 }]);
+  assert.deepEqual(record.panel, [{ id: 'B', name: 'Ben Specialist', role: 'Senior Engineer', focus: 'system design', interrupting: 'Rarely cuts in.', joins: 'late', joinedAtMs: 57000, voiceId: 'lib-2', room: { seed: 'lib-2', rt60Ms: 300 }, roomAmount: 0.4, stability: 0.3 }]);
   assert.equal(record.persona.name, 'Nora Lead');
 });
 
@@ -2540,6 +2613,54 @@ test('the acknowledgement session runs on Sonnet at low effort, the reply on Opu
   await restart('opener', {});
   await restart('main', {});
   assert.deepEqual(made.slice(3), [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }]);
+});
+
+test('the cut-in watcher is created only when the app passes watcher: true, on Sonnet at low effort, and the engine gets it', async () => {
+  const run = async extra => {
+    const made = [];
+    const started = [];
+    let engineOptions;
+    const { service } = await liveCall({ deps: {
+      ...extra,
+      sessionsFactory: config => { made.push(config); return { start: async options => { started.push(options.instructions); return { reply: 'READY' }; }, close() {} }; },
+      prompts: {
+        buildOpenerInstructions: () => 'OPENER\nReply only READY now.', buildInterviewerInstructions: () => 'MAIN\nReply only READY now.',
+        buildWatcherInstructions: options => `WATCHER${options.history ? ` HISTORY ${options.history}` : ''}\nReply only READY now.`,
+      },
+      engineFactory: options => { engineOptions = options; return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }) }; },
+    } });
+    await service.start(ARGS);
+    await service.answer();
+    return { made, started, engineOptions };
+  };
+  const off = await run({});
+  assert.equal(off.made.length, 3, 'no watcher in the unit suites by default');
+  assert.equal('watcher' in off.engineOptions.sessions, false);
+  const on = await run({ watcher: true });
+  assert.deepEqual(on.made, [{ model: 'sonnet', effort: 'low' }, { model: 'opus', effort: 'low' }, { model: 'haiku', effort: 'low' }, { model: 'sonnet', effort: 'low' }]);
+  assert.equal(typeof on.engineOptions.sessions.watcher.start, 'function');
+  assert.equal(on.started.includes('WATCHER\nReply only READY now.'), true, 'it starts from its own instructions');
+});
+
+test('the watcher restarts like the classifier: its own instructions, the history before the READY line, and the new session is returned', async () => {
+  const started = [];
+  let restart;
+  const { service } = await liveCall({ deps: {
+    watcher: true,
+    sessionsFactory: () => ({ start: async options => { started.push(options.instructions); }, close() {} }),
+    prompts: {
+      buildOpenerInstructions: () => 'OPENER\nReply only READY now.', buildInterviewerInstructions: () => 'MAIN\nReply only READY now.',
+      buildWatcherInstructions: options => `WATCHER${options.history ? ` HISTORY ${options.history}` : ''}\nReply only READY now.`,
+    },
+    engineFactory: options => { restart = options.restartSession; return { start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }) }; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  const next = await restart('watcher', { transcriptText: 'Candidate: hi' });
+  assert.equal(typeof next.start, 'function', 'the new session itself');
+  assert.equal(started.at(-1), 'WATCHER HISTORY Candidate: hi\nReply only READY now.');
+  await restart('watcher');
+  assert.equal(started.at(-1), 'WATCHER\nReply only READY now.');
 });
 
 // Measured 2026-11-19: Opus starts its reply about 2.5 s later than Sonnet but was judged better blind; the reply's
@@ -2675,7 +2796,7 @@ test('restartSession returns the new session itself, the one the engine will the
 // with them in the cast and would hand over to someone who cannot speak, so a fresh one replaces it.
 test('panel: when a chosen colleague cannot speak, a fresh lead starts from the cast as it now is and their questions pass to the lead', async () => {
   const setup = panelHarness({ silent: ['lib-2'], plan: drawn => soloPlan(drawn, {
-    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
     questions: [{ number: 1, askedBy: 'V1', minutes: 5, probes: [] }, { number: 2, askedBy: 'V2', minutes: 5, probes: ['a vague number'] }],
   }) });
   setup.overrides.loadCards = async () => PLAN_CARDS;
@@ -2698,7 +2819,7 @@ test('panel: when a chosen colleague cannot speak, a fresh lead starts from the 
 
 test('panel: a replacement session that fails to start is closed and does not stay running', async () => {
   const setup = panelHarness({ silent: ['lib-2'], plan: drawn => soloPlan(drawn, {
-    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
     questions: [{ number: 1, askedBy: 'V1', minutes: 5, probes: [] }, { number: 2, askedBy: 'V2', minutes: 5, probes: ['a vague number'] }],
   }) });
   setup.overrides.loadCards = async () => PLAN_CARDS;
@@ -2767,7 +2888,7 @@ test('every voice draw skips the built-in voices by id and by name, for the lead
 test('stability: the plan\'s numbers reach the lead\'s and each colleague\'s voice and the record', async () => {
   const setup = panelHarness({ random: () => 0.9, plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, stability: 0.45 },
-    panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'api', stability: 0.55, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'api', stability: 0.55, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   }) });
   const { service, deps } = await panelStart(setup);
   await service.answer();
@@ -2786,7 +2907,7 @@ test('stability: the plan\'s numbers reach the lead\'s and each colleague\'s voi
 test('stability: a lead or colleague with no usable number falls back to the default, and a fixed temperament still takes the plan\'s number', async () => {
   const setup = panelHarness({ random: () => 0.9, plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, stability: null },
-    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: Number.NaN, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: Number.NaN, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   }) });
   const { service, deps } = await panelStart(setup);
   await service.answer();
@@ -2874,7 +2995,7 @@ test('role: the lead\'s own role and the picked questions come from the plan on 
 test('role: the settled role, picked questions and plan reach restart prompts, the acknowledgement session included', async () => {
   const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, role: 'Engineering Director' },
-    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
     questions: [{ number: 3, askedBy: 'V1', minutes: 6, probes: ['the missing result'] }, { number: 1, askedBy: 'V2', minutes: 4, probes: [] }],
     problems: [{ ref: 'p1', question: 1, language: 'javascript', parts: [{ title: 'Task', content: 'Reverse a list.' }], solution: 'return list.reverse();', edgeCases: ['empty list'], hints: ['think about order'] }],
   }) });
@@ -3340,7 +3461,7 @@ const amountRooms = extra => ({
 test('the lead and a colleague amounts reach roomFor, the treated audio and the record', async () => {
   const setup = panelHarness({ random: () => 0.9, deps: amountRooms(), plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, room: 0.2 },
-    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: 0.5, room: 0.8, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: 0.5, room: 0.8, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   }) });
   const calls = [];
   const roomFor = setup.overrides.callRoom;
@@ -3363,7 +3484,7 @@ test('the lead and a colleague amounts reach roomFor, the treated audio and the 
 test('without a usable amount the room is the seed-only one and no amount is recorded', async () => {
   const setup = panelHarness({ random: () => 0.9, deps: amountRooms(), plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, room: null },
-    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: 0.5, room: Number.NaN, manner: 'Plain.' }],
+    panel: [{ voice: 'V2', role: 'Engineer', focus: '', stability: 0.5, room: Number.NaN, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   }) });
   const { service, deps } = await panelStart(setup);
   await service.answer();
@@ -3571,7 +3692,7 @@ test('plan: a failed plan ends in an error state, starts no session, warms nothi
 test('plan: a plan that names a voice that was not drawn, or a planner that returns nothing, fails the call the same way', async () => {
   for (const [label, planCall] of [
     ['unknown lead', async ({ voices }) => ({ plan: soloPlan(voices, { lead: { ...soloPlan(voices).lead, voice: 'V9' } }), attempts: [], ms: 1 })],
-    ['unknown colleague', async ({ voices }) => ({ plan: soloPlan(voices, { panel: [{ voice: 'V9', role: 'Engineer', focus: '', stability: 0.3, room: 0.4, manner: '' }] }), attempts: [], ms: 1 }), ],
+    ['unknown colleague', async ({ voices }) => ({ plan: soloPlan(voices, { panel: [{ voice: 'V9', role: 'Engineer', focus: '', stability: 0.3, room: 0.4, manner: '', interrupting: 'Lets people finish and rarely cuts in.' }] }), attempts: [], ms: 1 }), ],
     ['nothing', async () => ({})],
   ]) {
     let sessions = 0;
@@ -3648,7 +3769,7 @@ test('plan: the setup is saved with the record and logged as it happens', async 
   const attempts = [{ problems: ['a probe is too long'] }, { problems: ['the minutes are too long'] }];
   const planCall = async ({ voices }) => ({
     plan: soloPlan(voices, {
-      panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+      panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
       problems: [{ ref: 'p1', question: 1, language: 'javascript', parts: [{ title: 'Task', content: 'Sum a list.' }], solution: 'return 1;', edgeCases: [], hints: [] }],
     }),
     attempts, ms: 4321,
@@ -3726,6 +3847,20 @@ test('visuals: the diagram for a screen part is drawn during setup, saved for th
   assert.equal(started.service.getState().screen.visual, undefined, 'an unknown visual is never shown');
 });
 
+test('visuals: a chosen picture\'s lead sentence goes above its screen text, so the question reads as written around it', async () => {
+  const fetch = async url => (url.includes('api.php')
+    ? { ok: true, json: async () => ({ query: { pages: [{ index: 1, title: 'File:Moon.jpg', imageinfo: [{ thumburl: 'https://upload.example/moon.jpg', thumbwidth: 1024, thumbheight: 683, descriptionurl: 'https://commons.example/File:Moon.jpg', extmetadata: { LicenseShortName: { value: 'Public domain' }, Artist: { value: 'NASA' } } }] }] } }) }
+    : { ok: true, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => new Uint8Array([9, 9]).buffer });
+  const setup = panelHarness({ cast: [], plan: drawn => soloPlan(drawn, {
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Moon base', content: 'Could you live here for a year?', visual: { kind: 'picture', search: 'lunar surface', shows: 'how desolate it is' } }], solution: 'Open.', edgeCases: [], hints: [] }],
+  }), deps: { fetch, visualPickText: async () => ({ choice: 1, description: 'A grey plain.', lead: 'The photo above is the lunar south pole.' }) } });
+  const started = await panelStart(setup);
+  await started.service.answer();
+  assert.equal(setup.engineOptions[0].prepared.p1.parts[0].content, 'The photo above is the lunar south pole.\n\nCould you live here for a year?');
+  const main = setup.built.find(item => item.kind === 'main');
+  assert(main.options.callPlan.problems[0].parts[0].content.startsWith('The photo above is the lunar south pole.'), 'the interviewer sees the screen as shown');
+});
+
 test('visuals: without the drawing and picking calls nothing is searched or drawn and the screens keep their text', async () => {
   const setup = panelHarness({ cast: [], plan: drawn => soloPlan(drawn, {
     problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Moon base', content: 'Could you live here for a year?', visual: { kind: 'picture', search: 'lunar surface', shows: 'how desolate it is' } }], solution: 'Open.', edgeCases: [], hints: [] }],
@@ -3754,7 +3889,7 @@ test('plan: the interviewer sessions reply a bare READY, and anything they retur
 
 const UNPREPARED_TEXT = 'Tell me about a time a plan changed under you, and what you did next.';
 const unpreparedPlan = drawn => soloPlan(drawn, {
-  panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design', stability: 0.3, room: 0.4, manner: 'Plain.' }],
+  panel: [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }],
   questions: [
     { number: 1, askedBy: 'V1', minutes: 8, probes: [] },
     { number: 0, text: UNPREPARED_TEXT, askedBy: 'V2', minutes: 5, probes: ['the part of the resume that matches'] },
@@ -4019,6 +4154,60 @@ test('the call writes a debug log: phases, setup steps, engine events, session m
   assert(lines.some(line => typeof line.ms === 'number'), 'the call clock runs once answered');
   assert.equal((await nodeFs.stat(file)).mode & 0o077, 0);
   assert(!JSON.stringify(lines).includes('key-should-never-be-logged'));
+});
+
+test('the helper\'s injection capability reaches the engine, inject commands pass through untouched, and inject events are logged without text or audio', async () => {
+  const sent = [];
+  const engineSaw = [];
+  let fire = () => {};
+  let audioSeen = null;
+  const { tmp, service } = await liveCall({ deps: {
+    debugFs: nodeFs,
+    helperFactory: ({ onEvent }) => {
+      fire = onEvent;
+      return {
+        start: async () => ({ ok: true }), stop: async () => { onEvent({ type: 'recording', state: 'closed' }); },
+        play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {},
+        canInject: () => true,
+        inject: (...args) => { sent.push(['inject', ...args]); return true; },
+        injectAudio: (...args) => { sent.push(['injectAudio', args[0], args[1].length]); return true; },
+        injectEnd: (...args) => { sent.push(['injectEnd', ...args]); return true; },
+        injectCancel: (...args) => { sent.push(['injectCancel', ...args]); return true; },
+      };
+    },
+    engineFactory: options => {
+      audioSeen = options.audio;
+      return { start() {}, hangUp() {}, helperEvent: event => engineSaw.push(event), state: () => ({ transcript: [], elapsedMs: 0 }), typed() {} };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.equal(audioSeen.canInject(), true);
+  audioSeen.inject('line1', 24000);
+  audioSeen.injectAudio('line1', Buffer.alloc(8));
+  audioSeen.injectEnd('line1');
+  audioSeen.injectCancel('line1', 60);
+  assert.deepEqual(sent, [['inject', 'line1', 24000], ['injectAudio', 'line1', 8], ['injectEnd', 'line1'], ['injectCancel', 'line1', 60]]);
+  fire({ type: 'inject', utteranceId: 'line1', state: 'started', positionMs: 0, atMs: 1200 });
+  fire({ type: 'inject', utteranceId: 'line1', state: 'position', positionMs: 50, atMs: 1250 });
+  fire({ type: 'inject', utteranceId: 'line1', state: 'finished', positionMs: 3000, atMs: 4200 });
+  assert.deepEqual(engineSaw.filter(event => event.type === 'inject').map(event => event.state), ['started', 'position', 'finished']);
+  await service.hangUp({ feedback: false });
+  const lines = (await readFile(path.join(tmp, 'practice-calls', 'call-1', 'debug.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const injects = lines.filter(line => line.event === 'inject');
+  assert.deepEqual(injects.map(line => line.data.state), ['started', 'finished'], 'the 50 ms positions are not logged');
+  assert.deepEqual(Object.keys(injects[0].data).sort(), ['atMs', 'positionMs', 'state', 'utteranceId']);
+});
+
+test('a helper without injection reports no capability to the engine, and the inject calls do nothing', async () => {
+  let audioSeen = null;
+  const { service } = await liveCall({ deps: {
+    engineFactory: options => { audioSeen = options.audio; return { start() {}, hangUp() {}, helperEvent() {}, state: () => ({ transcript: [], elapsedMs: 0 }), typed() {} }; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.equal(audioSeen.canInject(), false);
+  assert.equal(audioSeen.inject('line1', 24000), undefined);
 });
 
 test('a call that failed in setup keeps its debug log and nothing else', async () => {

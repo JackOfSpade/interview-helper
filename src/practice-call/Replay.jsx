@@ -1,23 +1,31 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { logEvent } from '../utils/eventLog.js';
-import { AlertTriangle, Pause, Play, Trash2 } from 'lucide-react';
+import { AlertTriangle, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipForward, Trash2 } from 'lucide-react';
 import { FeedbackView } from '../components/InterviewPracticePanel.jsx';
 import { replaySpeakerName } from './persona.js';
-import { pauseSpanAt as pauseSpanAtMs, activeLengthMs, activeTimeMs, bubbleLeftPx, chapterIndexAt, formatTime, normalizePauseSpans, markerTone, nearestMarker, positionToMs, scrubberKeyTarget, skipPausedMs, segmentFill, segmentLayout, turnAt } from './replayModel.js';
+import {
+  activeToRecordingMs, bubbleLeftPx, KIND_LABELS, buildReplayModel, chapterAtActive, formatTime, markerTone, nearestMarker, overviewOf, partAtActive,
+  partJumpTarget, playerKeyAction, positionToMs, scoreBand, skipPausedMs, timelineBlocks, timelineTicks, activeTimeMs,
+} from './replayModel.js';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
 import { padSnapshotAt, screenAt } from './screenMarkup.js';
 import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
 const TYPED_ONLY_DELIVERY = 'Delivery was not measured: every answer was typed.';
+const SPEEDS = Object.freeze([1, 1.25, 1.5, 2]);
+const SKIP_MS = 10_000;
+const BUBBLE_ESTIMATE_PX = 120;
+const RING = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300';
 
 // Whether the post-call analysis found every answer was typed rather than spoken.
 // Without the analysis figure (the payload may not carry it), the transcript decides: answers, all typed.
+// A chat line the call spoke in the candidate's voice (`voiced`) is a spoken answer, so it is never typed.
 const isTypedOnly = replay => {
   const given = replay?.analysis?.metrics?.typedOnly ?? replay?.metrics?.typedOnly;
   if (typeof given === 'boolean') return given;
   const answers = (Array.isArray(replay?.transcript) ? replay.transcript : []).filter(turn => (turn?.speaker ?? turn?.role) === 'candidate');
-  return answers.length > 0 && answers.every(turn => turn?.channel === 'chat');
+  return answers.length > 0 && answers.every(turn => turn?.channel === 'chat' && turn?.voiced !== true);
 };
 
 export function DeliverySection({ delivery, typedOnly = false }) {
@@ -40,202 +48,235 @@ export function DeliverySection({ delivery, typedOnly = false }) {
   </section>;
 }
 
-// Following playback in the transcript: how long a hand scroll is left alone, and the edge margin.
-const FOLLOW_PAUSE_MS = 4000;
-const FOLLOW_MARGIN_PX = 24;
+// Tints of a feedback score on the timeline and on the score badge.
+const BAND_FILL = Object.freeze({ good: 'bg-emerald-500', mid: 'bg-amber-500', low: 'bg-red-500', none: 'bg-slate-500' });
+const BAND_BADGE = Object.freeze({
+  good: 'bg-emerald-500/20 text-emerald-100 ring-emerald-400/50',
+  mid: 'bg-amber-500/20 text-amber-100 ring-amber-400/50',
+  low: 'bg-red-500/20 text-red-100 ring-red-400/50',
+  none: 'bg-white/10 text-white/70 ring-white/20',
+});
 
-// Width used for the hover bubble until it has been measured in the DOM.
-const BUBBLE_ESTIMATE_PX = 96;
-
-// Every moment marker on the timeline, with the pixel geometry the bar needs.
-function chapterMarkers(chapters, durationMs) {
-  const ticks = [];
-  (Array.isArray(chapters) ? chapters : []).forEach((chapter, chapterIndex) => {
-    const markers = Array.isArray(chapter?.markers) ? chapter.markers : [];
-    markers.forEach((marker, markerIndex) => {
-      const raw = Number(marker?.atMs);
-      if (!Number.isFinite(raw)) return;
-      const atMs = durationMs > 0 ? Math.min(Math.max(0, raw), durationMs) : Math.max(0, raw);
-      ticks.push({
-        key: `${chapterIndex}-${markerIndex}`,
-        kind: marker?.kind,
-        label: String(marker?.label || marker?.kind || 'Moment'),
-        atMs,
-        leftPct: durationMs > 0 ? (atMs / durationMs) * 100 : 0,
-      });
-    });
-  });
-  return ticks;
+function ScoreBadge({ score, size = 'lg', label = 'Score' }) {
+  if (typeof score !== 'number') return null;
+  const band = scoreBand(score);
+  return <span data-score-badge={band} aria-label={`${label} ${score} out of 10`}
+    className={`inline-flex shrink-0 items-baseline gap-0.5 rounded-xl font-semibold ring-1 ${BAND_BADGE[band]} ${size === 'lg' ? 'px-3 py-1.5 text-2xl' : 'px-2 py-0.5 text-sm'}`}>
+    {score}<span className={`font-normal opacity-70 ${size === 'lg' ? 'text-sm' : 'text-xs'}`}>/10</span>
+  </span>;
 }
 
-// Chaptered seek bar: a 5px rail that grows under the pointer, a chapter bubble
-// that replaces native tooltips, and one committed seek per pointer gesture.
-export function Scrubber({ chapters, durationMs, positionMs, onSeek, pauseSpans = [], format = formatTime }) {
-  const total = Math.max(0, Number(durationMs) || 0);
-  const chapterList = Array.isArray(chapters) ? chapters : [];
-  const layout = segmentLayout(chapterList, total);
-  const segments = layout.length ? layout : [{ index: 0, title: '', startMs: 0, endMs: total, leftPct: 0, widthPct: 100 }];
-  const markers = chapterMarkers(chapterList, total);
+// The timeline: the call's parts as blocks on the active clock, each split into a lighter
+// question and a solid answer, tinted by its score. One slider element; the blocks are drawing.
+function Timeline({ model, positionActiveMs, onSeek, disabled, format, currentIndex }) {
+  const total = model.activeMs;
+  const blocks = useMemo(() => timelineBlocks(model.chapters, total), [model.chapters, total]);
+  const ticks = useMemo(() => timelineTicks(model.chapters, model.pauseSpans, total), [model.chapters, model.pauseSpans, total]);
   const [pointer, setPointer] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [dragMs, setDragMs] = useState(0);
-  const [touchMode, setTouchMode] = useState(false);
-  const [bubbleWidth, setBubbleWidth] = useState(0);
-  const bubbleRef = useRef(null);
+  const shownMs = dragging ? dragMs : Math.min(Math.max(0, positionActiveMs), total);
+  const percent = total > 0 ? Math.min(100, Math.max(0, (shownMs / total) * 100)) : 0;
+  const hoverMs = pointer && total > 0 ? positionToMs(pointer.x, pointer.width, total) : null;
+  const hoverChapter = hoverMs === null ? null : model.chapters[chapterAtActive(model.chapters, Math.min(hoverMs, Math.max(0, total - 1)))] || null;
+  const tick = hoverMs === null ? null : nearestMarker(ticks.map(item => ({ ...item, atMs: item.activeMs })), hoverMs, total, pointer.width);
+  const currentTitle = model.chapters[currentIndex]?.synthetic ? '' : model.chapters[currentIndex]?.title || '';
+  const bubbleLeft = pointer ? bubbleLeftPx(pointer.x, pointer.width, Math.min(pointer.width, BUBBLE_ESTIMATE_PX)) : 0;
 
-  const displayMs = dragging ? dragMs : Math.min(Math.max(0, Number(positionMs) || 0), total);
-  const percent = total > 0 ? Math.min(100, Math.max(0, (displayMs / total) * 100)) : 0;
-  const currentIndex = chapterIndexAt(chapterList, total > 0 ? Math.min(displayMs, total - 1) : displayMs);
-  const currentTitle = currentIndex >= 0 ? String(chapterList[currentIndex]?.title || `Chapter ${currentIndex + 1}`) : '';
-  const pointerMs = pointer && total > 0 ? positionToMs(pointer.x, pointer.width, total) : null;
-  const hoverMs = pointerMs === null ? null : Math.min(pointerMs, Math.max(0, total - 1));
-  const hoverIndex = hoverMs === null ? -1 : chapterIndexAt(chapterList, hoverMs);
-  const hoverTitle = hoverIndex >= 0 ? String(chapterList[hoverIndex]?.title || `Chapter ${hoverIndex + 1}`) : '';
-  const active = Boolean(pointer) || dragging;
-  const markerHint = pointerMs === null ? null : nearestMarker(markers, pointerMs, total, pointer.width);
-  const bubbleTitle = markerHint ? markerHint.label : hoverTitle;
-  const bubbleMs = markerHint ? markerHint.atMs : pointerMs;
-  const bubblePx = pointer ? Math.min(pointer.width, bubbleWidth > 0 ? bubbleWidth : BUBBLE_ESTIMATE_PX) : 0;
-  const bubbleLeft = pointer ? bubbleLeftPx(pointer.x, pointer.width, bubblePx) : 0;
-
-  const readPointer = event => {
+  const read = event => {
     const rect = event.currentTarget.getBoundingClientRect?.();
     const width = rect && rect.width > 0 ? rect.width : 0;
     if (!(width > 0)) return null;
     return { x: Math.min(Math.max(0, Number(event.clientX) - rect.left), width), width };
   };
-  const previewAt = next => positionToMs(next.x, next.width, total);
   const onPointerDown = event => {
-    if (event.pointerType === 'touch') setTouchMode(true);
-    const next = readPointer(event);
-    if (!next || !(total > 0)) return;
-    try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* capture is best effort */ }
+    if (disabled || !(total > 0)) return;
+    const next = read(event);
+    if (!next) return;
+    try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* best effort */ }
     setPointer(next);
-    setDragMs(previewAt(next));
+    setDragMs(positionToMs(next.x, next.width, total));
     setDragging(true);
   };
   const onPointerMove = event => {
-    if (event.pointerType === 'touch') setTouchMode(true);
-    const next = readPointer(event);
+    if (disabled) return;
+    const next = read(event);
     if (!next) return;
     setPointer(next);
-    if (dragging) setDragMs(previewAt(next));
-    const measured = bubbleRef.current?.offsetWidth;
-    if (measured > 0 && measured !== bubbleWidth) setBubbleWidth(measured);
+    if (dragging) setDragMs(positionToMs(next.x, next.width, total));
   };
-  const finishDrag = event => {
-    if (event.pointerType === 'touch') setTouchMode(true);
+  const finish = event => {
     try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* already released */ }
     if (!dragging) return;
-    const next = event.type === 'pointercancel' ? null : readPointer(event);
-    const target = next ? previewAt(next) : dragMs;
+    const next = event.type === 'pointercancel' ? null : read(event);
+    const target = next ? positionToMs(next.x, next.width, total) : dragMs;
     setDragging(false);
-    setPointer(event.pointerType === 'mouse' && next ? next : null);
+    if (event.pointerType !== 'mouse') setPointer(null);
     onSeek(Math.min(Math.max(0, target), total));
   };
-  const onPointerLeave = () => { if (!dragging) setPointer(null); };
-  const onKeyDown = event => {
-    const target = scrubberKeyTarget(event.key, { altKey: event.altKey }, displayMs, total, chapterList);
-    if (target === null) return;
-    event.preventDefault();
-    onSeek(target);
-  };
 
-  return <div role="slider" tabIndex={0} aria-label="Replay position" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.round(displayMs)}
-    aria-valuetext={`${format(displayMs)} of ${format(total)}${currentTitle ? `, ${currentTitle}` : ''}`} data-scrubber="true"
-    onKeyDown={onKeyDown} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishDrag} onPointerCancel={finishDrag} onPointerLeave={onPointerLeave}
-    style={{ paddingTop: touchMode ? 17 : 6, paddingBottom: touchMode ? 17 : 6 }}
-    className="relative w-full cursor-pointer touch-none select-none rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
-    <div className="relative h-[5px] w-full">
-      {segments.map((segment, position) => {
-        const fill = segmentFill(segment, displayMs);
-        const reach = hoverMs === null ? fill : segmentFill(segment, hoverMs);
-        // With no chapters the single fallback segment is the whole bar, so it grows whenever the bar is active.
-        const grown = active && (layout.length === 0 || segment.index === hoverIndex);
-        const scaleY = active ? (grown ? 1.8 : 1) : 0.6;
-        const last = position === segments.length - 1;
-        return <div key={`segment-${segment.index}`} data-chapter={segment.index}
-          className="absolute bottom-0 h-[5px] origin-bottom transition-transform duration-100 ease-out"
-          style={{ left: `${segment.leftPct}%`, width: last ? `${segment.widthPct}%` : `calc(${segment.widthPct}% - 2px)`, transform: `scaleY(${scaleY})` }}>
-          <div aria-hidden="true" className="absolute inset-0 bg-white/20" />
-          <div aria-hidden="true" className="absolute inset-y-0 left-0 bg-violet-400" style={{ width: `${fill * 100}%` }} />
-          {reach > fill && <div aria-hidden="true" className="absolute inset-y-0 bg-white/40" style={{ left: `${fill * 100}%`, width: `${(reach - fill) * 100}%` }} />}
+  return <div role="slider" tabIndex={disabled ? -1 : 0} aria-label="Replay position" aria-disabled={disabled ? 'true' : undefined}
+    aria-valuemin={0} aria-valuemax={Math.round(total)} aria-valuenow={Math.round(shownMs)}
+    aria-valuetext={`${format(shownMs)} of ${format(total)}${currentTitle ? `, ${currentTitle}` : ''}`} data-timeline="true"
+    onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finish} onPointerCancel={finish} onPointerLeave={() => { if (!dragging) setPointer(null); }}
+    className={`relative w-full touch-none select-none rounded-lg py-3 ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'} ${RING}`}>
+    <div className="relative h-12 w-full">
+      {blocks.map(block => {
+        const fill = BAND_FILL[block.band];
+        const current = block.index === currentIndex;
+        return <div key={`block-${block.index}`} data-chapter={block.index} data-band={block.band} data-current={current ? 'true' : undefined}
+          className={`absolute inset-y-0 overflow-hidden rounded-[4px] ${current ? 'ring-2 ring-white/90' : ''}`}
+          style={{ left: `${block.leftPct}%`, width: `max(2px, calc(${block.widthPct}% - 2px))` }}>
+          <div aria-hidden="true" data-part="question" className={`absolute inset-y-0 left-0 ${fill} opacity-40`} style={{ width: `${block.questionPct}%` }} />
+          <div aria-hidden="true" data-part="answer" className={`absolute inset-y-0 right-0 ${fill}`} style={{ width: `${100 - block.questionPct}%` }} />
         </div>;
       })}
-      {total > 0 && pauseSpans.map((span, at) => <span key={`paused-${at}`} aria-hidden="true" data-pause-span={at} className="pc-paused-span pointer-events-none absolute inset-y-0"
-        style={{ left: `${(span.startMs / total) * 100}%`, width: `${((span.endMs - span.startMs) / total) * 100}%` }} />)}
-      {markers.map(marker => <span key={`marker-${marker.key}`} aria-hidden="true" data-marker-kind={marker.kind}
-        className={`absolute bottom-[5px] h-1 w-0.5 ${markerTone(marker.kind)}`} style={{ left: `${marker.leftPct}%` }} />)}
-      <div aria-hidden="true" className="absolute inset-y-0 w-px bg-violet-200/80" style={{ left: `${percent}%` }} />
-      <div data-scrubber-knob="true" aria-hidden="true"
-        className="pointer-events-none absolute top-1/2 h-[13px] w-[13px] rounded-full bg-violet-400 ring-1 ring-violet-200/40 transition-transform duration-100 ease-out"
-        style={{ left: `${percent}%`, transform: `translate(-50%, -50%) scale(${dragging ? 1.4 : active || touchMode ? 1 : 0})` }} />
-      {pointer && bubbleMs !== null && <div ref={bubbleRef} aria-hidden="true" data-scrubber-bubble="true"
-        className="pointer-events-none absolute z-20 max-w-[160px] rounded bg-black/85 px-1.5 py-1 text-[10px] leading-tight text-white shadow-lg"
-        style={{ left: `${bubbleLeft}px`, bottom: 'calc(100% + 8px)' }}>
-        {bubbleTitle ? <p className="truncate text-white/90">{bubbleTitle}</p> : null}
-        <p className="font-mono text-[9px] text-white/60">{format(bubbleMs)}{pauseSpanAtMs(pauseSpans, bubbleMs) ? ' · paused' : ''}</p>
+      {blocks.length === 0 && <div aria-hidden="true" className="absolute inset-0 rounded-[4px] bg-white/10" />}
+      {ticks.map(item => <span key={`tick-${item.key}`} aria-hidden="true" data-marker-kind={item.kind}
+        className={`pointer-events-none absolute top-0 h-2 w-0.5 -translate-x-1/2 ${markerTone(item.kind)}`} style={{ left: `${item.leftPct}%` }} />)}
+      <div aria-hidden="true" data-playhead="true" className="pointer-events-none absolute -inset-y-1.5 w-0.5 -translate-x-1/2 rounded bg-white shadow" style={{ left: `${percent}%` }}>
+        <span data-timeline-knob="true" className="absolute -top-1 left-1/2 h-3.5 w-3.5 -translate-x-1/2 rounded-full bg-white shadow ring-2 ring-[#202124]" />
+      </div>
+      {pointer && hoverMs !== null && !disabled && <div aria-hidden="true" data-timeline-bubble="true"
+        className="pointer-events-none absolute z-20 max-w-[220px] rounded-md bg-black/90 px-2 py-1.5 text-xs leading-tight text-white shadow-lg"
+        style={{ left: `${bubbleLeft}px`, bottom: 'calc(100% + 10px)' }}>
+        <p className="truncate font-medium">{tick ? tick.label : hoverChapter && !hoverChapter.synthetic ? hoverChapter.title : 'Call'}</p>
+        <p className="font-mono text-[11px] text-white/65">{format(tick ? tick.atMs : hoverMs)}{!tick && typeof hoverChapter?.score === 'number' ? ` · ${hoverChapter.score}/10` : ''}</p>
       </div>}
     </div>
   </div>;
 }
 
-function TurnList({ transcript, currentTurn, onSeek, replay, format = formatTime }) {
-  if (!transcript.length) return <p className="text-[11px] text-white/40">No transcript for this call.</p>;
-  return <ol aria-label="Call transcript" className="space-y-1">
-    {transcript.map((turn, index) => {
-      const startMs = turn?.startMs;
-      const timed = typeof startMs === 'number' && Number.isFinite(startMs);
-      const current = index === currentTurn;
-      const mine = (turn?.speaker ?? turn?.role) === 'candidate';
-      const label = mine ? 'You' : replaySpeakerName(replay, turn?.speakerId);
-      // A turn several interviewers spoke in shows each part under its own speaker.
-      const segments = !mine && Array.isArray(turn?.segments) && turn.segments.length > 1 ? turn.segments : null;
-      const body = segments
-        ? segments.map((segment, at) => <span key={at} data-segment-speaker={segment?.speakerId} className="block"><span className="mr-1 text-[9px] uppercase text-white/45">{replaySpeakerName(replay, segment?.speakerId)}:</span>{segment?.text}</span>)
-        : turn?.text;
-      // A remark said over another speaker is that person's line, marked as such.
-      const overMark = !mine && turn?.overlay ? <span data-over-mark="true" className="mr-1 text-[9px] italic text-white/45">(over the speaker)</span> : null;
-      return <li key={`turn-${index}`} data-overlay={!mine && turn?.overlay ? 'true' : undefined}>
-        {timed ? <button type="button" onClick={() => onSeek(startMs)} aria-current={current ? 'true' : undefined} data-current-turn={current ? 'true' : 'false'}
-          aria-label={`Seek to ${turn?.text || (mine ? 'your turn' : 'interviewer turn')} at ${format(startMs)}`}
-          className={`block w-full rounded px-1.5 py-1 text-left text-[11px] ${current ? 'bg-violet-500/25 text-violet-50 ring-1 ring-violet-300/40' : 'text-white/70 hover:bg-white/5'}`}>
-          <span className="mr-1 text-[9px] uppercase text-white/45">{label} · {format(startMs)}</span>{overMark}{body}
-        </button> : <div data-untimed-turn="true" data-current-turn="false" className="block w-full rounded px-1.5 py-1 text-left text-[11px] text-white/40">
-          <span className="mr-1 text-[9px] uppercase text-white/45">{label}</span>{overMark}{body}
-        </div>}
-      </li>;
-    })}
-  </ol>;
+function Block({ label, tone = 'neutral', children }) {
+  const styles = tone === 'work' ? 'border-amber-400/40 bg-amber-500/10' : 'border-white/10 bg-white/5';
+  return <section aria-label={label} data-feedback-block={label} className={`rounded-xl border p-4 ${styles}`}>
+    <h3 className={`text-xs font-semibold uppercase tracking-wide ${tone === 'work' ? 'text-amber-200' : 'text-white/55'}`}>{label}</h3>
+    <p className={`mt-1.5 whitespace-pre-line text-base leading-relaxed ${tone === 'work' ? 'text-amber-50' : 'text-white/90'}`}>{children}</p>
+  </section>;
 }
 
-export default function Replay({ replay, api, initialPositionMs = 0 }) {
-  const durationMs = Math.max(0, Number(replay?.durationMs) || 0);
-  const chapters = Array.isArray(replay?.chapters) ? replay.chapters : [];
-  const transcript = Array.isArray(replay?.transcript) ? replay.transcript : [];
+// The feedback that belongs to the part under the playhead.
+function PartFeedback({ chapter, hasFeedback }) {
+  const entry = chapter.feedback;
+  return entry ? <>{PartFeedbackMain({ chapter, hasFeedback })}<ExtraMoments items={entry.extras} /></> : PartFeedbackMain({ chapter, hasFeedback });
+}
+
+// Follow-up moments in the same part, shown under its main feedback.
+function ExtraMoments({ items }) {
+  if (!Array.isArray(items) || !items.length) return null;
+  return <ul aria-label="Also in this part" className="mt-3 space-y-2">{items.map((item, index) => <li key={index} className="flex flex-wrap items-baseline gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-base text-white/85">
+    <span className="rounded-full bg-violet-500/20 px-2.5 py-0.5 text-xs text-violet-100">{KIND_LABELS[item.kind] || item.kind || 'Moment'}</span>
+    <ScoreBadge score={item.score} />
+    {item.note && <span>{item.note}</span>}
+  </li>)}</ul>;
+}
+
+function PartFeedbackMain({ chapter, hasFeedback }) {
+  const entry = chapter.feedback;
+  if (!entry) return hasFeedback ? <p data-feedback-empty="true" className="text-base text-white/55">No notes for this part.</p> : null;
+  const item = entry.item;
+  if (entry.kind === 'moment') {
+    return <div className="space-y-3" data-feedback-kind="moment">
+      <div className="flex flex-wrap items-center gap-3">
+        <ScoreBadge score={item.score} />
+        <span className="rounded-full bg-violet-500/20 px-3 py-1 text-sm text-violet-100">{KIND_LABELS[item.kind] || item.kind || 'Moment'}</span>
+      </div>
+      {item.note ? <p className="text-lg leading-relaxed text-white/90">{item.note}</p> : <p className="text-base text-white/55">No notes for this part.</p>}
+    </div>;
+  }
+  const none = !item.covered && !item.improve && !item.adapted;
+  return <div className="space-y-3" data-feedback-kind="planned">
+    <ScoreBadge score={item.score} />
+    {item.covered && <Block label="What worked">{item.covered}</Block>}
+    {item.improve && <Block label="Work on" tone="work">{item.improve}</Block>}
+    {item.adapted && <Block label="Adapting">{item.adapted}</Block>}
+    {none && <p className="text-base text-white/55">No notes for this part.</p>}
+    {item.extension && <details className="practice-extension rounded-xl border border-white/10 px-4 py-2.5 text-sm text-white/70">
+      <summary className={`cursor-pointer rounded ${RING}`}>Optional extension</summary>
+      <p className="mt-1 text-xs text-white/45">Say this only if you can back it with a real example.</p>
+      <p className="mt-1 text-base text-white/80">{item.extension}</p>
+    </details>}
+  </div>;
+}
+
+function PartChips({ chapter, part }) {
+  const asker = chapter.asker;
+  const label = chapter.hasAnswer ? null : 'Interviewer';
+  return <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-part-now={part}>
+    <div role="group" aria-label="Where we are in this part" className="inline-flex overflow-hidden rounded-full border border-white/15 text-sm">
+      <span data-part-chip="question" aria-current={part === 'question' ? 'true' : undefined} className={`px-3 py-1 ${part === 'question' ? 'bg-white text-[#202124]' : 'text-white/55'}`}>{label || 'Question'}</span>
+      {chapter.hasAnswer && <span data-part-chip="answer" aria-current={part === 'answer' ? 'true' : undefined} className={`px-3 py-1 ${part === 'answer' ? 'bg-white text-[#202124]' : 'text-white/55'}`}>Your answer</span>}
+    </div>
+    {asker?.name && <p className="text-sm text-white/65">Asked by <span className="text-white/90">{asker.name}</span>{asker.role ? <span className="text-white/50"> · {asker.role}</span> : null}</p>}
+  </div>;
+}
+
+function Overview({ model, replay, overview, typedOnly, hasAudio, summaryOpen, onSummaryOpen, showAll, onShowAll, callTitle }) {
+  const feedback = replay?.feedback || null;
+  return <div data-replay-overview="true" className="mx-auto w-full max-w-3xl space-y-5">
+    <div className="flex flex-wrap items-center gap-4">
+      {feedback && overview.score !== null && <ScoreBadge score={overview.score} label="Overall score" />}
+      <div className="min-w-0">
+        <h2 className="text-2xl font-normal text-white">{feedback ? 'How the call went' : callTitle}</h2>
+        <p className="text-sm text-white/55">{formatTime(model.activeMs)} of talking{model.chapters.length > 1 ? ` · ${model.chapters.length} parts` : ''}</p>
+      </div>
+    </div>
+    {feedback && overview.summary && <p data-overview-summary="true" className="whitespace-pre-line text-lg leading-relaxed text-white/90">
+      {summaryOpen ? overview.fullSummary : overview.summary}
+      {overview.summaryCut && <> <button type="button" onClick={() => onSummaryOpen(!summaryOpen)} aria-expanded={summaryOpen} className={`rounded text-base text-violet-200 underline underline-offset-2 hover:text-violet-100 ${RING}`}>{summaryOpen ? 'Less' : 'More'}</button></>}
+    </p>}
+    {overview.priorities.length > 0 && <section aria-label="Work on first" data-overview-priorities="true" className="rounded-xl border border-amber-400/40 bg-amber-500/10 p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-200">Work on first</h3>
+      <ol className="mt-2 list-decimal space-y-2 pl-5 text-base leading-relaxed text-amber-50">{overview.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol>
+    </section>}
+    <p data-overview-hint="true" className="text-sm text-white/55">{hasAudio ? 'Press play, or pick a part on the timeline, to see the feedback for what you hear.' : feedback ? 'The recording is gone, so the timeline is off. Your feedback is below.' : 'The recording is gone, so there is nothing to play.'}</p>
+    {feedback && <div>
+      <button type="button" onClick={() => onShowAll(!showAll)} aria-expanded={showAll} data-all-feedback-toggle="true"
+        className={`rounded-lg border border-white/15 px-3 py-1.5 text-sm text-violet-100 hover:bg-white/5 ${RING}`}>{showAll ? 'Hide all feedback' : 'All feedback'}</button>
+      {showAll && <div data-all-feedback="true" className="mt-3 space-y-3 rounded-xl bg-[#2d2e30] p-3">
+        <FeedbackView feedback={feedback} typedOnly={typedOnly} compact />
+        <DeliverySection delivery={feedback.delivery} typedOnly={typedOnly} />
+      </div>}
+    </div>}
+  </div>;
+}
+
+export default function Replay({ replay, api, initialPositionMs = 0, initialShowAll = false }) {
+  const model = useMemo(() => buildReplayModel(replay), [replay]);
+  const { durationMs, activeMs, pauseSpans } = model;
   const [positionMs, setPositionMs] = useState(Math.max(0, Number(initialPositionMs) || 0));
   const [playing, setPlaying] = useState(false);
+  const [rate, setRate] = useState(1);
+  const [interacted, setInteracted] = useState(false);
+  const [overviewPinned, setOverviewPinned] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [showAll, setShowAll] = useState(Boolean(initialShowAll));
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleted, setDeleted] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
   const audioRef = useRef(null);
-  const chaptersRef = useRef(null);
-  const scrollRef = useRef(null);
-  const handScrollAtRef = useRef(0);
   const pendingSeekRef = useRef(null);
   const audioUrl = !deleted && replay?.audioUrl ? replay.audioUrl : null;
   const analysis = replay?.analysis || null;
-  const pauseSpans = useMemo(() => normalizePauseSpans(replay?.pauseSpans, durationMs), [replay?.pauseSpans, durationMs]);
-  const activeMs = activeLengthMs(durationMs, pauseSpans, replay?.activeMs);
-  const hasPauses = pauseSpans.length > 0 && activeMs < durationMs;
-  // Times shown to the candidate leave the paused time out; positions stay on the recording clock.
-  const shown = ms => formatTime(hasPauses ? activeTimeMs(pauseSpans, ms) : ms);
-  const seek = ms => {
+  const hasFeedback = !!replay?.feedback;
+  const typedOnly = isTypedOnly(replay);
+  const overview = useMemo(() => overviewOf(replay?.feedback), [replay?.feedback]);
+
+  const activePos = activeTimeMs(pauseSpans, positionMs);
+  const currentIndex = chapterAtActive(model.chapters, activePos);
+  const chapter = currentIndex >= 0 ? model.chapters[currentIndex] : null;
+  const part = chapter ? partAtActive(chapter, activePos) : 'question';
+  const showOverview = overviewPinned || (!interacted && positionMs === 0) || !chapter;
+  const fmt = ms => formatTime(ms);
+
+  const seek = useCallback(ms => {
     const raw = Math.max(0, Number(ms) || 0);
     const clamped = durationMs > 0 ? Math.min(raw, durationMs) : raw;
     // A paused stretch is never played: landing in one goes to its end.
     const target = skipPausedMs(pauseSpans, clamped);
     setPositionMs(target);
+    setInteracted(true);
+    setOverviewPinned(false);
     const audio = audioRef.current;
     let ready = false;
     if (audio) {
@@ -243,7 +284,11 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
       if (ready) { try { audio.currentTime = target / 1000; } catch { ready = false; } }
     }
     pendingSeekRef.current = ready ? null : target;
-  };
+  }, [durationMs, pauseSpans]);
+  const seekActive = useCallback(ms => {
+    const clamped = Math.min(Math.max(0, Number(ms) || 0), activeMs);
+    seek(activeToRecordingMs(pauseSpans, clamped));
+  }, [activeMs, pauseSpans, seek]);
   const applyPendingSeek = () => {
     const pending = pendingSeekRef.current;
     const audio = audioRef.current;
@@ -252,16 +297,21 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     pendingSeekRef.current = null;
     setPositionMs(pending);
   };
-  const togglePlay = () => {
+  const togglePlay = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || !audioUrl) return;
     if (playing) { try { audio.pause?.(); } catch { /* detached */ } setPlaying(false); return; }
+    setInteracted(true);
+    setOverviewPinned(false);
+    // Played to the end: play again from the start.
+    if (durationMs > 0 && positionMs >= durationMs - 250) seek(0);
     try {
       const started = audio.play?.();
       if (started && typeof started.catch === 'function') started.catch((error) => { logEvent('WARN recording did not play:', error?.name || 'error', error?.message || ''); setPlaying(false); });
       setPlaying(true);
     } catch { setPlaying(false); }
-  };
+  }, [audioUrl, durationMs, playing, positionMs, seek]);
+  const jumpPart = useCallback(direction => seekActive(partJumpTarget(model.chapters, activePos, direction, activeMs)), [model.chapters, activePos, activeMs, seekActive]);
   const confirmDelete = async () => {
     if (typeof api?.deleteRecording === 'function') {
       try { await api.deleteRecording(); }
@@ -276,144 +326,157 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     setConfirmingDelete(false);
     setPlaying(false);
   };
-  const currentTurn = turnAt(transcript, positionMs);
-  const currentChapterIndex = chapterIndexAt(chapters, positionMs);
-  const currentChapterTitle = currentChapterIndex >= 0 ? String(chapters[currentChapterIndex]?.title || `Chapter ${currentChapterIndex + 1}`) : '';
-  const showChapters = () => chaptersRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-  const hasFeedback = !!replay?.feedback;
-  const typedOnly = isTypedOnly(replay);
+
+  // Playback speed follows the buttons, and a new recording starts at the chosen speed.
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    try { audio.playbackRate = rate; } catch { /* not ready */ }
+  }, [rate, audioUrl]);
+  // While playing, follow the audio every frame: a smooth playhead, and a pause is jumped over
+  // at once instead of up to a quarter second late.
+  useEffect(() => {
+    if (!playing || typeof requestAnimationFrame !== 'function') return undefined;
+    let frame = 0;
+    let last = -1;
+    const tick = () => {
+      const audio = audioRef.current;
+      if (audio && pendingSeekRef.current === null) {
+        const now = (Number(audio.currentTime) || 0) * 1000;
+        const landing = skipPausedMs(pauseSpans, now);
+        if (landing !== now) { try { audio.currentTime = landing / 1000; } catch { /* not seekable yet */ } }
+        if (Math.abs(landing - last) >= 30) { last = landing; setPositionMs(landing); }
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, pauseSpans]);
+
+  const onKeyDown = event => {
+    const action = playerKeyAction(event.key, { altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey });
+    if (!action || !audioUrl) return;
+    const tag = String(event.target?.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return;
+    // Space on a button or a disclosure belongs to that control.
+    if (action.type === 'toggle' && (tag === 'BUTTON' || tag === 'SUMMARY' || tag === 'A')) return;
+    // In the feedback area Up, Down, Home, End and Space scroll it, as they would any page.
+    if (action.type !== 'seekBy' && event.target?.closest?.('[data-replay-focus]')) return;
+    event.preventDefault();
+    if (action.type === 'toggle') togglePlay();
+    else if (action.type === 'seekBy') seekActive(activePos + action.deltaMs);
+    else if (action.type === 'part') jumpPart(action.direction);
+    else if (action.type === 'seekTo') seekActive(action.ms);
+  };
+
   // What was on the shared screen, and the code the candidate had written, at this moment.
   const shownScreen = screenAt(replay?.screens, positionMs);
   const shownPad = padSnapshotAt(replay?.pad, positionMs);
-  const hasShare = (Array.isArray(replay?.screens) && replay.screens.length > 0) || (Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0);
-  // While playing, keep the current turn in view by moving this container only (scrollIntoView
-  // would also scroll the ancestors). Not on first mount, and not just after the reader scrolled.
-  const markHandScroll = () => { handScrollAtRef.current = Date.now(); };
-  const followedTurnRef = useRef(currentTurn);
-  useEffect(() => {
-    if (followedTurnRef.current === currentTurn) return;
-    followedTurnRef.current = currentTurn;
-    const container = scrollRef.current;
-    if (!playing || !container || currentTurn < 0 || Date.now() - handScrollAtRef.current < FOLLOW_PAUSE_MS) return;
-    const row = container.querySelector?.('[data-current-turn="true"]');
-    if (!row) return;
-    const view = container.getBoundingClientRect();
-    const at = row.getBoundingClientRect();
-    if (at.top >= view.top + FOLLOW_MARGIN_PX && at.bottom <= view.bottom - FOLLOW_MARGIN_PX) return;
-    container.scrollTop += at.top - view.top - Math.max(FOLLOW_MARGIN_PX, (view.height - at.height) / 3);
-  }, [currentTurn, playing]);
-  // The review leads: it is what the call window turns into once processing is done.
-  return <main className="flex h-screen flex-col overflow-hidden bg-[#202124] p-4 text-violet-50" aria-label="Call replay" data-replay-root="true">
-    <header className="pc-rise flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
-      <h1 className="text-lg font-normal text-white">{hasFeedback ? 'Your call feedback' : 'Call replay'}</h1>
-      <div className="flex items-center gap-1">
-        <button type="button" aria-label={playing ? 'Pause recording' : 'Play recording'} onClick={togglePlay} disabled={!audioUrl}
-          className="flex items-center gap-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-violet-100 hover:bg-white/5 disabled:opacity-40">
-          {playing ? <Pause size={12} aria-hidden="true" /> : <Play size={12} aria-hidden="true" />}{playing ? 'Pause' : 'Play'}
-        </button>
-        <button type="button" aria-label="Delete recording" onClick={() => setConfirmingDelete(true)} disabled={!audioUrl}
-          className="flex items-center gap-1 rounded-md border border-red-400/30 bg-red-500/15 px-2 py-1 text-[11px] text-red-100 hover:bg-red-500/25 disabled:opacity-40">
-          <Trash2 size={12} aria-hidden="true" />Delete recording
-        </button>
+  const hasPadSnapshots = Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0;
+  const showScreen = !showOverview && !!shownScreen;
+  const showPad = !showOverview && hasPadSnapshots && !!shownPad;
+
+  const callTitle = replay?.persona?.name ? `Interview with ${replay.persona.name}` : 'Practice interview';
+  const partTitle = chapter ? (chapter.synthetic ? callTitle : chapter.title) : '';
+  const startedAt = replay?.startedAt ? new Date(replay.startedAt) : null;
+  const dateLabel = startedAt && !Number.isNaN(startedAt.getTime()) ? startedAt.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+
+  return <main onKeyDown={onKeyDown} className="flex h-screen min-w-0 flex-col overflow-hidden bg-[#202124] text-violet-50" aria-label="Call replay" data-replay-root="true">
+    <header className="pc-rise flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-2.5">
+      <div className="min-w-0 flex-1">
+        <h1 className="truncate text-base font-normal text-white">{callTitle}</h1>
+        <p className="truncate text-xs text-white/50">{[dateLabel, `${formatTime(activeMs)} long`].filter(Boolean).join(' · ')}</p>
       </div>
+      {hasFeedback && overview.score !== null && <ScoreBadge score={overview.score} size="sm" label="Overall score" />}
+      <button type="button" onClick={() => setOverviewPinned(true)} aria-pressed={showOverview} aria-label="Overview"
+        className={`rounded-lg border border-white/15 px-3 py-1.5 text-sm hover:bg-white/5 ${showOverview ? 'bg-white/10 text-white' : 'text-violet-100'} ${RING}`}>Overview</button>
+      <button type="button" aria-label="Delete recording" onClick={() => setConfirmingDelete(true)} disabled={!audioUrl}
+        className={`flex items-center gap-1.5 rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-1.5 text-sm text-red-100 hover:bg-red-500/25 disabled:opacity-40 ${RING}`}>
+        <Trash2 size={14} aria-hidden="true" /><span className="hidden min-[820px]:inline">Delete recording</span>
+      </button>
     </header>
-    <div data-replay-body="true" className={`mt-3 grid min-h-0 flex-1 gap-4 ${hasFeedback ? 'grid-rows-[minmax(0,1fr)_minmax(0,1fr)] min-[720px]:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] min-[720px]:grid-rows-[minmax(0,1fr)]' : 'grid-rows-[minmax(0,1fr)]'}`}>
-    {hasFeedback && <section aria-label="Feedback" tabIndex={0} data-replay-scroll="feedback" className="pc-rise pc-scroll-hidden min-h-0 space-y-2 overflow-y-auto rounded-xl bg-[#2d2e30] p-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300" style={{ animationDelay: '80ms' }}>
-      <FeedbackView feedback={replay.feedback} typedOnly={typedOnly} />
-      <DeliverySection delivery={replay.feedback.delivery} typedOnly={typedOnly} />
-    </section>}
-    <div data-replay-column="player" className="pc-rise flex min-h-0 min-w-0 flex-col gap-2" style={{ animationDelay: hasFeedback ? '180ms' : '80ms' }}>
-    <div data-replay-player="true" className="shrink-0 space-y-2">
-    <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" aria-label="Call recording"
-      onLoadedMetadata={applyPendingSeek}
-      onTimeUpdate={event => {
-        if (pendingSeekRef.current !== null) return;
-        const audio = event.currentTarget;
-        const now = (Number(audio.currentTime) || 0) * 1000;
-        const landing = skipPausedMs(pauseSpans, now);
-        if (landing !== now) {
-          try { audio.currentTime = landing / 1000; } catch { /* not seekable yet */ }
-          setPositionMs(landing);
-          return;
-        }
-        setPositionMs(now);
-      }}
-      onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
-    {!audioUrl && <p role="status" aria-label="Recording unavailable" className="rounded-md border border-white/10 bg-black/20 p-2 text-[11px] text-white/55">
-      {deleted ? 'Recording deleted. The transcript, chapters and feedback are kept.'
-        : replay?.recordingPruned ? `Only the ${replay.recordingsKept ?? 10} most recent calls keep their recording. The transcript, chapters and feedback of this one are kept.`
-          : 'The recording for this call is not available. The transcript and feedback are kept.'}
-    </p>}
-    {analysis?.status === 'analyzing' && <p role="status" aria-label="Analysis status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">Analysis is still running. Chapters and feedback may be incomplete.</p>}
-    {analysis?.status === 'failed' && <p role="alert" aria-label="Analysis failed" className="flex items-start gap-1 rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">
-      <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Analysis failed{analysis.error ? `: ${analysis.error}` : ''}. The transcript and recording are still available.
-    </p>}
-    {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">{deleteError}</p>}
-    <Scrubber chapters={chapters} durationMs={durationMs} positionMs={positionMs} onSeek={seek} pauseSpans={pauseSpans} format={shown} />
-    <div className="flex min-w-0 items-baseline gap-2 text-[10px] text-white/45">
-      <span className="shrink-0 whitespace-nowrap font-mono">{shown(positionMs)} / {hasPauses ? `${formatTime(activeMs)} · recording ${formatTime(durationMs)}` : formatTime(durationMs)}</span>
-      {currentChapterTitle
-        ? <button type="button" aria-label={`Current chapter: ${currentChapterTitle}. Show chapters`} onClick={showChapters}
-          className="flex min-w-0 items-center gap-1 rounded px-1 text-left text-violet-200/80 hover:bg-white/5 hover:text-violet-100">
-          <span aria-hidden="true">·</span><span className="truncate">{currentChapterTitle}</span><span aria-hidden="true">›</span>
-        </button>
-        : null}
-    </div>
-    {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-1 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-[11px] text-red-100">
-      <p>Delete the recording for this call? The transcript, chapters and feedback are kept.</p>
-      <div className="flex gap-1">
-        <button type="button" onClick={confirmDelete} aria-label="Confirm delete recording" className="rounded border border-red-400/40 bg-red-500/25 px-2 py-1 hover:bg-red-500/35">Delete</button>
-        <button type="button" onClick={() => setConfirmingDelete(false)} className="rounded border border-white/15 px-2 py-1 text-white/70 hover:bg-white/5">Keep recording</button>
-      </div>
+    {(!audioUrl || analysis?.status === 'analyzing' || analysis?.status === 'failed' || deleteError || confirmingDelete) && <div data-replay-notices="true" className="shrink-0 space-y-1.5 px-4 pt-2.5">
+      {!audioUrl && <p role="status" aria-label="Recording unavailable" className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/65">
+        {deleted ? 'Recording deleted. The feedback is kept.'
+          : replay?.recordingPruned ? `Only the ${replay.recordingsKept ?? 10} most recent calls keep their recording. The feedback of this one is kept.`
+            : 'The recording for this call is not available. The feedback is kept.'}
+      </p>}
+      {analysis?.status === 'analyzing' && <p role="status" aria-label="Analysis status" className="rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">Analysis is still running. Chapters and feedback may be incomplete.</p>}
+      {analysis?.status === 'failed' && <p role="alert" aria-label="Analysis failed" className="flex items-start gap-1.5 rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">
+        <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />Analysis failed{analysis.error ? `: ${analysis.error}` : ''}. The recording is still available.
+      </p>}
+      {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">{deleteError}</p>}
+      {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">
+        <p>Delete the recording for this call? The feedback is kept.</p>
+        <div className="flex gap-2">
+          <button type="button" onClick={confirmDelete} aria-label="Confirm delete recording" className={`rounded-md border border-red-400/40 bg-red-500/25 px-3 py-1 hover:bg-red-500/35 ${RING}`}>Delete</button>
+          <button type="button" onClick={() => setConfirmingDelete(false)} className={`rounded-md border border-white/15 px-3 py-1 text-white/70 hover:bg-white/5 ${RING}`}>Keep recording</button>
+        </div>
+      </div>}
     </div>}
-    </div>
-    <div ref={scrollRef} onWheel={markHandScroll} onTouchMove={markHandScroll} onKeyDown={markHandScroll} aria-label="Chapters and transcript" role="region" tabIndex={0} data-replay-scroll="chapters" className="pc-scroll-hidden min-h-0 flex-1 space-y-2 overflow-y-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
-    {/* A call that shared anything keeps this area at one height for the whole replay, so the
-        chapters under it do not jump as the playback moves in and out of a shared screen. */}
-    {hasShare && <section aria-label="Shared screen and code at this moment" data-replay-share="true" className="grid gap-2 lg:grid-cols-2">
-      {shownScreen
-        ? <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-44" />
-        : <p data-replay-share-empty="screen" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">Nothing was on the shared screen at this moment.</p>}
-      {shownPad
-        ? <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-44" />
-        : <p data-replay-share-empty="pad" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">No code had been written yet at this moment.</p>}
-    </section>}
-    <div className={`grid gap-2 ${hasFeedback ? '' : 'min-[720px]:grid-cols-2'}`}>
-      <section aria-label="Chapters" ref={chaptersRef} className="rounded-md border border-white/10 bg-black/20 p-2">
-        <p className="text-[10px] font-semibold uppercase text-white/45">Chapters</p>
-        {chapters.length === 0 && <p className="text-[11px] text-white/40">No chapters yet.</p>}
-        <ol className="mt-1 space-y-1">{chapters.map((chapter, index) => {
-          const markers = Array.isArray(chapter?.markers) ? chapter.markers : [];
-          const startMs = Number(chapter?.startMs) || 0;
-          const title = chapter?.title || `Chapter ${index + 1}`;
-          return <li key={`chapter-${index}`}>
-            <button type="button" onClick={() => seek(startMs)} aria-label={`Seek to ${title} at ${shown(startMs)}`}
-              className="flex w-full items-baseline justify-between gap-2 rounded px-1 text-left text-[11px] text-white/80 hover:bg-white/5">
-              <span>{title}</span><span className="font-mono text-[10px] text-white/45">{shown(startMs)}</span>
-            </button>
-            {markers.length > 0 && <ul aria-label={`Moments in ${title}`} className="ml-2 mt-0.5 space-y-0.5">{markers.map((marker, markerIndex) => {
-              const raw = Number(marker?.atMs) || 0;
-              const atMs = durationMs > 0 ? Math.min(Math.max(0, raw), durationMs) : Math.max(0, raw);
-              const label = marker?.label || marker?.kind || 'Moment';
-              return <li key={`marker-${index}-${markerIndex}`}>
-                <button type="button" onClick={() => seek(atMs)} aria-label={`Seek to ${label} at ${shown(atMs)}`}
-                  className="flex w-full items-center gap-1 rounded px-1 text-left text-[10px] text-white/65 hover:bg-white/5">
-                  <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${markerTone(marker?.kind)}`} />{label}<span className="ml-auto font-mono text-white/40">{shown(atMs)}</span>
-                </button>
-              </li>;
-            })}</ul>}
-          </li>;
-        })}</ol>
-      </section>
-      <section aria-label="Transcript" className="rounded-md border border-white/10 bg-black/20 p-2">
-        <p className="text-[10px] font-semibold uppercase text-white/45">Transcript</p>
-        <TurnList transcript={transcript} currentTurn={currentTurn} onSeek={seek} replay={replay} format={shown} />
-      </section>
-    </div>
-    </div>
-    </div>
-    </div>
+
+    <section aria-label="Now playing" data-replay-focus="true" data-focus-mode={showOverview ? 'overview' : 'part'} tabIndex={0}
+      className={`pc-scroll-hidden min-h-0 flex-1 overflow-y-auto px-4 py-5 min-[720px]:px-8 min-[720px]:py-6 ${RING}`}>
+      <p className="sr-only" role="status" aria-live="polite" data-replay-announce="true">{showOverview ? '' : partTitle}</p>
+      {showOverview
+        ? <Overview model={model} replay={replay} overview={overview} typedOnly={typedOnly} hasAudio={!!audioUrl} summaryOpen={summaryOpen} onSummaryOpen={setSummaryOpen} showAll={showAll} onShowAll={setShowAll} callTitle={callTitle} />
+        : <article key={chapter.index} data-focus-part={chapter.index} className="pc-fade mx-auto w-full max-w-6xl space-y-5">
+          {chapter.synthetic ? null : <PartChips chapter={chapter} part={part} />}
+          <h2 data-focus-title="true" className="text-3xl font-normal leading-tight text-white min-[1000px]:text-4xl">{partTitle}</h2>
+          <div className={`grid gap-6 ${showScreen || showPad ? 'min-[1000px]:grid-cols-2' : 'max-w-3xl'}`}>
+            <div className="min-w-0"><PartFeedback chapter={chapter} hasFeedback={hasFeedback} /></div>
+            {(showScreen || showPad) && <div data-replay-share="true" className="min-w-0 space-y-3">
+              {showScreen && <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-72" />}
+              {showPad && <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-60" />}
+            </div>}
+          </div>
+        </article>}
+    </section>
+
+    <footer data-replay-player="true" className="pc-rise shrink-0 border-t border-white/10 bg-[#17181a] px-4 pb-4 pt-3 min-[720px]:px-8" style={{ animationDelay: '120ms' }}>
+      <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" aria-label="Call recording"
+        onLoadedMetadata={() => { try { if (audioRef.current) audioRef.current.playbackRate = rate; } catch { /* not ready */ } applyPendingSeek(); }}
+        onTimeUpdate={event => {
+          if (pendingSeekRef.current !== null) return;
+          const audio = event.currentTarget;
+          const now = (Number(audio.currentTime) || 0) * 1000;
+          const landing = skipPausedMs(pauseSpans, now);
+          if (landing !== now) {
+            try { audio.currentTime = landing / 1000; } catch { /* not seekable yet */ }
+            setPositionMs(landing);
+            return;
+          }
+          setPositionMs(now);
+        }}
+        onPlay={() => { setPlaying(true); setInteracted(true); }} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
+      <div className="mx-auto grid w-full max-w-6xl grid-cols-[1fr_auto_1fr] items-center gap-3">
+        <span data-replay-clock="true" className="whitespace-nowrap font-mono text-sm text-white/70">{fmt(activePos)} / {fmt(activeMs)}</span>
+        <div className="flex items-center gap-1.5 min-[720px]:gap-3" role="group" aria-label="Playback controls">
+          <IconButton label="Previous part" onClick={() => jumpPart(-1)} disabled={!audioUrl}><SkipBack size={20} aria-hidden="true" /></IconButton>
+          <IconButton label="Back 10 seconds" onClick={() => seekActive(activePos - SKIP_MS)} disabled={!audioUrl}><RotateCcw size={22} aria-hidden="true" /></IconButton>
+          <button type="button" aria-label={playing ? 'Pause recording' : 'Play recording'} onClick={togglePlay} disabled={!audioUrl} data-play-button="true"
+            className={`grid h-14 w-14 shrink-0 place-items-center rounded-full bg-white text-[#202124] shadow-lg transition-transform hover:scale-105 active:scale-95 disabled:opacity-40 disabled:hover:scale-100 ${RING}`}>
+            {playing ? <Pause size={26} fill="currentColor" aria-hidden="true" /> : <Play size={26} fill="currentColor" className="translate-x-0.5" aria-hidden="true" />}
+          </button>
+          <IconButton label="Forward 10 seconds" onClick={() => seekActive(activePos + SKIP_MS)} disabled={!audioUrl}><RotateCw size={22} aria-hidden="true" /></IconButton>
+          <IconButton label="Next part" onClick={() => jumpPart(1)} disabled={!audioUrl}><SkipForward size={20} aria-hidden="true" /></IconButton>
+        </div>
+        <div role="group" aria-label="Playback speed" className="flex justify-end gap-0.5">
+          {SPEEDS.map(speed => <button key={speed} type="button" onClick={() => setRate(speed)} aria-pressed={rate === speed} aria-label={`Speed ${speed}x`} disabled={!audioUrl}
+            className={`rounded-md px-1.5 py-1 text-xs min-[720px]:px-2 min-[720px]:text-sm ${rate === speed ? 'bg-white/15 text-white' : 'text-white/55 hover:bg-white/5'} disabled:opacity-40 ${RING}`}>{speed}x</button>)}
+        </div>
+      </div>
+      <div className="mx-auto mt-2 w-full max-w-6xl">
+        <Timeline model={model} positionActiveMs={activePos} onSeek={seekActive} disabled={!audioUrl} format={fmt} currentIndex={currentIndex} />
+        <p data-replay-now-title="true" className="mt-0.5 truncate text-center text-sm text-white/65">{chapter && (interacted || positionMs > 0) ? partTitle : ''}</p>
+      </div>
+    </footer>
   </main>;
+}
+
+function IconButton({ label, onClick, disabled, children }) {
+  return <button type="button" aria-label={label} onClick={onClick} disabled={disabled}
+    className={`grid h-10 w-10 shrink-0 place-items-center rounded-full text-white/85 hover:bg-white/10 disabled:opacity-40 ${RING}`}>{children}</button>;
 }
 
 export { Replay };

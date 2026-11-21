@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
-import { VOICE_STABILITY_MAX, VOICE_STABILITY_MIN, buildInterviewerInstructions, buildOpenerInstructions, createReplyStreamParser, formatTurnMessage, pickPersona } from '../../electron/interviewPracticeCallPrompt.js';
+import { VOICE_STABILITY_MAX, VOICE_STABILITY_MIN, buildInterviewerInstructions, buildOpenerInstructions, buildWatcherInstructions, createReplyStreamParser, formatTurnMessage, formatWatchMessage, parseWatchDecision, pickPersona } from '../../electron/interviewPracticeCallPrompt.js';
 
 // Synthetic data only.
 const brief = {
@@ -250,14 +250,30 @@ const base = [
     },
   },
   {
+    name: 'interview practice prompt: the main session knows how the lead and each colleague interrupt, as style',
+    run() {
+      const text = buildInterviewerInstructions({
+        persona: { name: 'Alex Morgan', role: 'Manager', temperament: 'neutral' }, brief: { company: 'Acme', role: 'Engineer' }, cards: [], picked: [],
+        panel: [{ id: 'B', name: 'Sam Lee', role: 'Engineer', focus: 'systems', joins: 'start' }],
+        callPlan: { interviewKind: 'A panel.', people: [
+          { id: 'A', name: 'Alex Morgan', role: 'Manager', temperament: 'neutral', manner: 'Even.', interrupting: 'Lets people finish; steps in only when an answer runs well over.' },
+          { id: 'B', name: 'Sam Lee', role: 'Engineer', temperament: 'tough', manner: 'Direct.', interrupting: 'Jumps in at a sentence end to dig into numbers.' },
+        ], questions: [{ number: 1, askedBy: 'A', minutes: 5, probes: [] }], problems: [] },
+      });
+      assert(text.includes('How you interrupt (when, how readily and how it sounds; style only, never lines to repeat): Lets people finish; steps in only when an answer runs well over.'), 'the lead');
+      assert(text.includes('How they interrupt: Jumps in at a sentence end to dig into numbers.'), 'a colleague');
+    },
+  },
+  {
     name: 'interview practice prompt: wrap-up guidance is anchored to the upper target',
     run() {
       const text = buildInterviewerInstructions({ persona, brief, plan });
       assert(text.includes('from about 55:00 elapsed (5 minutes before the upper target of 60:00) start wrapping up'));
-      assert(text.includes('Past 60:00 elapsed, close the call now'));
+      assert(text.includes('Past 60:00 elapsed, do not start anything new of your own'));
+      assert(text.includes('The candidate\'s questions are never cut short for time'), 'the clock never cuts the candidate\'s questions');
       const custom = buildInterviewerInstructions({ persona, brief, plan, targetMinutes: [30, 40] });
       assert(custom.includes('from about 35:00 elapsed (5 minutes before the upper target of 40:00)'));
-      assert(custom.includes('Past 40:00 elapsed, close the call now'));
+      assert(custom.includes('Past 40:00 elapsed, do not start anything new of your own'));
       assert(!custom.includes('55:00'));
     },
   },
@@ -1316,6 +1332,91 @@ export default [
       const prompt = buildInterviewerInstructions({ persona, brief, plan, callPlan });
       assert.match(prompt, /A colleague greets the candidate once\. If they already said hello \(a remark spoken over the lead's introduction counts\) or were introduced and have already spoken, their first line on taking the floor starts with their question or a reference to what was said, never another hello\./u);
       assert(!buildInterviewerInstructions({ persona, brief, plan: plan, callPlan: soloPlan }).includes('greets the candidate once'), 'a call with no colleagues does not carry panel conduct');
+    },
+  },
+  {
+    name: 'interview practice prompt: the still-speaking rule asks for a reason and the personality, with no "rarely" and no fixed count',
+    run() {
+      const prompt = buildInterviewerInstructions({ persona, brief, plan, callPlan });
+      const rule = prompt.split('\n').find(line => line.includes('[The candidate is still speaking.'));
+      assert(rule, 'the rule is there');
+      assert(!/rarely/iu.test(rule) && !/couple of times/u.test(rule), 'no arbitrary frequency');
+      assert.match(rule, /running long against the time planned/u);
+      assert.match(rule, /drifted off the question/u);
+      assert.match(rule, /digging into/u);
+      assert.match(rule, /handling interruptions is part of the job/u);
+      assert.match(rule, /A reason without the personality for it means <listen\/>/u);
+      assert.match(rule, /\[Most recent: '\.\.\.'\]/u);
+      assert.match(rule, /Never cut in on the candidate's own questions/u);
+      assert.match(prompt, /the person named in the message as the one who would cut in is the one who speaks/u, 'the panel conduct names who speaks');
+      assert(!buildInterviewerInstructions({ persona, brief, plan, callPlan: soloPlan }).includes('the person named in the message as the one who would cut in'));
+    },
+  },
+  {
+    name: 'interview practice prompt: a live look renders the most recent sentence and who would cut in and why, only on a look',
+    run() {
+      const look = formatTurnMessage({ elapsedMs: 65000, candidateText: 'a long answer so far', stillSpeaking: true, mostRecent: 'We then moved it to a queue.', cutInBy: { id: 'B', name: 'John Reyes', reason: 'probe' } });
+      assert.match(look, /\[Most recent: 'We then moved it to a queue\.'\]/u);
+      assert.match(look, /John Reyes \(id B\) would cut in now, because a detail the candidate just mentioned is worth digging into now/u);
+      assert.match(look, /Start with <speaker id="B"\/>/u);
+      assert(look.indexOf("Candidate: 'a long answer so far'") < look.indexOf('[Most recent:'));
+      const lead = formatTurnMessage({ elapsedMs: 1000, candidateText: 'x', stillSpeaking: true, cutInBy: { id: 'A', reason: 'long' } });
+      assert.match(lead, /id A\) would cut in|interviewer with id A would cut in now, because the answer is running long/u);
+      assert(!lead.includes('<speaker'), 'the lead needs no tag');
+      const plain = formatTurnMessage({ elapsedMs: 1000, candidateText: 'x', mostRecent: 'ignored', cutInBy: { id: 'B', reason: 'long' } });
+      assert(!plain.includes('Most recent') && !plain.includes('would cut in'), 'nothing extra outside a look');
+    },
+  },
+  {
+    name: 'interview practice prompt: formatWatchMessage carries the question, the answer so far, the clocks and the most recent sentence',
+    run() {
+      const message = formatWatchMessage({ elapsedMs: 185000, questionText: 'Tell me about a migration.', questionNumber: 4, askedBy: 'B', answerText: 'We moved the jobs over.', answerMs: 95000, mostRecent: 'We moved the jobs over.' });
+      assert.match(message, /\[elapsed 03:05\]/u);
+      assert.match(message, /The answer has run 1:35/u);
+      assert.match(message, /asked by B, plan question 4: 'Tell me about a migration\.'/u);
+      assert.match(message, /\[Answer so far: 'We moved the jobs over\.'\]/u);
+      assert.match(message, /\[Most recent: 'We moved the jobs over\.'\]/u);
+      const bare = formatWatchMessage({ elapsedMs: 0, questionText: 'Q?', questionNumber: null, askedBy: null, answerText: '', answerMs: 0 });
+      assert(!bare.includes('plan question') && !bare.includes('Most recent') && !bare.includes(' by '));
+    },
+  },
+  {
+    name: 'interview practice prompt: parseWatchDecision reads a cut-in, a listen, a panel cut-in and anything unreadable as listen',
+    run() {
+      assert.deepEqual(parseWatchDecision('<listen/>'), { decision: 'listen', who: null, reason: null });
+      assert.deepEqual(parseWatchDecision('<cut-in who="B" reason="probe"/>'), { decision: 'cut-in', who: 'B', reason: 'probe' });
+      assert.deepEqual(parseWatchDecision('  <cut-in reason="long" who=\'a\' />\n'), { decision: 'cut-in', who: 'A', reason: 'long' });
+      assert.deepEqual(parseWatchDecision('<cut-in reason="enough"/>'), { decision: 'cut-in', who: null, reason: 'enough' });
+      for (const reason of ['long', 'off-topic', 'probe', 'enough', 'misunderstood', 'composure']) assert.equal(parseWatchDecision(`<cut-in who="A" reason="${reason}"/>`).reason, reason);
+      for (const bad of ['', undefined, null, 42, 'cut in now', '<cut-in/>', '<cut-in who="B"/>', '<cut-in who="B" reason="bored"/>', '<maybe/>', '<cut-in who="B" reason="probe"']) {
+        assert.deepEqual(parseWatchDecision(bad), { decision: 'listen', who: null, reason: null }, String(bad));
+      }
+      assert.equal(parseWatchDecision('<cut-in who="Z" reason="probe"/>').who, null, 'an id outside A to E is no one');
+    },
+  },
+  {
+    name: 'interview practice prompt: the watcher instructions carry the people\'s interrupting text, the plan minutes, both conditions, the end-of-call rule and the reply format',
+    run() {
+      const people = callPlan.people.map(item => ({ ...item, interrupting: item.id === 'A' ? 'Lets people finish; steps in at a sentence end, gently.' : item.id === 'B' ? 'Impatient; jumps in at a breath once he has enough.' : 'Waits for her own area.' }));
+      const text = buildWatcherInstructions({ persona, brief, plan, callPlan: { ...callPlan, people }, history: 'Candidate: hi' });
+      for (const line of ['Lets people finish; steps in at a sentence end, gently.', 'Impatient; jumps in at a breath once he has enough.', 'Waits for her own area.']) assert(text.includes(line), line);
+      assert.match(text, /Temperament: tough/u);
+      assert.match(text, /Terse, cares about trade-offs/u);
+      assert.match(text, /Plan question 2: "Synthetic planned question two\?"; asked by Test Person \(A\); about 5 minutes/u);
+      assert.match(text, /Plan question 1: "Synthetic planned question one\?"; asked by John Reyes \(B\); about 12\.5 minutes/u);
+      assert.match(text, /about 2 minutes for a behavioural story, 30 to 60 seconds for a factual answer/u);
+      assert.match(text, /needs BOTH a reason from the list AND the personality/u);
+      assert.match(text, /A pause or a slow stretch alone is never a reason/u);
+      assert.match(text, /Only for a role where handling interruptions is part of the job/u);
+      assert.match(text, /who is the person who asked the question \(the asker named in the message\) unless a colleague is clearly the one whose area the answer is in, and then less often than the asker would/u);
+      assert.match(text, /past about twice it, almost anyone would step in/u);
+      assert.match(text, /Never cut in on the candidate's own questions to the interviewers \(near the end of the call\)/u);
+      assert.match(text, /<listen\/>[^\n]*<cut-in who="B" reason="probe"\/>/u);
+      assert.match(text, /long, off-topic, probe, enough, misunderstood, composure/u);
+      assert.match(text, /CONVERSATION SO FAR[^\n]*\nCandidate: hi\n\nReply only READY now\.$/u, 'history goes before the READY line, which ends it');
+      assert(text.endsWith('Reply only READY now.'));
+      assert(buildWatcherInstructions({ persona, brief, plan }).endsWith('Reply only READY now.'), 'a bare options object still builds');
+      assert(text.length < 6000, 'short enough for a fast model');
     },
   },
   {

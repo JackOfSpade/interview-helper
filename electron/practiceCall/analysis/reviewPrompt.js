@@ -68,13 +68,18 @@ function startedText(value) {
   return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
-/** How the candidate answered: spoken answers, typed answers, or both. Acknowledgements are neither. */
+/**
+ * How the candidate answered: spoken answers, typed answers, or both. Acknowledgements are neither.
+ * A chat line the call voiced in the candidate's voice (`voiced`) is spoken, exactly like live speech;
+ * `live` counts only what the microphone heard, which is what the recording can be transcribed for.
+ */
 export function candidateAnswerKinds(transcript) {
   const turns = Array.isArray(transcript) ? transcript : [];
   const own = turns.filter(turn => turn?.speaker === 'candidate' && !turn.acknowledgement);
-  const spoken = own.filter(turn => turn.channel !== 'chat').length;
-  const typed = own.length - spoken;
-  return { spoken, typed, typedOnly: spoken === 0 && typed > 0 };
+  const typed = own.filter(turn => turn.channel === 'chat' && turn.voiced !== true).length;
+  const spoken = own.length - typed;
+  const live = own.filter(turn => turn.channel !== 'chat').length;
+  return { spoken, live, typed, typedOnly: spoken === 0 && typed > 0 };
 }
 
 /** Prepared cards may be `question`/`headline`/`bullets`/`example` or a single `answer`. */
@@ -188,12 +193,15 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
       ? turn.segments.filter(segment => line(segment?.text)) : [];
     // A hand-over inside one turn: each segment gets its own line so the reviewer sees who said what.
     const overlap = turn.overlay && turn.speaker !== 'candidate' ? ' (overlapping remark, said over the speaker)' : '';
-    const head = `[${index}] ${who}${overlap} ${clock(turn.startMs)}-${clock(turn.endMs)}${turn.channel && turn.channel !== 'audio' ? ` (${turn.channel})` : ''}:${segments.length ? '' : ` ${line(turn.text)}`}`;
+    // A voiced chat line was spoken on the call: it carries no (chat) mark, so it reads as the speech it was.
+    const channelMark = turn.channel && turn.channel !== 'audio' && !(turn.voiced === true && turn.speaker === 'candidate') ? ` (${turn.channel})` : '';
+    const head = `[${index}] ${who}${overlap} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(turn.text)}`}`;
     const extras = segments.map(segment => `    ${names.get(segment.speakerId) || 'interviewer'}: ${line(segment.text)}`);
     if (line(turn.heardText)) extras.push(`    heard as: ${line(turn.heardText)}`);
     const verbatim = wordsOf(wordsByTurn?.[index]);
     if (verbatim) extras.push(`    scribe verbatim: ${verbatim}`);
-    if (turn.interrupted) extras.push('    (the interviewer was still speaking when this turn started)');
+    if (turn.speaker === 'candidate' && turn.interrupted === true && turn.cutOffBy === 'interviewer') extras.push('    (the interviewer had to stop the candidate here: this answer was cut off by the interviewer, and only the words above were heard)');
+    else if (turn.interrupted) extras.push('    (the interviewer was still speaking when this turn started)');
     return [head, ...extras].join('\n');
   }).join('\n');
 }
@@ -220,8 +228,9 @@ const RULES = [
   '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title.',
   '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
+  '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the interviewer had to stop the candidate. Say so in delivery when it happened, with what ran on, and count it from the metrics (interviewerCutInCount), never from memory.',
   '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). Never fault the interviewer for asking about something the candidate has not done.',
-  '- Typed turns: a transcript turn marked (chat) was typed, not spoken. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure. Never critique typos, spelling, stray characters or missing punctuation in typed text as if they were speech; typed text is judged for content only.',
+  '- Typed turns: a transcript turn marked (chat) was typed, not spoken. Every turn without that mark was spoken, and all spoken answers are judged the same way. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure. Never critique typos, spelling, stray characters or missing punctuation in typed text as if they were speech; typed text is judged for content only.',
 ].join('\n');
 
 const SCOPE_RULES = [
@@ -290,7 +299,7 @@ function lengthLine(callRecord) {
   const total = Number(callRecord.durationMs);
   const paused = Number(callRecord.pausedMs);
   if (!(paused > 0) || !Number.isFinite(total)) return `length: ${clock(callRecord.durationMs)}`;
-  return `length: ${clock(Math.max(0, total - paused))} active. The call was also paused for ${clock(paused)} while the candidate typed; that paused time is excluded from the length and from every rate. Transcript times run on the recording's clock and include the pauses, so large gaps between turns are pauses, not silence.`;
+  return `length: ${clock(Math.max(0, total - paused))} active. The call was also paused for ${clock(paused)}; that paused time is excluded from the length and from every rate. Transcript times run on the recording's clock and include the pauses, so large gaps between turns are pauses, not silence.`;
 }
 
 /** The one review prompt: timed transcript, plan, metrics, tone, Scribe words. */
@@ -319,7 +328,9 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     candidateEnded || technicalEnd ? `review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the closing questions of the candidate as a gap. Say once in the overall summary that the call ended early${technicalEnd ? ' because of a technical problem' : ''} and the review covers the call up to that point` : '',
     callRecord.reason === 'interviewer' ? 'how the call ended: the interviewer wrapped up and ended the call' : '',
   ].filter(Boolean).join('\n');
-  const measuredProsody = prosodyByEntry(transcript, callRecord.candidateProsody);
+  // Where the voice came from is not the review's business: the marker never reaches the prompt.
+  const measuredProsody = Object.fromEntries(Object.entries(prosodyByEntry(transcript, callRecord.candidateProsody))
+    .map(([index, turns]) => [index, turns.map(turn => { const copy = { ...turn }; delete copy.voiced; return copy; })]));
   const screens = Array.isArray(callRecord.screens)
     ? callRecord.screens.filter(screen => screen && typeof screen === 'object' && line(screen.content)) : [];
   const snapshots = Array.isArray(callRecord.pad?.snapshots) ? callRecord.pad.snapshots : [];

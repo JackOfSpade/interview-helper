@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { connectedMarker, createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS, JOIN_PAUSE_MS, joinPauseMs } from '../../electron/interviewPracticeCallEngine.js';
-import { createReplyStreamParser } from '../../electron/interviewPracticeCallPrompt.js';
+import { createReplyStreamParser, formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 
 // Synthetic data only: every name, sentence and word below is invented for the tests.
 
@@ -61,11 +61,12 @@ export const HELPER_OFFSET = 5000;
 
 const bare = entry => { const rest = { ...entry }; delete rest.startMs; delete rest.endMs; return rest; };
 
-export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback, candidateVoice } = {}) {
+export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback, candidateVoice, inject = false, random, watcher = false, formatWatch, parseWatch } = {}) {
   const clock = fakeClock();
   const events = [];
   const ops = [];
   const sessions = { opener: fakeSession('opener'), main: fakeSession('main'), classifier: fakeSession('classifier') };
+  if (watcher) sessions.watcher = fakeSession('watcher');
   // A test that does not care about the acknowledgement lets the opener answer at once with nothing to say (dropped).
   if (autoOpener) {
     const turn = sessions.opener.turn;
@@ -87,6 +88,12 @@ export function makeRig({ autoOpener = false, thresholds, restartFails = false, 
     pause: id => ops.push({ op: 'pause', id }),
     resume: id => ops.push({ op: 'resume', id }),
     mute: muted => ops.push({ op: 'mute', muted }),
+    // The helper can mix a line into the microphone signal (status ready with inject:true) only when the test says so.
+    canInject: () => inject === true,
+    inject: (id, rate) => { ops.push({ op: 'inject', id, rate }); },
+    injectAudio: (id, buffer) => { ops.push({ op: 'injectAudio', id, size: buffer.length }); },
+    injectEnd: id => { ops.push({ op: 'injectEnd', id }); },
+    injectCancel: (id, fadeMs) => { ops.push({ op: 'injectCancel', id, fadeMs }); },
   };
   const voice = {
     open(options) {
@@ -134,6 +141,8 @@ export function makeRig({ autoOpener = false, thresholds, restartFails = false, 
     onEvent: event => events.push(event), newId: () => `utt${++counter}`,
     ...(callback ? { callback } : {}),
     ...(candidateVoice ? { candidateVoice } : {}),
+    ...(random ? { random } : {}),
+    ...(formatWatch ? { formatWatch } : {}), ...(parseWatch ? { parseWatch } : {}),
   });
   // The helper's clock is not the engine clock: helper atMs = clock ms - HELPER_OFFSET. Callers pass clock times.
   const helper = {
@@ -142,6 +151,8 @@ export function makeRig({ autoOpener = false, thresholds, restartFails = false, 
       engine.helperEvent({ type: 'transcript', text, segmentId, final, startMs: startMs - HELPER_OFFSET, endMs: endMs - HELPER_OFFSET }),
     playback: (utteranceId, state, positionMs = 0) =>
       engine.helperEvent({ type: 'playback', utteranceId, state, positionMs, atMs: clock.now() - HELPER_OFFSET }),
+    inject: (utteranceId, state, positionMs = 0) =>
+      engine.helperEvent({ type: 'inject', utteranceId, state, positionMs, atMs: clock.now() - HELPER_OFFSET }),
     level: () => engine.helperEvent({ type: 'level', rms: 0.1, atMs: clock.now() - HELPER_OFFSET }),
   };
   const rig = { clock, events, ops, opens, sessions, streams, restarts, engine, h: helper, live: sessions, failOpen: false, gate: null };
@@ -194,7 +205,8 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
-    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000,
+    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, voicedNoteWaitMs: 300,
+    candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
   const source = fs.readFileSync(new URL('../../electron/interviewPracticeCallEngine.js', import.meta.url), 'utf8');
@@ -276,7 +288,7 @@ test('candidate speech before speculation only cancels the timers', async () => 
   rig.h.vad(true);
   await flush();
   assert.equal(rig.sessions.opener.calls.length, 0);
-  assert.equal(rig.clock.pending(), 0, 'speculation, commit and silence timers are all cleared');
+  assert.equal(rig.clock.pending(), 1, 'speculation, commit and silence timers are cleared; only the look at a long live answer is waiting');
 });
 
 test('candidate speech after speculation aborts both sessions and the voice and the next turn carries the note', async () => {
@@ -4666,6 +4678,17 @@ test('controls: a screen tag after two sentences is delivered once they have bee
   assert.equal(rig.of('screen').length, 1, 'once');
 });
 
+test('controls: a delivery tag the voice times as several words adds no letters to what was heard', async () => {
+  // call-mwq2lkdo-jz4w5m: "[slightly amused]" came back as two timed words, and their letters made the share start a phrase early.
+  const rig = makeRig({ createParser: screenParser });
+  await openReply(rig, '[slightly amused] One two. Three four.[[screen:Sum|Add.]] Five six.', words('[slightly', 'amused]', 'One', 'two.', 'Three', 'four.', 'Five', 'six.'));
+  rig.h.playback('utt1', 'started');
+  rig.h.playback('utt1', 'position', 1500); // 'Three' has ended (1480), 'four.' has not (1780)
+  assert.equal(rig.of('screen').length, 0, 'the tag letters do not count as heard words');
+  rig.h.playback('utt1', 'position', 1800);
+  assert.equal(rig.of('screen').length, 1, 'shown once the last word before the tag has been heard');
+});
+
 test('controls: a tag before any text takes effect at playback start, not before', async () => {
   const rig = makeRig({ createParser: screenParser });
   await openReply(rig, '[[screen:Sum|Add.]][[pad-open:go]]One two.', words('One', 'two.'));
@@ -5561,4 +5584,661 @@ test('pause: two pauses in a row keep the first only, and a pause before a speak
   const at = log.findIndex(item => item.gap !== undefined);
   assert(at > 0, JSON.stringify(log));
   assert(log.findIndex(item => item.speaker === 'B') > at, 'the gap stays ahead of the switch');
+});
+
+// ---- the interviewer cutting into the candidate's live speech ---------------------------------
+const LIVE = { cutInFirstMs: 3000, cutInEveryMs: 2000, cutInYieldMs: 2500 };
+const STILL = '[The candidate is still speaking.';
+const mainCalls = rig => rig.sessions.main.calls;
+
+/** The candidate starts an answer by microphone and the first look is due 3000 ms later. */
+async function liveAnswer(rig, text = 'So the first thing we did was move every job onto one queue') {
+  rig.h.vad(true);
+  rig.h.transcript(text, 'a', rig.clock.now(), false, rig.clock.now() + 500);
+  await rig.clock.advance(3000);
+  return text;
+}
+
+/** The look is answered with a cut-in whose audio arrives: it commits over the candidate's speech. */
+async function cutInNow(rig, reply = 'Sorry to jump in, how many regions?') {
+  rig.sessions.main.answer(reply);
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  return rig.streams.at(-1).utteranceId;
+}
+
+test('live cut-in: a long spoken answer gets a look from cutInFirstMs, then one every cutInEveryMs; <listen/> leaves no trace', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  rig.h.vad(true);
+  rig.h.transcript('So the first thing we did', 'a', rig.clock.now(), false, rig.clock.now() + 500);
+  await rig.clock.advance(2900);
+  assert.equal(mainCalls(rig).length, 1, 'no look before cutInFirstMs');
+  await rig.clock.advance(200);
+  assert.equal(mainCalls(rig).length, 2);
+  const look = mainCalls(rig)[1].message;
+  assert(look.includes(STILL) && look.includes("Candidate: 'So the first thing we did'"), look);
+  assert.equal(rig.sessions.opener.calls.length, 0, 'a look is never acknowledged first');
+  assert(!look.includes('[voice:'), 'a look carries no tone note');
+  rig.sessions.main.answer('<listen/>');
+  await flush();
+  assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'), 'listening leaves no transcript trace');
+  assert.equal(rig.engine.state().phase, 'listening');
+  assert.equal(rig.opsOf('play').length, 1, 'nothing is spoken: only the greeting played');
+  rig.h.transcript('So the first thing we did was move every job', 'a', 0, false, rig.clock.now());
+  await rig.clock.advance(1800);
+  assert.equal(mainCalls(rig).length, 2, 'the next look comes cutInEveryMs after the last one');
+  await rig.clock.advance(200);
+  assert.equal(mainCalls(rig).length, 3);
+  assert(mainCalls(rig)[2].message.includes('move every job'));
+  rig.sessions.main.answer('<pass/>'); // a pass on a look is a listen
+  await flush();
+  assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'));
+});
+
+test('live cut-in: no look without words, while a reply is being made, or when the answer is short', async () => {
+  const quiet = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(quiet);
+  quiet.h.vad(true); // a bare sound: no transcript yet
+  await quiet.clock.advance(5000);
+  assert.equal(mainCalls(quiet).length, 1, 'a turn must have real words before a look');
+  quiet.h.transcript('So we moved the jobs', 'a', quiet.clock.now(), false, quiet.clock.now() + 400);
+  await quiet.clock.advance(1000); // the look is already due: it goes out at the next retry
+  assert.equal(mainCalls(quiet).length, 2);
+
+  const short = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(short);
+  await speak(short, 'I built a scheduler', 'a');
+  await short.clock.advance(5000);
+  assert(!mainCalls(short).some(call => call.message.includes(STILL)), 'a short answer is just answered');
+});
+
+test('live cut-in: a cut-in commits at once over the speech, the words so far become the cut-off entry and count as the answer', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE, createParser: askedParser });
+  await greet(rig);
+  // The interviewer asks (question 4); the candidate answers aloud at length.
+  await askedReply(rig, '<asked n="4"/>Tell me about a scheduler you built.');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'finished', 1000);
+  await flush();
+  assert.deepEqual(rig.engine.state().askedQuestions, [4]);
+  const first = 'It ran nightly jobs for the whole district and I wrote the retry logic and the alerting myself';
+  rig.h.vad(true);
+  const began = rig.clock.now();
+  rig.h.transcript(first, 's1', began, false, began + 500);
+  await rig.clock.advance(3000);
+  const calls = mainCalls(rig).length;
+  assert(mainCalls(rig).at(-1).message.includes(STILL));
+  // Words kept arriving while the look was written.
+  rig.h.transcript(`${first} over two quarters`, 's1', began, false, rig.clock.now());
+  const id = await cutInNow(rig);
+  assert.equal(mainCalls(rig).length, calls);
+  assert(rig.opsOf('play').some(item => item.id === id), 'it plays at once although the candidate is speaking');
+  assert.equal(rig.engine.state().phase, 'committed');
+  const entries = rig.engine.state().transcript.filter(entry => entry.speaker === 'candidate' && entry.text.includes('nightly'));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].text, `${first} over two quarters`, 'recomputed at commit');
+  assert.equal(entries[0].interrupted, true);
+  assert.equal(entries[0].cutOffBy, 'interviewer');
+  assert(entries[0].endMs >= entries[0].startMs);
+  assert.deepEqual(rig.engine.state().answeredQuestions, [4], 'a cut-off answer is an answer');
+  assert(!rig.opsOf('cancel').length, 'nothing is stopped');
+});
+
+test('live cut-in: trailing speech over the cut-in is never an interruption, is added to the entry and is not answered again', async () => {
+  const ear = makeEar({ floorBid: () => ({ decision: 'pause' }) });
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE, ear });
+  await greet(rig);
+  await liveAnswer(rig);
+  const id = await cutInNow(rig);
+  rig.h.playback(id, 'started');
+  // A person cannot stop at once: they go on for a while, with new words and a breath in between.
+  await rig.clock.advance(400);
+  rig.h.transcript('So the first thing we did was move every job onto one queue and then', 'a', 0, false, rig.clock.now());
+  rig.h.transcript('we split', 'b', rig.clock.now(), false, rig.clock.now() + 200);
+  await rig.clock.advance(600);
+  rig.h.vad(false);
+  await rig.clock.advance(300);
+  rig.h.vad(true); // a fresh onset still inside the window
+  rig.h.transcript('the workers by region', 'c', rig.clock.now(), false, rig.clock.now() + 300);
+  await rig.clock.advance(600);
+  rig.h.vad(false);
+  await rig.clock.advance(500);
+  assert.equal(ear.calls.floorBid.length, 0, 'no floor bid against the cut-in');
+  assert(!rig.opsOf('cancel').length && !rig.opsOf('pause').length, 'the cut-in is never stopped or paused');
+  assert.equal(mainCalls(rig).length, 2, 'the end of the speech starts no turn');
+  assert.equal(rig.of('interrupted').length, 0);
+  const entry = rig.engine.state().transcript.find(item => item.speaker === 'candidate' && item.cutOffBy === 'interviewer');
+  assert.equal(entry.text, 'So the first thing we did was move every job onto one queue and then we split the workers by region', 'the trailing words are the entry\'s');
+  rig.h.playback(id, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(5000);
+  assert.equal(mainCalls(rig).length, 2, 'the trailing words are not answered again');
+  assert.equal(rig.engine.state().transcript.filter(item => item.speaker === 'candidate').length, 1);
+  // The next answer starts clean.
+  await speak(rig, 'There were three regions', 'n');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('Right.');
+  await flush();
+  const next = mainCalls(rig).at(-1).message;
+  assert(next.includes("Candidate: 'There were three regions'") && !next.includes('split'), next);
+});
+
+test('live cut-in: speech that goes on without a break past the window is an ordinary overlap, measured from the window\'s end', async () => {
+  const ear = makeEar({ floorBid: () => ({ decision: 'continue' }) });
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE, ear });
+  await greet(rig);
+  await liveAnswer(rig);
+  const id = await cutInNow(rig);
+  rig.h.playback(id, 'started');
+  await rig.clock.advance(2400);
+  assert(!rig.opsOf('cancel').length && ear.calls.floorBid.length === 0, 'speech inside the window is ignored whatever its length');
+  await rig.clock.advance(100); // the window ends with the candidate still speaking
+  rig.h.transcript('and one more point', 'late', rig.clock.now() + 50, false, rig.clock.now() + 400);
+  await rig.clock.advance(300); // 300 ms after the window ends: floor bid asked at 250
+  assert.equal(ear.calls.floorBid.length, 1);
+  assert.equal(ear.calls.floorBid[0].overlapStartMs, rig.clock.now() - 300 - HELPER_OFFSET, 'the overlap starts where the window ended');
+  await rig.clock.advance(500); // 800 ms after the window ends, past interruptMs and with words: stopped
+  assert(rig.opsOf('cancel').some(item => item.id === id), 'the existing rules now apply');
+});
+
+test('live cut-in: a fresh onset after the window is judged by the existing rules', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await liveAnswer(rig);
+  const id = await cutInNow(rig);
+  rig.h.playback(id, 'started');
+  await rig.clock.advance(300);
+  rig.h.vad(false); // the trailing speech stops quickly
+  await rig.clock.advance(2500);
+  assert(!rig.opsOf('cancel').length);
+  rig.h.vad(true);
+  rig.h.transcript('wait no actually it was five regions', 'z', rig.clock.now(), false, rig.clock.now() + 600);
+  await flush();
+  assert(rig.opsOf('cancel').some(item => item.id === id), 'more than interruptWords words: the interviewer stops, as for any reply');
+});
+
+test('live cut-in: a normal reply still stops on the same overlap', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await speak(rig, 'I built a scheduler', 'a');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('Nice.');
+  await flush();
+  rig.sessions.main.answer('Tell me how it handled retries in the end.');
+  rig.streams.at(-1).audio(3200);
+  await rig.clock.advance(1200);
+  const id = rig.streams.at(-1).utteranceId;
+  rig.h.playback(id, 'started');
+  rig.h.vad(true);
+  rig.h.transcript('actually hold on a second', 'o', rig.clock.now(), false, rig.clock.now() + 500);
+  await flush();
+  assert(rig.opsOf('cancel').some(item => item.id === id));
+});
+
+test('live cut-in: a look is dropped silently when the candidate stops, and the whole answer goes the normal way', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  const text = await liveAnswer(rig);
+  const look = mainCalls(rig)[1];
+  rig.h.transcript(`${text} and that was it`, 'a', 0, false, rig.clock.now());
+  rig.h.vad(false);
+  await flush();
+  assert(look.signal.aborted, 'the look is aborted');
+  assert(rig.of('discarded').some(event => event.reason === 'look-dropped'));
+  assert(!rig.opsOf('play').some(item => item.id === rig.streams[1].utteranceId), 'nothing of it is spoken');
+  await rig.clock.advance(600);
+  assert.equal(mainCalls(rig).length, 3, 'the end of the turn runs on the whole answer');
+  const message = mainCalls(rig)[2].message;
+  assert(!message.includes(STILL) && message.includes('and that was it'), message);
+  assert(message.includes('Your previous reply was not spoken'));
+});
+
+test('live cut-in: a look that began in a pause is dropped when the pause reaches the speculation point', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  rig.h.vad(true);
+  rig.h.transcript('So the first thing we did was move every job', 'a', rig.clock.now(), false, rig.clock.now() + 500);
+  await rig.clock.advance(2900);
+  rig.h.vad(false);
+  await rig.clock.advance(150); // look due, 150 ms into a pause shorter than speculateMs
+  assert.equal(mainCalls(rig).length, 2);
+  assert(mainCalls(rig)[1].message.includes(STILL));
+  await rig.clock.advance(500);
+  assert(rig.of('discarded').some(event => event.reason === 'look-dropped'));
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the ordinary turn took over');
+  assert(rig.sessions.opener.calls[0].message.includes('move every job'));
+  assert.equal(rig.engine.state().phase, 'speculating');
+});
+
+test('live cut-in: the candidate going on talking does not discard the look', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  rig.h.vad(true);
+  rig.h.transcript('So the first thing we did was move every job', 'a', rig.clock.now(), false, rig.clock.now() + 500);
+  await rig.clock.advance(2900);
+  rig.h.vad(false);
+  await rig.clock.advance(150);
+  rig.h.vad(true); // keeps talking while the look is being written
+  await flush();
+  assert(!rig.of('discarded').length);
+  const id = await cutInNow(rig);
+  assert(rig.opsOf('play').some(item => item.id === id));
+  assert.equal(rig.of('discarded').length, 0);
+});
+
+test('live cut-in: a pause drops the look; hanging up during a look ends the call cleanly', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await liveAnswer(rig);
+  rig.engine.setPaused(true);
+  await flush();
+  assert(rig.of('discarded').some(event => event.reason === 'paused'));
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  assert(!rig.opsOf('play').some(item => item.id === rig.streams.at(-1).utteranceId), 'a dropped look never speaks');
+  assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'));
+  rig.engine.setPaused(false);
+  await rig.clock.advance(20000);
+  assert(!rig.engine.state().transcript.some(entry => entry.cutOffBy));
+
+  const hang = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(hang);
+  await liveAnswer(hang);
+  hang.engine.hangUp();
+  await flush();
+  assert.equal(hang.engine.state().phase, 'ended');
+  hang.streams.at(-1).audio(3200);
+  await hang.clock.advance(20000);
+  assert.equal(hang.engine.state().phase, 'ended');
+  assert(!hang.engine.state().transcript.some(entry => entry.cutOffBy));
+});
+
+test('live cut-in: words said after a short cut-in has finished are a new answer, never added to the cut-off entry', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await liveAnswer(rig);
+  const id = await cutInNow(rig, 'Go on.');
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 600); // a very short cut-in, over well inside the window
+  await flush();
+  rig.h.transcript('and then we split the workers', 'b', rig.clock.now(), false, rig.clock.now() + 300);
+  await rig.clock.advance(2600); // past where the window would have ended
+  rig.h.transcript('by region', 'c', rig.clock.now(), false, rig.clock.now() + 300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the answer to the cut-in is answered as a turn');
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.includes("Candidate: 'and then we split the workers by region'"), message);
+  const entry = rig.engine.state().transcript.find(item => item.cutOffBy === 'interviewer');
+  assert(!entry.text.includes('split the workers'), 'the cut-off entry keeps only what was said before the cut-in ended');
+});
+
+test('live cut-in: an answer that starts and ends while the window would still run is answered, once', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await liveAnswer(rig);
+  const id = await cutInNow(rig, 'Go on.');
+  rig.h.playback(id, 'started');
+  rig.h.vad(false); // the candidate stopped for the cut-in
+  rig.h.playback(id, 'finished', 600);
+  await flush();
+  rig.h.vad(true);
+  rig.h.transcript('three regions', 'b', rig.clock.now(), false, rig.clock.now() + 300);
+  await rig.clock.advance(400);
+  rig.h.vad(false); // done before the old window end
+  await rig.clock.advance(3000);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the reply to the cut-in is answered');
+  assert(rig.sessions.opener.calls[0].message.includes("Candidate: 'three regions'"));
+  rig.sessions.main.answer('Three, got it.');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  await rig.clock.advance(1500);
+  const entries = rig.engine.state().transcript.filter(item => item.speaker === 'candidate');
+  assert.equal(entries.filter(item => item.text.includes('three regions')).length, 1, 'never twice in the transcript');
+  assert(!entries.find(item => item.cutOffBy === 'interviewer').text.includes('three regions'));
+});
+
+// ---- the watcher: a fast session decides when the interviewer cuts into live speech ------------------------------
+const WATCH = { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInYieldMs: 2500 };
+// The prompt module's own formatting and parsing are tested there: the engine is given plain seams that show what it passed.
+const watchFormat = options => JSON.stringify(options);
+const watchParse = text => {
+  const found = /^cut:(\w):(\w+)$/u.exec(String(text ?? '').trim());
+  return found ? { decision: 'cut-in', who: found[1], reason: found[2] } : { decision: 'listen', who: null, reason: null };
+};
+const watchRig = (options = {}) => makeRig({ autoOpener: true, watcher: true, formatWatch: watchFormat, parseWatch: watchParse, ...options, thresholds: { ...WATCH, ...options.thresholds } });
+const watchCalls = rig => rig.sessions.watcher.calls;
+const watchSent = (rig, index = watchCalls(rig).length - 1) => JSON.parse(watchCalls(rig)[index].message);
+/** The watcher answers a call (the last by default) with this text. */
+async function watchSays(rig, text, index = watchCalls(rig).length - 1) {
+  const call = watchCalls(rig)[index];
+  call.settled = true;
+  call.resolve({ text });
+  await flush();
+}
+/** The candidate starts a long answer by microphone: the first check is due 3000 ms later. */
+async function watchedAnswer(rig, text = 'So the first thing we did was move every job onto one queue') {
+  rig.h.vad(true);
+  rig.h.transcript(text, 'a', rig.clock.now(), false, rig.clock.now() + 500);
+  return text;
+}
+
+test('watcher: the first check comes at cutInFirstMs into the answer and carries the question, the answer so far and the plan number', async () => {
+  const rig = watchRig({ createParser: askedParser });
+  await greet(rig);
+  await askedReply(rig, '<asked n="4"/>Tell me about a scheduler you built.');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'finished', 1000);
+  await flush();
+  const calls = mainCalls(rig).length;
+  await watchedAnswer(rig, 'We began with the queue. Then we moved every job onto it');
+  await rig.clock.advance(2900);
+  assert.equal(watchCalls(rig).length, 0, 'no check before cutInFirstMs');
+  await rig.clock.advance(200);
+  assert.equal(watchCalls(rig).length, 1);
+  const sent = watchSent(rig);
+  assert.equal(sent.questionText, 'Tell me about a scheduler you built.');
+  assert.equal(sent.questionNumber, 4);
+  assert.equal(sent.askedBy, 'A');
+  assert.equal(sent.answerText, 'We began with the queue. Then we moved every job onto it');
+  assert.equal(sent.mostRecent, 'Then we moved every job onto it');
+  assert(sent.answerMs >= 3000 && sent.answerMs < 3300, String(sent.answerMs));
+  assert(sent.elapsedMs >= 3000);
+  assert.equal(mainCalls(rig).length, calls, 'the main session is not asked yet: the timed looks are replaced');
+});
+
+test('watcher: a long answer with no sentence end falls back to the last words said', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  const words = Array.from({ length: 40 }, (_, index) => `w${index}`).join(' ');
+  await watchedAnswer(rig, words);
+  await rig.clock.advance(3100);
+  assert.equal(watchSent(rig).mostRecent, Array.from({ length: 20 }, (_, index) => `w${index + 20}`).join(' '));
+});
+
+test('watcher: one check at a time, at least one every watchEveryMs while speaking, and listen does nothing', async () => {
+  const rig = watchRig({ thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  assert.equal(watchCalls(rig).length, 1);
+  await rig.clock.advance(4000);
+  assert.equal(watchCalls(rig).length, 1, 'never two at once: the next waits for the answer');
+  await watchSays(rig, '<listen/>');
+  await rig.clock.advance(0);
+  assert.equal(watchCalls(rig).length, 2, 'the periodic check is overdue: it starts as soon as the last one returns');
+  assert.equal(rig.sessions.watcher.calls[0].signal.aborted, false);
+  await watchSays(rig, '<listen/>');
+  assert.equal(watchCalls(rig).length, 2);
+  await rig.clock.advance(900);
+  assert.equal(watchCalls(rig).length, 2, 'the next is watchEveryMs after the last one started');
+  await rig.clock.advance(200);
+  assert.equal(watchCalls(rig).length, 3);
+  await watchSays(rig, '<listen/>');
+  assert.equal(mainCalls(rig).length, 1, 'a listen starts no look');
+  assert.equal(rig.sessions.opener.calls.length, 0);
+  assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'));
+  assert.equal(rig.of('watch').length, 3);
+  assert(rig.of('watch').every(event => event.decision === 'listen' && event.who === null && event.reason === null));
+});
+
+test('watcher: a breath (a VAD end shorter than the speculation point) is checked at once, but not before cutInFirstMs', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(1000);
+  rig.h.vad(false); // an early breath
+  await rig.clock.advance(300);
+  rig.h.vad(true);
+  await flush();
+  assert.equal(watchCalls(rig).length, 0, 'the first check is not before cutInFirstMs');
+  await rig.clock.advance(2000);
+  assert.equal(watchCalls(rig).length, 1);
+  await watchSays(rig, '<listen/>');
+  rig.h.transcript('So the first thing we did was move every job onto one queue and then', 'a', 0, false, rig.clock.now());
+  await rig.clock.advance(100); // well inside watchEveryMs of the last check
+  rig.h.vad(false);
+  await flush();
+  assert.equal(watchCalls(rig).length, 2, 'the breath starts a check without waiting for the periodic one');
+  assert(watchSent(rig).answerText.endsWith('and then'), 'with the latest text at that instant');
+  await watchSays(rig, '<listen/>');
+  await rig.clock.advance(300);
+  rig.h.vad(true);
+  await rig.clock.advance(100);
+  assert.equal(watchCalls(rig).length, 2);
+});
+
+test('watcher: a breath while a check is in flight starts the next one as soon as it returns', async () => {
+  const rig = watchRig({ thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  rig.h.vad(false);
+  rig.h.vad(true);
+  await flush();
+  assert.equal(watchCalls(rig).length, 1, 'never two at once');
+  await watchSays(rig, '<listen/>');
+  assert.equal(watchCalls(rig).length, 2);
+});
+
+test('watcher: a yes starts the live look, with the last sentence heard and who would cut in and why, and the main session writes the cut-in', async () => {
+  const seen = [];
+  const rig = watchRig({ formatTurn: options => { seen.push(options); return formatTurnMessage(options); } });
+  await greet(rig);
+  await watchedAnswer(rig, 'We began with the queue. Then we moved every job onto it');
+  await rig.clock.advance(3100);
+  assert(!seen.some(options => options.cutInBy));
+  await watchSays(rig, 'cut:A:probe');
+  assert.equal(mainCalls(rig).length, 2);
+  const look = seen.at(-1);
+  assert.equal(look.stillSpeaking, true);
+  assert.equal(look.candidateText, 'We began with the queue. Then we moved every job onto it');
+  assert.equal(look.mostRecent, 'Then we moved every job onto it');
+  assert.deepEqual(look.cutInBy, { id: 'A', reason: 'probe' });
+  assert.equal(rig.sessions.opener.calls.length, 0, 'a look is never acknowledged first');
+  assert.deepEqual(rig.of('watch').map(event => [event.decision, event.who, event.reason]), [['cut-in', 'A', 'probe']]);
+  const id = await cutInNow(rig);
+  assert(!rig.opsOf('play').some(item => item.id === id), 'the candidate is mid-sentence: it waits for the breath');
+  rig.h.vad(false);
+  assert(rig.opsOf('play').some(item => item.id === id), 'then plays');
+});
+
+test('watcher: a yes on a panel names the colleague who cuts in; a colleague who is not on the call falls back to who asked', async () => {
+  const seen = [];
+  const rig = panelRig({ autoOpener: true, watcher: true, formatWatch: watchFormat, parseWatch: watchParse, thresholds: WATCH, formatTurn: options => { seen.push(options); return formatTurnMessage(options); } });
+  await panelGreeting(rig);
+  rig.h.playback('utt1', 'started');
+  rig.h.playback('utt1', 'finished', 1500);
+  await flush();
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  assert.equal(watchSent(rig).askedBy, 'B', 'the last speaker of the question asked it');
+  await watchSays(rig, 'cut:A:enough');
+  assert.deepEqual(seen.at(-1).cutInBy, { id: 'A', name: 'Priya', reason: 'enough' });
+  await cutInNow(rig, '<speaker id="A"/>Let me stop you there.');
+  const other = panelRig({ autoOpener: true, watcher: true, formatWatch: watchFormat, parseWatch: watchParse, thresholds: WATCH, formatTurn: options => { seen.push(options); return formatTurnMessage(options); } });
+  await panelGreeting(other);
+  other.h.playback('utt1', 'started');
+  other.h.playback('utt1', 'finished', 1500);
+  await flush();
+  await watchedAnswer(other);
+  await other.clock.advance(3100);
+  await watchSays(other, 'cut:C:probe'); // Mei has not joined
+  assert.deepEqual(seen.at(-1).cutInBy, { id: 'B', name: 'John', reason: 'probe' });
+});
+
+test('watcher: a cut-in written while the candidate is mid-sentence waits for the next breath', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 50 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  assert(!rig.opsOf('play').some(item => item.id === id), 'held: the candidate is mid-sentence');
+  assert.deepEqual(rig.of('cut-in').map(event => event.state), ['held']);
+  await rig.clock.advance(400);
+  assert(!rig.opsOf('play').some(item => item.id === id));
+  rig.h.vad(false); // the breath
+  assert(rig.opsOf('play').some(item => item.id === id), 'it goes out at the VAD end');
+  assert.deepEqual(rig.of('cut-in').map(event => event.state), ['held', 'committed']);
+  const committed = rig.of('cut-in').at(-1);
+  assert.equal(committed.who, 'A');
+  assert.equal(committed.reason, 'probe');
+  assert(committed.heldMs >= 400 && committed.heldMs < 800, String(committed.heldMs));
+  assert.equal(rig.engine.state().phase, 'committed');
+  await rig.clock.advance(5);
+  assert(!rig.of('discarded').length, 'the breath did not drop the look');
+});
+
+test('watcher: a cut-in held for cutInHoldMs commits if the words said meanwhile are few', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 5 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:long');
+  rig.sessions.main.answer('That is plenty, thanks.');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  await rig.clock.advance(700);
+  assert(!rig.opsOf('play').some(item => item.id === id));
+  rig.h.transcript('So the first thing we did was move every job onto one queue and so', 'a', 0, false, rig.clock.now()); // two new words
+  await rig.clock.advance(100);
+  assert(rig.opsOf('play').some(item => item.id === id), 'the hold ends at cutInHoldMs; two new words are not stale');
+  assert.equal(rig.of('cut-in').at(-1).wordsSinceSnapshot, 2);
+});
+
+test('watcher: a cut-in about something said sentences ago is dropped silently and the watcher is asked again at once', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe');
+  assert.equal(watchCalls(rig).length, 1);
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  rig.h.transcript('So the first thing we did was move every job onto one queue and then we split the workers by region', 'a', 0, false, rig.clock.now());
+  await rig.clock.advance(800); // the hold ends: more than cutInStaleWords words have been said since the look began
+  assert(!rig.opsOf('play').some(item => item.id === id), 'never spoken');
+  assert(rig.of('discarded').some(event => event.reason === 'stale-cut-in'));
+  assert.deepEqual(rig.of('cut-in').map(event => event.state), ['held', 'stale']);
+  assert(rig.of('cut-in').at(-1).wordsSinceSnapshot > 3);
+  assert.equal(rig.engine.state().phase, 'listening');
+  assert.equal(watchCalls(rig).length, 2, 'asked again at once');
+  assert(watchSent(rig).answerText.includes('split the workers by region'), 'about what was said last');
+  assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'), 'nothing of the dropped cut-in is kept');
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('And how did you split them?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  await rig.clock.advance(800);
+  assert(rig.opsOf('play').some(item => item.id === rig.streams.at(-1).utteranceId), 'the fresh cut-in is not stale and plays');
+  assert(mainCalls(rig).at(-1).message.includes('Your previous reply was not spoken'), 'the main session is told the dropped line never reached the candidate');
+});
+
+test('watcher: a stale cut-in found at the breath is dropped and the breath is checked', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  rig.h.transcript('So the first thing we did was move every job onto one queue and then we split the workers by region', 'a', 0, false, rig.clock.now());
+  await rig.clock.advance(100);
+  rig.h.vad(false);
+  await flush();
+  assert(rig.of('discarded').some(event => event.reason === 'stale-cut-in'));
+  assert.equal(watchCalls(rig).length, 2);
+});
+
+test('watcher: a timeout counts as listen and the next check follows; a crash restarts the watcher session', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  const first = watchCalls(rig)[0];
+  await rig.clock.advance(500);
+  assert(first.signal.aborted, 'aborted at watchTimeoutMs');
+  assert.equal(rig.of('watch').length, 1);
+  assert.equal(rig.of('watch')[0].decision, 'listen');
+  assert.equal(rig.restarts.length, 0, 'a timeout needs no restart');
+  assert.equal(mainCalls(rig).length, 1);
+  await rig.clock.advance(600);
+  assert.equal(watchCalls(rig).length, 1, 'a timed-out check is not chained straight into another: the next waits a full watchEveryMs');
+  await rig.clock.advance(500);
+  assert.equal(watchCalls(rig).length, 2, 'the next check follows');
+  rig.sessions.watcher.fail();
+  await flush();
+  assert.deepEqual(rig.restarts.map(item => item.kind), ['watcher']);
+  assert.equal(rig.of('watch').at(-1).decision, 'listen');
+  assert(rig.of('session-restart').some(event => event.kind === 'watcher'));
+  await rig.clock.advance(1100);
+  assert(rig.sessions.watcher.calls.length >= 1 && rig.restarts.length === 1, 'the fresh session takes the next check');
+});
+
+test('watcher: a result that arrives after the answer is over is dropped; a pause drops the check and stops the checks', async () => {
+  const rig = watchRig({ thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  rig.h.vad(false);
+  await rig.clock.advance(700); // the pause reached the speculation point: the answer goes the normal way
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  await watchSays(rig, 'cut:A:probe', 0);
+  assert.equal(mainCalls(rig).length, 2, 'no look: only the greeting and the ordinary turn');
+  assert(!mainCalls(rig).some(call => call.message.includes(STILL)));
+  assert(rig.of('watch').at(-1).ignored === true);
+
+  const paused = watchRig({ thresholds: { watchTimeoutMs: 5000 } });
+  await greet(paused);
+  await watchedAnswer(paused);
+  await paused.clock.advance(3100);
+  paused.engine.setPaused(true);
+  await flush();
+  assert(watchCalls(paused)[0].signal.aborted);
+  await paused.clock.advance(10000);
+  assert.equal(watchCalls(paused).length, 1, 'no checks while paused');
+  paused.engine.setPaused(false);
+  paused.h.vad(false);
+  await paused.clock.advance(5000);
+  assert.equal(watchCalls(paused).length, 1);
+});
+
+test('watcher: no checks while a reply is being made or played, nor after hang-up', async () => {
+  const rig = watchRig();
+  await greet(rig);
+  await speak(rig, 'I built a scheduler', 'a');
+  await rig.clock.advance(600); // the ordinary turn is being made
+  assert(rig.engine.state().phase === 'speculating');
+  await rig.clock.advance(10000);
+  assert.equal(watchCalls(rig).length, 0, 'a short answer is just answered');
+
+  const hang = watchRig({ thresholds: { watchTimeoutMs: 5000 } });
+  await greet(hang);
+  await watchedAnswer(hang);
+  await hang.clock.advance(3100);
+  hang.engine.hangUp();
+  await flush();
+  assert(watchCalls(hang)[0].signal.aborted);
+  await hang.clock.advance(10000);
+  assert.equal(watchCalls(hang).length, 1);
+  assert.equal(hang.of('watch').length, 0, 'nothing recorded after the call ended');
+});
+
+test('watcher: without a watcher the timed looks run exactly as before', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  assert.equal(mainCalls(rig).length, 2);
+  assert(mainCalls(rig)[1].message.includes(STILL));
+  assert.equal(rig.of('watch').length, 0);
 });

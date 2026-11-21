@@ -574,4 +574,52 @@ export default [
       assert.doesNotMatch(prompt, /candidateTalkMs/u);
     },
   },
+  {
+    name: 'practice call analysis: a call answered by the candidate\'s voice is a spoken call: measured delivery, no typed wording, no mention of the AI voice, and the interviewer\'s cut-in is visible',
+    async run() {
+      const voiced = [
+        { speaker: 'interviewer', text: 'Tell me about a mistake.', startMs: 0, endMs: 3000 },
+        { speaker: 'candidate', text: 'The short version is that I was wrong about the cache and we fixed', channel: 'chat', voiced: true, generated: true, interrupted: true, cutOffBy: 'interviewer', startMs: 4000, endMs: 12000 },
+        { speaker: 'interviewer', text: 'Let me stop you there.', startMs: 11000, endMs: 13000 },
+      ];
+      const record = { ...callRecord, transcript: voiced, candidateProsody: [{ startMs: 4000, endMs: 12000, speechMs: 6000, wordsPerMinute: 130, voiced: true, pauses: [] }] };
+      const prompt = buildReviewPrompt({ callRecord: record, plan, brief, metrics: { typedOnly: false, interviewerCutInCount: 1 } });
+      assert.doesNotMatch(prompt, /HOW THE CANDIDATE ANSWERED/u, 'not a typed-only call');
+      assert.doesNotMatch(prompt, /answered only by typing|every answer was typed/u);
+      assert.match(prompt, /DETERMINISTIC METRICS/u);
+      assert.match(prompt, /CANDIDATE PROSODY BY TURN/u);
+      assert.doesNotMatch(prompt, /^\[\d+\] .*\(chat\)/mu, 'the voiced line is not marked as chat');
+      assert.match(prompt, /\[1\] candidate 00:04-00:12:/u);
+      assert.match(prompt, /the interviewer had to stop the candidate here/u);
+      assert.doesNotMatch(prompt, /"voiced"|voiced: true|generated|suggest|AI voice|synthetic/iu);
+      assert.doesNotMatch(prompt, /while the candidate typed/u);
+      // A typed line next to it is still typed; the call is not typed-only.
+      const mixed = buildReviewPrompt({ callRecord: { ...record, transcript: [...voiced, { speaker: 'candidate', channel: 'chat', text: 'typed bit', startMs: 14000, endMs: 14000 }] }, plan, brief, metrics: {} });
+      assert.match(mixed, /^\[\d+\] candidate .*\(chat\)/mu);
+      assert.doesNotMatch(mixed, /HOW THE CANDIDATE ANSWERED/u);
+    },
+  },
+  {
+    name: 'practice call analysis: voiced answers are not transcribed (they are not on the candidate track) and the metrics get the synthetic baseline',
+    async run() {
+      const dir = await tempDir();
+      try {
+        const calls = { scribe: 0, metrics: [] };
+        const record = { ...callRecord, voicedBaseline: { pitchRangeSt: 4 }, transcript: [
+          { speaker: 'interviewer', text: 'Question?', startMs: 0, endMs: 2000 },
+          { speaker: 'candidate', text: 'Answer given by voice.', channel: 'chat', voiced: true, startMs: 3000, endMs: 6000 },
+        ] };
+        await analyzeCall({ callDir: dir, callRecord: record, plan, brief, deps: {
+          transcribe: () => { calls.scribe += 1; return { words: [] }; },
+          metrics: request => { calls.metrics.push(request); return { typedOnly: false }; },
+          callText: () => review,
+          now: () => '2026-11-08T10:05:00.000Z',
+        } });
+        assert.equal(calls.scribe, 0, 'nothing live to transcribe');
+        assert.deepEqual(calls.metrics[0].voicedBaselineSnapshot, { pitchRangeSt: 4 });
+        const kinds = (await import('../../electron/practiceCall/analysis/reviewPrompt.js')).candidateAnswerKinds(record.transcript);
+        assert.deepEqual(kinds, { spoken: 1, live: 0, typed: 0, typedOnly: false });
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
 ];

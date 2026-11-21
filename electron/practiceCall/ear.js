@@ -1,4 +1,8 @@
+import { pcm16To16k, EAR_SAMPLE_RATE } from './audio/resample.js';
+
 const TONE_CHUNK_MS = 6000;
+// How long a line's note waits for its tone scores before going out on prosody alone.
+const VOICED_TONE_WAIT_MS = 2000;
 
 async function defaultWavOpen() {
   const module = await import('./audio/wavReader.js');
@@ -31,6 +35,10 @@ async function defaultFloorBid(options) {
  * Smart Turn probability; `floorBid` judges an overlap with the user's
  * baseline; `voiceNote` is synchronous and never waits on a model: it composes
  * the prosody of a span with the most recent background tone scores.
+ *
+ * The candidate's synthetic voice (a sent chat line spoken on the call) is a different voice from
+ * the microphone, never on the candidate track: `prepareVoiced` measures a line in the background
+ * from its own audio and `voicedNote` composes the same kind of note against a baseline of its own.
  */
 export function createPracticeEar({
   candidatePath,
@@ -60,6 +68,12 @@ export function createPracticeEar({
   let speechMs = 0;
   let latestTone = null;
   let closed = false;
+  // The synthetic voice: its own baseline, tone memory and measured lines, never mixed with the microphone's.
+  const voicedLines = new Map();
+  const voicedToneSamples = [];
+  let voicedBase = null;
+  let voicedSpeechMs = 0;
+  let voicedLatestTone = null;
 
   let opening = null;
   function reader() {
@@ -97,6 +111,7 @@ export function createPracticeEar({
   function prosodyOf() { return loadOnce('prosody', async () => { pro = await prosody(); return pro; }); }
   function baselineOf() { return loadOnce('baseline', async () => { base = await baseline({ minSpeechMs }); return base; }); }
   function floorOf() { return loadOnce('floor', async () => { return floorBid({ baseline: await baselineOf() }); }); }
+  function voicedBaselineOf() { return loadOnce('voicedBaseline', async () => { voicedBase = await baseline({ minSpeechMs }); return voicedBase; }); }
   function noteOf() { return loadOnce('note', async () => { note = await toneNote(); return note; }); }
   // composeVoiceNote is pure and cheap, so load it with the ear: the voice-note
   // path then has it in hand instead of waiting on a model mid-call.
@@ -192,6 +207,136 @@ export function createPracticeEar({
     }
   }
 
+
+  /** Tone scores for the 6 s chunks of one voiced line, kept with their offset into the line. */
+  async function voicedTone(line) {
+    let workerNow;
+    try { workerNow = await workerOf(); } catch { return; }
+    for (let offset = 0; offset < line.durationMs; offset += TONE_CHUNK_MS) {
+      if (closed) return;
+      const endOffset = Math.min(line.durationMs, offset + TONE_CHUNK_MS);
+      const chunk = line.samples.subarray(Math.floor((offset * EAR_SAMPLE_RATE) / 1000), Math.floor((endOffset * EAR_SAMPLE_RATE) / 1000));
+      if (endOffset - offset < 1000 || !chunk.length) continue;
+      try {
+        const tone = await workerNow.tone(chunk);
+        if (tone) line.chunks.push({ offset, endOffset, arousal: tone.arousal, dominance: tone.dominance, valence: tone.valence });
+      } catch { /* tone is best effort */ }
+    }
+  }
+
+  /**
+   * Background analysis of one AI-voice line (16-bit mono PCM at 24 or 44.1 kHz): converted to 16 kHz
+   * for the prosody and tone models. Never throws and never waits for anything.
+   */
+  function prepareVoiced({ id, pcm, sampleRate, wordCount = 0 } = {}) {
+    try {
+      if (closed || id === undefined || id === null || !pcm || !pcm.length || !(sampleRate > 0)) return;
+      const run = async () => {
+        const samples = pcm16To16k(pcm, sampleRate);
+        if (!samples.length) return;
+        const line = {
+          samples, wordCount: Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : 0,
+          durationMs: (samples.length * 1000) / EAR_SAMPLE_RATE, chunks: [], tone: null, recorded: false, turn: null,
+        };
+        voicedLines.set(id, line);
+        // The conversion is quick; the tone scores keep running on their own and settle() still waits for them.
+        line.tone = voicedTone(line);
+        inflight.add(line.tone);
+        const doneTone = () => { inflight.delete(line.tone); };
+        line.tone.then(doneTone, doneTone);
+      };
+      if (voicedLines.has(id)) return;
+      // The line is known at once so a note asked for while it converts waits for it rather than missing it.
+      const placeholder = {};
+      voicedLines.set(id, placeholder);
+      const work = run().catch(() => {});
+      // Until the conversion has made the line, the placeholder holds the wait; run() replaces it.
+      if (voicedLines.get(id) === placeholder) placeholder.pending = work;
+      inflight.add(work);
+      const done = () => { inflight.delete(work); };
+      work.then(done, done);
+    } catch { /* the ear never breaks the call */ }
+  }
+
+  async function lineOf(id) {
+    const first = voicedLines.get(id);
+    if (!first) return null;
+    if (first.pending) await first.pending;
+    const line = voicedLines.get(id);
+    return line?.samples ? line : null;
+  }
+
+  /** Tone samples of the heard part go on the call record, once, on the transcript timeline. */
+  function recordVoicedTone(line, startMs, heardMs) {
+    if (line.recorded || closed) return;
+    line.recorded = true;
+    for (const chunk of line.chunks) {
+      if (chunk.offset >= heardMs) continue;
+      const end = Math.min(chunk.endOffset, heardMs);
+      if (end - chunk.offset < 1000) continue;
+      const sample = { atMs: startMs + chunk.offset, endMs: startMs + end, arousal: chunk.arousal, dominance: chunk.dominance, valence: chunk.valence, voiced: true };
+      voicedToneSamples.push(sample);
+      try { onToneSample(sample); } catch { /* observer errors never break the call */ }
+    }
+  }
+
+  /**
+   * The [voice] note for an AI-voice line, measured on its heard part against the synthetic voice's own
+   * baseline; null until that baseline is ready. The measured turn also goes into the call record.
+   */
+  // Tracked like the other background work, so settle() before the record is written waits for the last line's measures.
+  function voicedNote(args = {}) {
+    const work = measureVoiced(args);
+    inflight.add(work);
+    const done = () => { inflight.delete(work); };
+    work.then(done, done);
+    return work;
+  }
+
+  async function measureVoiced({ id, startMs, endMs, heardMs } = {}) {
+    try {
+      if (closed || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
+      const line = await lineOf(id);
+      if (!line || closed) return null;
+      const heard = Number.isFinite(heardMs) && heardMs > 0 ? Math.min(heardMs, line.durationMs) : line.durationMs;
+      // The tone scores are the slow part: wait for them a little, then go out on prosody alone.
+      let timer = null;
+      const finished = await Promise.race([
+        line.tone.then(() => true),
+        new Promise(resolveWait => { timer = setTimeout(() => resolveWait(false), VOICED_TONE_WAIT_MS); timer?.unref?.(); }),
+      ]);
+      clearTimeout(timer);
+      if (!finished) line.tone.then(() => recordVoicedTone(line, startMs, heard));
+      await noteLoaded;
+      const measure = await prosodyOf();
+      const active = await voicedBaselineOf();
+      if (closed) return null;
+      const part = line.samples.subarray(0, Math.floor((heard * EAR_SAMPLE_RATE) / 1000));
+      const measured = measure({ samples: part, sampleRate: EAR_SAMPLE_RATE, startMs, endMs, words: [] });
+      // Pace over the heard part: the line's word count scaled by how much of it was heard.
+      const words = line.wordCount > 0 ? Math.round(line.wordCount * Math.min(1, heard / line.durationMs)) : 0;
+      const spoken = Number(measured?.speechMs) || 0;
+      const turn = words > 0 && spoken > 0
+        ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
+        : measured;
+      const heardChunks = line.chunks.filter(chunk => chunk.offset < heard);
+      const tone = heardChunks.length ? heardChunks[heardChunks.length - 1] : voicedLatestTone;
+      if (heardChunks.length) voicedLatestTone = tone;
+      const record = { ...turn, startMs, endMs, voiced: true };
+      const at = line.turn ? measuredTurns.indexOf(line.turn) : -1;
+      if (at >= 0) measuredTurns[at] = record; else measuredTurns.push(record);
+      const firstNote = !line.turn;
+      line.turn = record;
+      if (finished) recordVoicedTone(line, startMs, heard);
+      // Only the first ~minSpeechMs of the synthetic voice defines its baseline, as for the microphone.
+      if (firstNote && voicedSpeechMs < minSpeechMs) active.add(turn, tone);
+      if (firstNote) voicedSpeechMs += Number(turn?.speechMs) || 0;
+      if (!active.ready()) return null;
+      const compose = await noteOf();
+      return compose(active.relative(turn, tone)) ?? null;
+    } catch { return null; }
+  }
+
   function voiceNote({ startMs, endMs, wordCount } = {}) {
     if (closed || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
     const samples = spanSamples(startMs, endMs);
@@ -199,7 +344,7 @@ export function createPracticeEar({
     if (!base.ready()) return null;
     const measured = pro({ samples, sampleRate: 16000, startMs, endMs, words: [] });
     // Pace needs the words of this span: use the caller's count, else the one noted for the same span.
-    const known = Number.isFinite(wordCount) ? wordCount : measuredTurns.find(item => item.startMs === startMs && item.endMs === endMs)?.wordCount;
+    const known = Number.isFinite(wordCount) ? wordCount : measuredTurns.find(item => !item.voiced && item.startMs === startMs && item.endMs === endMs)?.wordCount;
     const spoken = Number(measured?.speechMs) || 0;
     const turn = known > 0 && spoken > 0
       ? { ...measured, wordCount: known, wordsPerMinute: Math.round((known / spoken) * 60000 * 10) / 10 }
@@ -214,15 +359,20 @@ export function createPracticeEar({
     floorBid: assessFloor,
     voiceNote,
     noteSpeech,
+    prepareVoiced,
+    voicedNote,
     settle,
-    toneSamples: () => toneSamples.map(sample => ({ ...sample })),
+    toneSamples: () => [...toneSamples, ...voicedToneSamples].map(sample => ({ ...sample })).sort((left, right) => left.atMs - right.atMs),
     /** Measured candidate turns in time order, each with its pauses, for the call record. */
     prosodyTurns: () => measuredTurns.map(turn => ({ ...turn })).sort((left, right) => left.startMs - right.startMs),
     /** The voice baseline's medians, or null when no answer has been measured. */
     baselineSnapshot: () => { try { return base?.snapshot?.() ?? null; } catch { return null; } },
+    /** The synthetic voice's own baseline medians, or null before any AI-voice line was measured. */
+    voicedBaselineSnapshot: () => { try { return voicedBase?.snapshot?.() ?? null; } catch { return null; } },
     transcript: async () => (await reader()).writtenMs(),
     close: () => {
       closed = true;
+      voicedLines.clear();
       try { wav?.close(); } catch { /* already closed */ }
       try { worker?.close?.(); } catch { /* worker already gone */ }
     },

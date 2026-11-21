@@ -332,6 +332,8 @@ stays enabled while paused and a reply already being written finishes and lands
 in the box (2026-11-20). The service refuses it unless the app
 passes `draftText` in (`main.js`), so the unit suites never call Claude.
 
+**Suggested replies are written to be heard (2026-11-21).** Since a sent message is spoken, Suggest a reply now writes what the candidate would say out loud: no note-style labels with a colon ("Short version: …" becomes "The short version is that …"), no paragraph breaks, numbers said the way people say them. Its conversation view no longer marks a spoken message as typed, and `cleanDraft` joins any paragraph breaks into one flowing reply. Measured 2026-11-21 (26 real prompts × 2 runs per arm, Sonnet low, two blind judges; `docs/ai-model-selection.md`): note-style labels 14 of 52 replies before, 1 after; unit symbols 17 to 1; quality 5.88 to 6.42 (paired +0.55, se 0.19, both judges the same way); latency and cost unchanged. The prompt alone still left paragraph breaks in 39 of 52 replies, hence the code join; 29% of replies still run past 250 words.
+
 **Sent messages are spoken (2026-11-20).** A message sent in the call chat is
 spoken in the candidate's own voice and the interviewer may cut into it; the
 voice (female or male) is chosen in Settings (sidebar, or ⌘,). See

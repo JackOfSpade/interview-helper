@@ -180,10 +180,11 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
 
   let words = [];
   let transcriptionError = null;
-  // A call answered only by typing has a silent recording: there is nothing to transcribe,
-  // and the review is told the call was typed rather than that transcription failed.
+  // A call with no live speech has a silent candidate track: there is nothing to transcribe,
+  // and the review is not told that transcription failed.
   const answerKinds = candidateAnswerKinds(transcript);
-  const nothingSpoken = answerKinds.spoken === 0;
+  // Only the microphone has anything to transcribe: a line the voice spoke is not on the candidate track.
+  const nothingSpoken = answerKinds.live === 0;
   event('answers', { ...answerKinds });
   if (!nothingSpoken) {
     stage('transcribing');
@@ -209,6 +210,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
       transcript,
       candidateProsody: list(callRecord.candidateProsody),
       baselineSnapshot: callRecord.voiceBaseline ?? null,
+      ...(callRecord.voicedBaseline ? { voicedBaselineSnapshot: callRecord.voicedBaseline } : {}),
     });
     event('metrics', { ms: elapsed(metricsStarted), keys: metrics && typeof metrics === 'object' ? Object.keys(metrics).slice(0, 30) : [] });
   } catch (error) {

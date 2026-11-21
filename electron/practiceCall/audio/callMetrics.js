@@ -49,6 +49,9 @@ function fastestWindowWpm(wordCount, startMs, endMs, windowMs = 20000) {
   return round((best / windowMs) * 60000, 1);
 }
 
+// A line spoken on the call in the candidate's voice is a spoken answer; only an unvoiced chat line is typed.
+const isTypedLine = entry => entry?.channel === 'chat' && entry.voiced !== true;
+
 /**
  * Measured turns from the ear, keyed by the spoken candidate transcript entry they overlap
  * most in time. The ear and the transcript share the helper timeline, so overlap is the link.
@@ -61,7 +64,7 @@ export function prosodyByEntry(transcript = [], turns = []) {
     let best = -1;
     let bestOverlap = 0;
     entries.forEach((entry, index) => {
-      if (entry?.speaker !== 'candidate' || entry.channel === 'chat' || entry.acknowledgement) return;
+      if (entry?.speaker !== 'candidate' || isTypedLine(entry) || entry.acknowledgement) return;
       if (!finite(entry.startMs) || !finite(entry.endMs)) return;
       const overlap = Math.min(entry.endMs, turn.endMs) - Math.max(entry.startMs, turn.startMs);
       if (overlap > bestOverlap) { best = index; bestOverlap = overlap; }
@@ -90,23 +93,26 @@ function interviewerRuns(entries) {
   return runs;
 }
 
-export function callMetrics({ transcript = [], candidateProsodyByTurn = null, candidateProsody = null, baselineSnapshot = null } = {}) {
+// `voicedBaselineSnapshot` is the baseline of the synthetic voice: an answer made only of voiced lines
+// is compared with it, never with the microphone baseline (a different voice).
+export function callMetrics({ transcript = [], candidateProsodyByTurn = null, candidateProsody = null, baselineSnapshot = null, voicedBaselineSnapshot = null } = {}) {
   const entries = Array.isArray(transcript) ? transcript : [];
   const prosodyMap = Array.isArray(candidateProsody) ? prosodyByEntry(entries, candidateProsody) : candidateProsodyByTurn;
   const groups = [];
   const typedAnswers = [];
   let group = null;
   entries.forEach((entry, index) => {
-    if (entry?.channel === 'chat') {
+    if (isTypedLine(entry)) {
       // Only the candidate's own typed lines are typed answers; the interviewer's chat
-      // messages and spoken acknowledgements typed in passing are not.
+      // messages and spoken acknowledgements typed in passing are not. A line the voice spoke is not typed.
       if (entry.speaker !== 'candidate' || entry.acknowledgement) return;
       typedAnswers.push({ startMs: entry.startMs, endMs: entry.endMs, wordCount: countWords(entry.text), text: String(entry.text ?? '') });
       return;
     }
     if (entry?.speaker !== 'candidate') { group = null; return; }
     if (entry.acknowledgement) return;
-    if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0 }; groups.push(group); }
+    if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0, voicedOnly: true }; groups.push(group); }
+    if (entry.voiced !== true) group.voicedOnly = false;
     group.turnIndexes.push(index);
     group.startMs = Math.min(group.startMs, entry.startMs);
     group.endMs = Math.max(group.endMs, entry.endMs);
@@ -119,6 +125,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     const speechMs = prosody.reduce((sum, item) => sum + (finite(item.speechMs) ? item.speechMs : 0), 0);
     const durationMs = Math.max(0, answer.endMs - answer.startMs);
     const pitchRangeSt = median(prosody.map(item => item.pitchRangeSt));
+    const base = answer.voicedOnly ? voicedBaselineSnapshot : baselineSnapshot;
     const prior = answer.turnIndexes[0] - 1;
     let responseLatencyMs = null;
     for (let i = prior; i >= 0; i -= 1) {
@@ -141,16 +148,16 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
       responseLatencyMs,
       longAnswer: durationMs > 120000,
       pitchRangeSt,
-      pitchRangeDeltaSt: finite(pitchRangeSt) && finite(baselineSnapshot?.pitchRangeSt) ? round(pitchRangeSt - baselineSnapshot.pitchRangeSt, 2) : null,
-      loudnessDeltaDb: finite(median(prosody.map(item => item.loudnessDb))) && finite(baselineSnapshot?.loudnessDb)
-        ? round(median(prosody.map(item => item.loudnessDb)) - baselineSnapshot.loudnessDb, 2) : null,
+      pitchRangeDeltaSt: finite(pitchRangeSt) && finite(base?.pitchRangeSt) ? round(pitchRangeSt - base.pitchRangeSt, 2) : null,
+      loudnessDeltaDb: finite(median(prosody.map(item => item.loudnessDb))) && finite(base?.loudnessDb)
+        ? round(median(prosody.map(item => item.loudnessDb)) - base.loudnessDb, 2) : null,
     };
   });
 
   const runs = interviewerRuns(entries);
   const candidateInterruptions = [];
   entries.forEach((entry, index) => {
-    if (entry?.speaker !== 'candidate' || entry.channel === 'chat' || entry.acknowledgement) return;
+    if (entry?.speaker !== 'candidate' || isTypedLine(entry) || entry.acknowledgement) return;
     const run = runs.find(item => entry.startMs > item.startMs && entry.startMs < item.endMs);
     if (!run) return;
     candidateInterruptions.push({
@@ -163,6 +170,14 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     });
   });
 
+  // Answers the interviewer had to stop: the candidate's line carries the cut-in, spoken live or by voice.
+  const interviewerCutIns = [];
+  entries.forEach((entry, index) => {
+    if (entry?.speaker === 'candidate' && entry.interrupted === true && entry.cutOffBy === 'interviewer') {
+      interviewerCutIns.push({ turnIndex: index, atMs: entry.endMs ?? entry.startMs });
+    }
+  });
+
   const candidateTalkMs = answers.reduce((sum, answer) => sum + (answer.speechMs > 0 ? answer.speechMs : answer.durationMs), 0);
   const interviewerTalkMs = entries.filter(entry => entry.speaker === 'interviewer' && entry.channel !== 'chat')
     .reduce((sum, entry) => sum + Math.max(0, (entry.endMs ?? 0) - (entry.startMs ?? 0)), 0);
@@ -172,6 +187,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     answers,
     typedAnswers,
     // A call answered only by typing has no voice to measure: pace, pauses, fillers and tone do not apply.
+    // A line spoken in the candidate's voice is a spoken answer, so it is never typed.
     typedOnly: answers.length === 0 && typedAnswers.length > 0,
     answerCount: answers.length,
     typedAnswerCount: typedAnswers.length,
@@ -180,6 +196,8 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     talkRatio: totalTalkMs > 0 ? round(candidateTalkMs / totalTalkMs, 3) : 0,
     candidateInterruptions,
     interruptionCount: candidateInterruptions.length,
+    interviewerCutIns,
+    interviewerCutInCount: interviewerCutIns.length,
     responseLatencyMs: median(answers.map(answer => answer.responseLatencyMs)),
     longAnswerCount: answers.filter(answer => answer.longAnswer).length,
     pausesOver1s: answers.reduce((sum, answer) => sum + answer.pausesOver1s, 0),

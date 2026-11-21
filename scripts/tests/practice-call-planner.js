@@ -19,8 +19,8 @@ const ctx = { pool, voices, targetMinutes: 30 };
 
 const goodPlan = () => ({
   interviewKind: 'A hiring-manager screen with one technical segment.',
-  lead: { voice: 'V1', role: 'Engineering manager', temperament: 'warm', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.' },
-  panel: [{ voice: 'V2', role: 'Senior engineer', focus: 'caching design', stability: 0.35, room: 0.4, manner: 'Direct and curious.' }],
+  lead: { voice: 'V1', role: 'Engineering manager', temperament: 'warm', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.', interrupting: 'Lets people finish and rarely cuts in.' },
+  panel: [{ voice: 'V2', role: 'Senior engineer', focus: 'caching design', stability: 0.35, room: 0.4, manner: 'Direct and curious.', interrupting: 'Lets people finish and rarely cuts in.' }],
   questions: [
     { number: 1, askedBy: 'V1', minutes: 8, probes: ['Ask what exactly they built.'] },
     { number: 0, text: 'Tell me about a time a widget shipment went wrong.', askedBy: 'V1', minutes: 5, probes: [] },
@@ -44,6 +44,23 @@ const tests = [
       assert.deepEqual(plan, goodPlan());
       assert.equal(PLAN_ATTEMPTS, 3);
       assert.equal(PLAN_SCHEMA.properties.panel.maxItems, 4);
+    },
+  },
+  {
+    name: 'practice call planner: every person needs an "interrupting" text, which is carried through and asked for in the prompt and schema',
+    async run() {
+      const mutate = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };
+      assert.match(mutate(p => { delete p.lead.interrupting; }), /lead\.interrupting must be a string/u);
+      assert.match(mutate(p => { p.panel[0].interrupting = ''; }), /panel\[0\]\.interrupting must be at least 1 character/u);
+      assert.match(mutate(p => { p.panel[0].interrupting = 'x'.repeat(401); }), /panel\[0\]\.interrupting is 401 characters long and the limit is 400/u);
+      assert.equal(check(goodPlan()).plan.lead.interrupting, goodPlan().lead.interrupting);
+      assert.equal(check(goodPlan()).plan.panel[0].interrupting, goodPlan().panel[0].interrupting);
+      assert(PLAN_SCHEMA.properties.lead.required.includes('interrupting'));
+      assert(PLAN_SCHEMA.properties.panel.items.required.includes('interrupting'));
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      assert.match(prompt, /"interrupting"/u);
+      assert.match(prompt, /what makes them jump in/u);
+      assert.match(prompt, /never wording to reuse/u);
     },
   },
   {
@@ -199,7 +216,7 @@ const tests = [
       const solo = [voices[0]];
       const plan = {
         interviewKind: 'A short solo call.',
-        lead: { voice: 'V1', role: 'Recruiter', temperament: 'neutral', stability: 0.3, room: 0.1, manner: '' },
+        lead: { voice: 'V1', role: 'Recruiter', temperament: 'neutral', stability: 0.3, room: 0.1, manner: '', interrupting: 'Lets people finish and rarely cuts in.' },
         panel: [],
         questions: [{ number: 3, askedBy: 'V1', minutes: 5, probes: [] }, { number: 0, text: 'What is your notice period?', askedBy: 'V1', minutes: 2, probes: [] }],
         problems: [],
@@ -210,7 +227,7 @@ const tests = [
       assert.deepEqual(result.plan.panel, []);
       assert.match(asked[0], /- V1: Alex/u);
       assert.doesNotMatch(asked[0], /V2/u);
-      const two = JSON.parse(JSON.stringify(plan)); two.panel = [{ voice: 'V2', role: 'Peer', focus: 'x', stability: 0.3, room: 0, manner: '' }];
+      const two = JSON.parse(JSON.stringify(plan)); two.panel = [{ voice: 'V2', role: 'Peer', focus: 'x', stability: 0.3, room: 0, manner: '', interrupting: 'Lets people finish and rarely cuts in.' }];
       assert.match(validatePlan(two, { pool, voices: solo, targetMinutes: 10 }).problems.join(' | '), /panel\[0\]\.voice is V2, which is not one of the drawn voices \(V1\)/u);
     },
   },

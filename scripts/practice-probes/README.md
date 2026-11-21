@@ -93,6 +93,20 @@ node scripts/practice-probes/turn-audio.mjs <call.json> --model opus --turns 2,4
 node scripts/practice-probes/main-first-sentence.mjs <call.json> --model opus --effort low --limit 26
 ```
 
+## F. The helper's inject commands, end to end
+
+`inject-probe.mjs` launches a real Practice Audio Helper build, waits for `status ready` (checks `inject: true`), speaks
+two synthetic sentences with a 2.2 s pause (macOS `say`, converted with `afconvert` to 24 kHz PCM16) into the microphone
+signal over `inject` / `inject-audio` / `inject-end`, and prints the inject, vad, transcript and playback events with
+numbers, then reads the 16 kHz recording. Run 1 also plays an interviewer line (`play`/`audio`/`end`) during the
+injected line; run 2 sends `inject-cancel` with `fadeMs` 60 after 3 s. Without microphone permission the helper runs on
+its silent microphone (level stays 0 before the line), which must still carry the injected audio. Scratch files go to
+`--out` (default `/private/tmp/claude-501/inject-probe`); delete them after reading. No network, no credits.
+
+```sh
+node scripts/practice-probes/inject-probe.mjs "<path to practice-audio-helper>" --out /tmp/inject-probe
+```
+
 ## Tests (no network, no microphone)
 
 ```sh

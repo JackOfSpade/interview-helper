@@ -21,7 +21,8 @@ the status table says what has run live.
 | Post-call analysis, two-track recording and in-app replay with chapters | Built, Phase 5 (fakes only; not yet run live) |
 | Live checklist for the user | Written, Phase 6 (section 14); not yet run |
 | First live runs (2026-11-17) | Run end to end with typed chat answers: real interviewer sessions, ElevenLabs voice, both models, recording, review and chapters. The spoken path (microphone capture, turn-taking on real speech, tone notes, Scribe) is still not run live. See "Live run record" below. |
-| Candidate voice and interviewer cut-ins (2026-11-20) | Built: a sent chat message is spoken in the candidate's own voice, and the interviewer may cut into it. Unit-tested only; not yet heard in a live call. The cut-in on spoken (microphone) answers is still Phase 7. |
+| Candidate voice and interviewer cut-ins (2026-11-20) | Built: a sent chat message is spoken in the candidate's own voice, and the interviewer may cut into it. Unit-tested only; not yet heard in a live call. |
+| Interviewer cut-ins on live speech, tone notes for the candidate's voice, voiced answers judged as spoken (2026-11-21) | Built (sections 6, 7, 11). Unit-tested only; not yet run on real speech. |
 | Panel interviews (several voices, late joiners, interviewers talking to each other) | Built 2026-11-17 (section 9); run live from source with typed answers |
 | Voice delivery for Eleven v4 (tags, stability, flush) and the fast acknowledgement | Built 2026-11-17 (sections 4a and 9a) |
 
@@ -136,12 +137,17 @@ NDJSON over stdio: one JSON object per line, UTF-8. The Node wrapper is
 | `cancel` | `utteranceId` | Stops the utterance now. |
 | `mute` | `muted` (boolean) | Mutes the candidate's mic; the recording gets silence. |
 | `stop` | none | Finish the recording and exit. |
+| `inject` | `utteranceId`, `sampleRate` (16000, 24000 or 44100) | Starts a line in the candidate's AI voice mixed into the microphone signal (2026-11-21). A new `inject` cancels the active one with a 30 ms fade. |
+| `inject-audio` | `utteranceId`, `pcm` | Base64 16-bit LE mono at the line's rate, at most 96000 bytes before base64, never split mid-sample. |
+| `inject-end` | `utteranceId` | No more audio for the line. |
+| `inject-cancel` | `utteranceId`, `fadeMs` (0..500, default 60) | Stops the line with a fade, on the mix and the monitor. |
 
 **Events (helper → main)**
 
 | Event | Fields | Notes |
 |---|---|---|
-| `status` | `state`: `preparing` or `ready` | `ready` once mic capture, playback and the analyzer run. |
+| `status` | `state`: `preparing` or `ready`; `inject: true` | `ready` once mic capture, playback and the analyzer run. A helper that can inject says `inject: true` (an older one omits it, and the wrapper then refuses the inject commands). |
+| `inject` | `utteranceId`, `state`: `started`, `position`, `finished` or `cancelled`, `positionMs`, `atMs` | `positionMs` is how much of the line has been mixed into the microphone; `atMs` is on the mic timeline (the clock of `vad` and `transcript`). Positions about every capture buffer, at least 40 ms apart (100 ms on the silent microphone). Backpressure in the wrapper gives a local `cancelled` with `reason: 'backpressure'`. |
 | `level` | `rms` (0..1), `atMs` | Every 100 ms. |
 | `vad` | `speaking` (boolean), `atMs` | On change only. Energy-based with an adaptive noise floor; at least 100 ms to start, 200 ms to end; constants tuned in Phase 3. |
 | `transcript` | `text` (1..4000 chars), `segmentId`, `final`, `startMs`, `endMs` (≥ `startMs`) | On-device SpeechTranscriber, volatile and fast results. |
@@ -350,7 +356,38 @@ reported as `[candidate silent 10s]`.
 New and decided. The call window has an optional chat panel for typed
 messages, mixable with voice.
 
-**The candidate's voice (2026-11-20).** A sent message still shows in the
+**The candidate's voice goes through the microphone path (2026-11-21, owner's design).** So that the real
+microphone pipeline can be tested with the AI voice, a line spoken in the candidate's voice is now mixed into the
+microphone signal inside the helper, right after Apple voice processing (echo cancellation) and before level, the
+energy VAD, the on-device SpeechAnalyzer and the 16 kHz `candidate.wav`, consumed at the capture rate so it is
+"spoken" in real time on the mic timeline. The candidate hears it through a separate monitor player node on the same
+engine's main mixer (voice processing's echo reference, so the real microphone does not pick it back up), which can
+sound together with an interviewer. From the mix on, everything is the microphone path, unchanged: turn end from VAD,
+speculation and Smart Turn (including the "sounds unfinished" hint), the live-speech looks and the 2.5 s trailing
+window (section 7), the overlap and interruption rules when it talks over an interviewer, the ear's tone notes and
+baseline, Scribe fillers, and the recording. Transcript entries are the recogniser's, like any speech; nothing the
+interviewer, the review or the replay sees tells them apart. With the mic muted, the real mic samples are zeroed but an
+injected line still goes through (with a 0.4 s tail). Without microphone permission the silent microphone feeds the
+same processing at 16 kHz, recognition only if the speech assets are already installed (it never waits on a download).
+- **Giving way like a person.** When an interviewer reply starts playing over a line the candidate was already in, the
+  candidate carries on for a reaction time drawn from `candidateYieldMinMs`..`candidateYieldMaxMs` (300..900 ms,
+  `deps.random`), to the end of the word being said, then stops with a `candidateYieldFadeMs` (60 ms) fade. A line
+  started while an interviewer was already speaking is talking over them on purpose: it is not stopped, and the
+  interruption rules decide. A message queued behind a line that gave way waits until the interviewer has finished.
+- **Queue, chat, pause, hang-up.** Messages sent while a line is going are spoken straight after it, as one line. The
+  chat is cut where the inject position reached (`candidate-voice` `cut`, as before). Pausing cancels the line with the
+  fade and drops what was queued (their chat entries cut or marked "Not said"); hang-up cancels it.
+- **Debug log.** `inject` entries (state, id, positions; never text or audio).
+- **Fallback.** A helper that cannot inject keeps the app-played path described below (the ear's `prepareVoiced` /
+  `voicedNote` and the synthetic-voice baseline are used only there).
+- **Measured (2026-11-21, `scripts/practice-probes/inject-probe.mjs`, the real helper on the silent microphone, speech
+  from `say`).** Ready with `inject: true`; `finished.positionMs` 12890 against 12889 ms of audio; VAD on/off at the
+  speech and its 2.4 s pause; three final transcripts matching the words (numbers as digits); speech in the WAV about
+  60 ms after `started` at the source level; `inject-cancel` with 60 ms fade silenced the WAV within 20 ms and turned
+  the VAD off; interviewer playback worked during an injection. Not yet run with a real microphone, the monitor's
+  echo-reference behaviour, or in a live call.
+
+**The candidate's voice (2026-11-20, now the fallback).** A sent message still shows in the
 chat history, but the interviewer no longer reads it: it is spoken on the call
 in the candidate's own voice and the interviewer hears it as an ordinary
 `Candidate: '…'` line once it has been said.
@@ -391,6 +428,7 @@ in the candidate's own voice and the interviewer hears it as an ordinary
   call then waits for the candidate. A look still being written when the line
   ends is dropped and the whole line goes to the interviewer.
 - **The interviewer never reads the chat.** The chat history is for the
+- **A cut-off line is cut off in the chat too (2026-11-21).** Each sent message carries a chat id to the engine. When the interviewer cuts in, the `candidate-voice` `cut` event lists, per message of the line, the words heard (by word count), and the chat entry becomes the heard words ending in " —" (`cutOff`, the sent text kept as `sent`); a message the voice never reached stays, dimmed, marked "Not said" (`unsaid`). Line breaks in a sent message are not passed to the interviewer (heard speech has no paragraphs). Unit-tested only.
   candidate only. A message the voice cannot say (no audio within 15 s, or a
   failed stream) is tried once more; if that fails too it is lost, like speech
   on a bad line: the window says "Your audio didn't go through. Send your
@@ -398,9 +436,18 @@ in the candidate's own voice and the interviewer hears it as an ordinary
   no candidate voice could be drawn at all still passes messages on as typed
   lines. A message sent while the voice is speaking is spoken next. A line that
   ends during a pause is answered on resume.
-- **Practice count.** A message from Suggest a reply (edited or not) is marked
-  `generated`; it is heard like any other but does not count towards
-  "Practised ×N".
+- **Practice count (changed 2026-11-21, owner's call).** A message from Suggest a reply (edited or not) is
+  marked `generated` on the fallback path only (an injected line is plain microphone speech), and it now counts as the answer to a question exactly like the candidate's own words:
+  for the asked-question rotation and "Practised ×N" alike. Until 2026-11-21 it did not count.
+- **Tone notes for the candidate's voice (2026-11-21).** A line spoken in the candidate's voice carries a `[voice: …]`
+  note like a spoken answer. When its voice is whole (or at its end, if it was cut while still streaming) the engine
+  hands the ear the line's audio, `ear.prepareVoiced({ id, pcm, sampleRate, wordCount })`; the ear converts it to
+  16 kHz (`audio/resample.js`) and runs the tone model in 6 s chunks in the background. When the line ends,
+  `ear.voicedNote({ id, startMs, endMs, heardMs })` measures the heard part against a baseline of the synthetic voice's
+  own (the same 20 s of speech rule; it never feeds or uses the microphone baseline, saved as `record.voicedBaseline`)
+  and records its prosody and tone in `candidateProsody` and `toneSamples` (`voiced: true`). The turn waits at most
+  `voicedNoteWaitMs` (300) for the note; a late or missing note means none. `ear.settle()` waits for these too.
+  Unit-tested only.
 - **Off in the unit suites.** The service draws candidate voices only when the
   app passes `candidateVoices: true` and the tag call (`candidateTagText`) in
   from `main.js`.
@@ -464,6 +511,7 @@ photo of the lunar surface) may get a one-part screen just for that.
   files only, an SVG with a policy that blocks everything), so the live screen
   and the replay use the same address.
 - **Who sees them.** The interviewer's plan lists `pictureAboveTheText` or
+- **A picture's lead sentence (2026-11-21).** The screen text is written before any picture is found, so on its own a picture can read as an afterthought. The pick step may return `lead`: one sentence, stating only what is plainly visible or certain, that ties the question to that exact picture ("The photo above shows…"). It goes above the part's text (`settleVisuals`), so the window, the interviewer's plan and the replay all show the screen as one piece; a screen whose picture was not kept keeps its text unchanged. Diagrams need none: they are drawn from the screen's own content. Unit-tested only.
   `diagramAboveTheText` with a description, and the prompt lets it refer to the
   visual naturally. Suggest a reply gets the description, the diagram's SVG and
   the picture itself (as an image).
@@ -477,14 +525,86 @@ Unit-tested only (2026-11-21): no live call has made a visual yet.
 
 ## 7. The interviewer interrupting the candidate
 
-The state machine is built in Phase 3 and enabled with Phase 7.
+**The watcher (built 2026-11-21, owner's design; unit-tested and measured offline only, not yet run in a live call).**
+An interruption must be about what the candidate said in the last few seconds and must come from a real reason AND
+the interviewer's personality. A first version (earlier the same day) let the main session take a look every 10 s; each
+look took 3 to 4 s on Opus low, so it noticed late and filled the main session's history. Now a small, fast session
+decides whether to cut in, and the main session only writes the line.
 
-A small watcher session checks the live transcript every 15–20 s once an
-answer passes about 60 s. It may interject with a natural line: a
-clarification, steering the candidate back, or time pressure. Temperament
-sets frequency (tough more, warm rarely) with a per-call cap. It is not on
-the latency path. Feedback counts the times the interviewer had to stop the
-candidate.
+- **The watcher session** (`SESSION_MODELS.watcher`, Sonnet low; started only when the app passes `watcher: true` from
+  `main.js`, so it is off in the unit suites; restarted like the classifier, with the conversation so far before its
+  READY line). Its instructions (`buildWatcherInstructions`) hold the reasons, the rule, each person's role, temperament,
+  manner and interrupting style, and the planned questions with number, asker and minutes. It answers exactly `<listen/>`
+  or `<cut-in who="B" reason="probe"/>` (`parseWatchDecision`; anything unreadable, or a who not on the call, is listen).
+  Without a watcher, the earlier timed looks below stay as they were.
+- **When it checks.** After `cutInFirstMs` (12 s) of an answer: at every breath (a VAD end shorter than `speculateMs`;
+  a check starts at the VAD end and its result is dropped if the pause turns into a turn end), and at least every
+  `watchEveryMs` (2500) while the candidate talks without a break. One check at a time; a breath during a check is owed
+  and starts as soon as it returns. A check that fails or times out (`watchTimeoutMs`, 2500) counts as listen and the
+  next one waits a full `watchEveryMs`; a crashed watcher is restarted once, and the next check waits for it. Each
+  check (`formatWatchMessage`) carries the question asked (the last interviewer line), its plan number and asker, the
+  answer so far at that instant, the last sentence heard, elapsed call time and how long the answer has run. No checks
+  while paused, during a reply, while an app-played voice line plays, or after the call ends. Live microphone speech
+  and injected AI-voice lines are the same path; the app-played fallback keeps its position-based looks (section 6).
+- **The reasons and the rule.** long (against the plan's minutes for the question; rough norms about 2 minutes for a
+  behavioural story and 30 to 60 s for a factual answer; past about twice the plan almost anyone steps in), off-topic,
+  probe (a detail just said), enough (they have what they need), misunderstood, and composure (only for roles where
+  handling interruptions is part of the job, such as sales, consulting or client-facing work, and only when the
+  personality fits). A cut-in needs both a reason and the personality: a reason with the wrong personality, or the right
+  personality without a reason, is listen. A pause alone is never a reason. No fixed cap: the old "a real interviewer
+  rarely cuts in / never more than a couple of times" wording is gone. Never on the candidate's own questions at the end.
+- **Personality.** A required plan field per person, `interrupting` (the planner writes it for the lead and every
+  colleague; `validatePlan` rejects a plan without it; carried into the persona, the panel, the prompts and `call.json`):
+  what makes them jump in, how readily, how it sounds, and when (almost always at a breath or sentence end; mid-phrase
+  only for a very blunt person, and rarely). Planner examples are illustrations, never lines. `who` is the asker unless a
+  colleague's own area is clearly what the answer is about, and then less often.
+- **On a yes.** The main session gets the usual live look (`[The candidate is still speaking. …]`) with the latest words,
+  `[Most recent: '…']` and a line naming who would cut in and why. It writes the cut-in as that person (their speaker
+  tag on a panel), in their manner and interrupting style (both are in its instructions), about the reason and about
+  what was said most recently; the engine inserts no wording and the prompt describes style, not words. It may still
+  reply `<listen/>`.
+- **Natural timing.** A cut-in ready while the candidate is mid-sentence is held until the next VAD end, at most
+  `cutInHoldMs` (1500). **Stale guard:** at commit, more than `cutInStaleWords` (12) words said since the look's snapshot
+  drops it silently (discard reason `stale-cut-in`) and asks the watcher again at once; the worst case reacts to speech
+  about 4 s old.
+- **Events** (in `debug.jsonl`): `watch` (ms, decision, who, reason, wordsSinceSnapshot, trigger, ignored) and `cut-in`
+  (held, stale, committed, with who, reason and heldMs).
+- **Measured offline (2026-11-21, `ai-test-runs/2026-11-21-cut-in-watcher/`).** 42 check points in the long answers of
+  call-mwq2lkdo-jz4w5m, cold CLI. Two blind judges agreed on 40 of 42 (each cut in once, on different cases). Sonnet low
+  matched the agreed cases 39/40 and 40/40 over two runs (one false cut-in in one run, and one wrong who); Haiku low 40/40.
+  Latency p50/p95: Sonnet 817-850 / 1962-2193 ms, Haiku 886 / 2892 ms (CLI overhead included; the warm in-call session
+  should be faster, not yet measured). About $0.0008 a check for Sonnet with a cached prefix. Recall is untested: the
+  set held almost no case where a cut-in was clearly due. After it, the who rule (the asker unless clearly a colleague's
+  area) and the twice-the-plan line were added.
+- **Research behind it.** In a job-interview dialogue corpus the listener took the turn at 84% of transition-relevance
+  places (clause or sentence complete in grammar and intonation) and at 1% of other places (Hara et al., Interspeech
+  2019), and interruptions in a speaker's pause start about 373 ms into it on average (Gravano and Hirschberg,
+  Interspeech 2012), hence the breath checks and the hold. Why interviewers interrupt (OPM structured-interview guidance;
+  recruiter guides): pace and time, a tangent, probing a detail just said, redirecting when they have enough, clarifying a
+  misunderstood question, and in some roles testing composure. Frequency varies widely by interviewer (some interrupt
+  10 to 20 times a call out of curiosity, others hardly ever), and frequent interrupting lowers candidates' sense of being
+  listened to (Communication Monographs 1984) and the candidate experience (ACM IUI 2023), hence personality rather than
+  a cap. About a quarter of speaker changes in expert-novice conversation are interruptions, mostly cooperative (NoXi,
+  LREC 2022).
+
+**The timed looks (built 2026-11-21, now the fallback without a watcher).** A microphone answer gets a look
+`cutInFirstMs` (12 s) after its first speech, then every `cutInEveryMs` (10 s), on the main session itself, with the
+same conditions as above; `<listen/>` leaves no trace, and a look still being written is dropped when the candidate
+stops. A look answered with words commits at once over the live speech; the candidate's words so far become an entry
+with `interrupted: true` and `cutOffBy: 'interviewer'`.
+- **Talking over each other for a moment (the owner's worry).** A person cannot stop the instant someone cuts in. For
+  `cutInYieldMs` (2.5 s) from when the cut-in is heard (re-anchored on the helper's `started` event), candidate speech
+  never stops, pauses, floor-bids or classifies against it: those words join the cut-off entry, and a VAD end in the
+  window schedules no turn end. Speech that runs on past the window, or a fresh onset after it, is an ordinary overlap
+  judged by the usual rules, measured from the window end (the candidate is pushing back). The window closes as soon as
+  the cut-in itself ends, so words said after a short cut-in ("Go on.") are a new answer, never added to the old entry
+  (found in review on 2026-11-21). Voiced cut-ins and every other reply keep their interruption rules unchanged.
+- **Known gap.** Words are assigned to the cut-off entry by the recogniser segment's start time, so a segment that
+  starts inside the window and keeps growing after it loses its later words. Fine if the helper emits short
+  per-phrase segments; not yet checked on real speech.
+- **Feedback.** `callMetrics` counts `interviewerCutIns` (any candidate entry with `cutOffBy: 'interviewer'`, voiced
+  or live), the review transcript marks "the interviewer had to stop the candidate here" and the review cites the
+  count.
 
 ## 8. Personas and voices
 
@@ -580,6 +700,8 @@ A call may have a panel: the lead interviewer plus up to four colleagues (ids A 
 - **Measured on the real prepared job (2026-11-17, four setups).** With no focus note: a recruiter lead who picked 9 of 17 questions and brought one staff engineer for the two coding questions; and an engineer lead who picked 6 including a coding question and ran it alone. "About 10 minutes": an engineer lead, 5 questions, alone. "45 minutes, behavioural only": an engineer lead, 11 behavioural questions, alone. So the title the lead gives itself decides solo versus panel: a lead that makes itself an engineer covers the coding questions itself. The owner asked for that to change the same day: the lead is now told it owns the interview (the hiring manager, the lead of the team or a recruiter), settles its title before looking at the questions, and never stretches the title to cover everything; a hands-on exercise or deep specialist question belongs to a practitioner. Four setups after that: twice an engineering manager who picked 7 questions and brought a senior engineer for the coding question; "about 10 minutes", a manager with 4 questions and no coding, alone; "behavioural only", a manager with 10 questions, alone. Drawing the lead and four candidates took 9 to 14 library requests, 2.2 to 5.1 s in all; the ring came 12 to 19 s after start.
 - **Late joiners are rolled by chance.** Each candidate colleague is late with 60% chance and then joins 40 to 210 s after the call is answered, whatever is happening at that moment. Their tile appears with a chime, they say nothing, and the next message to the lead carries a note that they joined. The lead introduces them at the next pause and catches them up in a sentence. Until then nobody may speak as them (the engine ignores a speaker tag for someone not on the call).
 - **Conduct.** The same rules are in the casting instructions and in the settled instructions, because the lead's session is never restarted after it picks its colleagues: a hand-over is finished in the same reply, a specialist does not repeat the introduction questions, the colleague who asked usually takes the answer, the lead says the farewell.
+- **The candidate's questions are never cut short for time (owner, 2026-11-21).** The clock limits only the interviewers' own questions. Past the upper target the interviewer starts nothing new of its own, goes to the candidate's questions if they have not had them, answers every one fully by the person best placed (it may say lightly it is happy to run a couple of minutes over), and closes only once the candidate has nothing more to ask. It never offers to answer only some of them. No code limit ends a call by time. Prompt only.
+- **Answering the candidate's questions as a panel (2026-11-21).** In call-mwq2lkdo-jz4w5m the candidate asked one question of two colleagues and one of the lead; the lead said "glad you asked", a colleague answered straight after with no hand-over, the lead went on, and the second colleague never spoke. The panel conduct now says each question is answered by the person it was asked of, the floor passes between them with a short hand-over or bridge, never back to back as if one mind were speaking, and the lead closes. Prompt only; not yet heard live.
 - **Greeting once (2026-11-19, prompt only, unit-tested for the text).** In the call-mwnvhypn-666sq7 record a colleague said "Hey Jack." over the lead's introduction and again when handed the floor 40 minutes later. The panel conduct rules now say a colleague greets the candidate once; one who already said hello (a spoken-over remark counts) or was introduced and has spoken starts their first line on taking the floor with their question or a reference to what was said, never another hello. No parser stripping.
 - **Tiles.** Every interviewer shows as a circle with the first letter of their first name on a solid colour picked from the name, as a video call shows someone with no photo. The speaking interviewer's tile has the ring.
 - **Record.** `call.json` gains `panel` (who, role, focus, when they joined) and interviewer transcript entries carry `speakerId` and, when two spoke in one reply, `segments`.
@@ -633,6 +755,7 @@ Technical questions are hard by voice alone, so the interviewer can share its sc
 - **Call sound: a room per interviewer, then the call codec.** Each interviewer's voice passes through `audio/callSound.js` before the voices are mixed: early reflections, a short reverberant tail, a rumble filter and a low-pass, and call-style levelling with a limiter. No noise is added, because call software removes steady noise. People on a call sit in different rooms at different distances from their microphones, so each voice has its own room: the lead sets a "room" amount from 0 to 1 for itself and each colleague on its setup line (0 is a headset in a quiet room, 1 a laptop microphone in a bare room), and `roomFor(voiceId, amount)` turns that into the decay (160 to 480 ms) and microphone distance (direct-to-reverberant 15 to 6 dB), with the filters and level varying by voice. With no amount the room comes from the voice id alone. The minimum is never dry: the owner found a voice with no room at all sounds too perfect, so the lowest setting is a slight room, barely noticeable unless listened for. The mixed audio then goes through the real Opus codec (`audio/callCodec.js`, package `opusscript`, voice mode, 24 kbit/s, wideband, 20 ms frames) on its way to the speaker and the recording; it adds about 26 ms of delay and falls back to untreated audio if it cannot load. Opus takes 24 kHz audio directly; a 44.1 kHz stream (paid ElevenLabs tier) is passed through untreated, which is a known gap. History: two echoes and a faint hiss won 2 of 3 against clean audio in a blind set, then lost every time to a modelled room without hiss, and the codec version was preferred or tied in all three sets.
 - **The interviewer watches the pad; there is no Ready button.** The owner found the button unnatural and asked for what happens in a live coding interview. While the pad text keeps changing the interviewer is sent it about every 25 s, and once more when typing stops for 12 s; never when nothing changed. Most of these get `<listen/>` (silent, no trace). Speaking up is never required: it comments only when a real person in that role would, and on a panel it is the interviewer whose area the code is. The candidate can keep typing while it talks. It never treats the code as finished until the candidate says so, because they may be testing. Edits in the pad hold the silence checks by themselves; the window sends no typing signal for the pad.
 - **Sharing a screen takes the interviewer a moment.** The `<screen>` tag carries `delay`, the seconds it takes to find the document and start sharing this time (2 to 20, default 6, usually 5 to 15; 0 to 3 when only swapping what is already shared). Control tags take effect when playback reaches their place in the reply, after the words before them have been heard (at first they fired when the reply began, which put the screen up before the interviewer had said it would share). At a share that takes a second or more, the reply is spoken as two separately synthesised pieces with real silence between them (`stream.gap(ms)` in `eleven/panelVoice.js`): the words before the tag play to their natural end, the setup time is silence in the audio itself, and the words after the tag start cleanly as the content appears. Nothing shows in the window meanwhile, and a pad opened in the same reply appears with it. A solo call uses the panel voice with only the lead, so the gap works there too. History: the first version paused playback of one continuous stream at the tag, which clipped the start of the next word, once landed two words late (the voice reports delivery tags such as [warmly] as timed words, so positions are now compared on letters and digits only with tags removed from both sides), and cut a word's dying sound; the owner asked why the audio was being cut at all, and the pausing code was removed. Measured in a live solo call from a word-timestamped transcript and audio levels: the sentence before the tag died away by 16.4 s, 8.3 s of quiet, the screen appeared at 24.5 s and the next sentence began at 24.6 s, with no pause or resume issued.
+- **Share timing with a multi-word delivery tag (fixed 2026-11-21).** In call-mwq2lkdo-jz4w5m the reply was "…in stages. <pause s="4"/> One moment. <screen ref="p1.1" delay="4"/> Should be up now." The recording shows speech to 984.5 s, 4.3 s of quiet, "One moment." at 989.0 s, 4.4 s of quiet, then "Should be up now" at 994 s, but the screen came up at 988.1 s, before "One moment.". The voice times a delivery tag of several words (`[slightly amused]`) as several timed words, and `heardChars` stripped tags one word at a time, so those letters counted as heard speech and the screen control fired about one phrase early. `heardChars` now follows the brackets across words, and `heardFor` drops a tag only partly heard. Unit-tested; not yet seen in a live call.
 - **A voice that breaks off by itself.** On `eleven_v4_turbo` a delivery tag before the last word makes the line stop sharply: measured on one voice and line, the level fell from half to quiet in 160 ms with `[interrupted]` before the last word, against 920 ms for the same line ending in a dash alone (a drawn-out trailing word) and 320 ms for a finished sentence; a tag placed after the dash did nothing. The owner found the tagged version more natural, and the cut-in instructions now tell the interrupted interviewer to write it.
 - **Who is on the call.** While any cast colleague has not joined, every message to the lead says who is on the call and who is not. Until a colleague joins, the lead runs the call itself: it may say they are joining shortly, but does not introduce them as present, hand over to them or ask their questions. If it does write a switch to an absent colleague, nothing is spoken for them in any voice, and the lead is told at once and recovers in its own words. Nobody is made to join early (a first patch did that; the owner rejected it as unrealistic). Seen live: "my colleague Tomas will be joining us shortly", then Tomas introduced and speaking in his own voice after joining at 1:31.
 - **Hidden pause.** P pauses and resumes the call (Command+P or Control+P from inside the chat box or the pad). While paused no silence check-in fires, the call cannot be ended for silence, and the elapsed time the interviewer sees stands still. Only the shortcut resumes (owner's rule): speech during a pause is dropped, and a chat message or Ready is refused. The chat box stays editable with a reminder under it and the draft is kept for sending after the resume. The timers themselves stay tuned for a candidate who speaks.
@@ -779,6 +902,34 @@ transcribed word, so echo residue never stops playback), silence prompt 10 s (ra
 classifier timeout 2.5 s. Confirm in the Phase 6 live checklist.
 
 ## 11. Post-call analysis
+
+**The replay, redesigned (owner, 2026-11-21).** Less text, feedback in step with the audio. No transcript and no
+chapter list: the window is a slim header (title, overall score, Overview, delete), a focus area, and a player docked at
+the bottom. Before playback (or on Overview) the focus area shows the overall score, the summary cut to two sentences
+(More), the top three "Work on first" and an "All feedback" toggle (the compact `FeedbackView`, no transcript). Once a
+part plays or is picked it shows that part: Question / Your answer, who asked, the title, and its feedback (score,
+What worked, Work on, Adapting, the extension behind a disclosure; a moment's kind, score and note; follow-up moments in
+the same part under it), with the shared screen or pad beside it when one was up. Feedback is attached to parts in code
+(`matchFeedbackToChapters` in `src/practice-call/replayModel.js`): each asked planned question's `askedAs` and each
+moment's `prompt` is matched to the interviewer turn it quotes (normalised substring first, else at least 60% of its
+content words, stopwords left out; quotes under three words must be exact), then to the chapter holding that turn. On
+call-mwq2lkdo-jz4w5m: 7 of 7 asked questions and 10 of 10 moments on the right part, none left over. A paraphrase that
+shares 60% of its content words with an unrelated line can still attach to it (a stricter floor lost a real paraphrase).
+The player: a large play button, back/forward 10 s, previous/next part, speed 1x to 2x, and a 48 px timeline of the
+parts as blocks, each a lighter question share and a solid answer share, tinted by score (green 8+, amber 5+, red, grey
+without), with moment ticks and a hover card. Keys: Space, Left/Right 5 s, Up/Down part, Home/End (inside the feedback
+area Up, Down, Home, End and Space scroll it). Pauses: the recording is not re-cut; the whole replay runs on the active
+clock, the timeline leaves paused spans out, and playback jumps over them (checked every animation frame). Checked by
+eye in a preview with the real call at 800 px; not yet seen in the app window. `getReplay` now sends `startedAt` for the
+header.
+
+**Voiced and spoken answers are judged the same (owner, 2026-11-21).** A line spoken in the candidate's voice is a
+spoken answer everywhere after the call: it counts in `answers`, never in `typedAnswers`; pace, pauses and tone come
+from its own measurements (section 6, against the synthetic voice's baseline); fillers are 0 because the voice has
+none (it is meant to be a polished version of the candidate) and Scribe runs only when there was live speech. The
+review never sees whether a line was voiced or came from Suggest a reply, and never calls it typed. Only a truly
+typed, unvoiced chat line is typed, and the typed-only note fires only when nothing was spoken live or by voice. The
+replay follows the same rule.
 
 **Deterministic metrics, computed in code** from the timed transcript and
 the recording:

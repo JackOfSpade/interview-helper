@@ -10,8 +10,9 @@ import { composeVoiceNote, VOICE_NOTE_THRESHOLDS } from '../../electron/practice
 import { createFloorBidDetector, FLOOR_BID_THRESHOLDS } from '../../electron/practiceCall/audio/floorBid.js';
 import { createInterviewerTrack } from '../../electron/practiceCall/audio/trackWriter.js';
 import { mixTracks } from '../../electron/practiceCall/audio/mixdown.js';
-import { callMetrics } from '../../electron/practiceCall/audio/callMetrics.js';
+import { callMetrics, prosodyByEntry } from '../../electron/practiceCall/audio/callMetrics.js';
 import { createPracticeEar } from '../../electron/practiceCall/ear.js';
+import { pcm16To16k, resample } from '../../electron/practiceCall/audio/resample.js';
 import { trimWavStart } from '../../electron/practiceCall/audio/trimWav.js';
 
 // All fixtures here are synthetic: generated sines, seeded noise, silence and
@@ -30,6 +31,20 @@ function sine(hz, ms, sampleRate = RATE, amplitude = 0.3) {
   const out = new Float32Array(frames);
   for (let i = 0; i < frames; i += 1) out[i] = amplitude * Math.sin((2 * Math.PI * hz * i) / sampleRate);
   return out;
+}
+
+function pcm16(samples) {
+  const out = Buffer.alloc(samples.length * 2);
+  for (let i = 0; i < samples.length; i += 1) out.writeInt16LE(Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767), i * 2);
+  return out;
+}
+const crossings = samples => { let count = 0; for (let i = 1; i < samples.length; i += 1) if (samples[i - 1] < 0 && samples[i] >= 0) count += 1; return count; };
+
+// A steady tone with short gaps, so the speech detector (which needs quieter frames to judge against) sees speech.
+function voiceLine(ms, sampleRate, hz = 200) {
+  const parts = [];
+  for (let spent = 0; spent < ms; spent += 1000) parts.push(sine(hz, Math.min(850, ms - spent), sampleRate), silence(Math.min(150, Math.max(0, ms - spent - 850)), sampleRate));
+  return concat(...parts);
 }
 
 const silence = (ms, sampleRate = RATE) => new Float32Array(Math.round((sampleRate * ms) / 1000));
@@ -670,6 +685,198 @@ export default [
         assert.equal(fs.statSync(candidate).size, before, 'the good track is left alone');
         assert.deepEqual(trimWavStart({ paths: [candidate], startMs: 0 }), { trimmedMs: 0 });
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    },
+  },
+
+
+  {
+    name: 'resample: 24 kHz and 44.1 kHz voice audio comes out at 16 kHz with the same length in time and the same pitch',
+    run() {
+      for (const rate of [24000, 44100]) {
+        const out = pcm16To16k(pcm16(sine(200, 1000, rate)), rate);
+        assert.ok(Math.abs(out.length - 16000) <= 1, `${rate} Hz: one second stays one second`);
+        assert.ok(Math.abs(crossings(out) - 200) <= 2, `${rate} Hz: 200 Hz stays 200 Hz`);
+        const peak = out.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+        assert.ok(peak > 0.25 && peak < 0.35, `${rate} Hz: level kept (${peak})`);
+      }
+      // Energy above the new Nyquist is filtered out, not folded down into the band.
+      const high = resample(sine(11000, 500, 44100), 44100, 16000);
+      assert.ok(high.reduce((max, value) => Math.max(max, Math.abs(value)), 0) < 0.15, 'a 11 kHz tone is attenuated rather than aliased');
+      assert.equal(resample(new Float32Array(0), 24000).length, 0);
+      assert.equal(resample(Float32Array.of(0.1, 0.2), 16000).length, 2, 'already 16 kHz');
+      assert.throws(() => resample(Float32Array.of(0.1), 0, 16000), RangeError);
+    },
+  },
+
+  {
+    name: 'practice ear: an AI-voice line is measured from its own audio against a baseline of its own, never the microphone baseline',
+    async run() {
+      const dir = tempDir();
+      const file = path.join(dir, 'candidate.wav');
+      writeWav(file, concat(sine(150, 3000), silence(300)), RATE);
+      const tones = [];
+      const toneCalls = [];
+      const ear = createPracticeEar({
+        candidatePath: file, minSpeechMs: 5000,
+        inference: async () => ({ endOfTurn: async () => 0.9, tone: async chunk => { toneCalls.push(chunk.length); return { arousal: 0.5, dominance: 0.5, valence: 0.5 }; }, close() {} }),
+        onToneSample: sample => tones.push(sample),
+      });
+      try {
+        // The microphone feeds its baseline first.
+        ear.noteSpeech({ startMs: 0, endMs: 3000, wordCount: 8 });
+        await ear.settle(5000);
+        const micBefore = JSON.stringify(ear.baselineSnapshot());
+        const micTones = tones.length;
+        assert.equal(ear.voicedBaselineSnapshot(), null, 'no voiced line measured yet');
+        // Three lines at 24 kHz: 10, 10 and 30 words over three seconds each.
+        const lines = [['a', 10], ['b', 10], ['c', 30]];
+        lines.forEach(([id, wordCount]) => ear.prepareVoiced({ id, pcm: pcm16(voiceLine(3000, 24000, 220)), sampleRate: 24000, wordCount }));
+        await ear.settle(5000);
+        assert.ok(toneCalls.every(length => length >= 15000 && length <= 16000 * 6), 'the tone model gets 16 kHz chunks');
+        const first = await ear.voicedNote({ id: 'a', startMs: 10000, endMs: 13000, heardMs: 3000 });
+        assert.equal(first, null, 'the synthetic baseline is not ready after 3 s of its speech');
+        const second = await ear.voicedNote({ id: 'b', startMs: 14000, endMs: 17000, heardMs: 3000 });
+        assert.equal(second, null, 'ready, but the line sits on the baseline');
+        const pendingThird = ear.voicedNote({ id: 'c', startMs: 18000, endMs: 21000, heardMs: 3000 });
+        await ear.settle(5000);
+        assert.ok(ear.prosodyTurns().some(turn => turn.startMs === 18000 && turn.voiced), 'settle() waits for a voiced note, so the record has its line');
+        const third = await pendingThird;
+        assert.match(third, /faster than your usual pace/u, 'a faster line is noted against the synthetic voice\'s own pace');
+        assert.equal(JSON.stringify(ear.baselineSnapshot()), micBefore, 'the microphone baseline never moved');
+        const voiced = ear.voicedBaselineSnapshot();
+        assert.equal(voiced.turns, 2, 'only the first speech (up to the threshold) defines the synthetic baseline');
+        assert.ok(voiced.pitchMedianHz > 190 && voiced.pitchMedianHz < 250, `its pitch is the synthetic voice's, not the microphone's (${voiced.pitchMedianHz})`);
+        // The call record holds the measured lines, marked, on the transcript timeline.
+        const turns = ear.prosodyTurns();
+        assert.deepEqual(turns.map(turn => [turn.startMs, turn.endMs, turn.voiced === true]), [[0, 3000, false], [10000, 13000, true], [14000, 17000, true], [18000, 21000, true]]);
+        assert.equal(turns[3].wordCount, 30);
+        assert.ok(turns[3].wordsPerMinute > 0);
+        assert.ok(turns[1].pitchMedianHz > 190, 'measured on the 24 kHz audio after conversion');
+        const samples = tones.slice(micTones);
+        assert.ok(samples.length >= 3 && samples.every(sample => sample.voiced === true), 'voiced tone samples reach the call record');
+        assert.ok(samples.every(sample => sample.atMs >= 10000 && sample.endMs <= 21000), 'on the transcript timeline');
+        assert.equal(ear.toneSamples().length, tones.length, 'toneSamples lists both');
+        // The microphone's own note never uses a voiced sample.
+        assert.equal(ear.voiceNote({ startMs: 0, endMs: 3000, wordCount: 8 }), null);
+      } finally {
+        ear.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+
+  {
+    name: 'practice ear: a voiced note covers only the heard part of a cut-off line; unknown ids, bad input and a closed ear give null without throwing',
+    async run() {
+      const ear = createPracticeEar({
+        candidatePath: path.join(os.tmpdir(), 'no-such-candidate.wav'), minSpeechMs: 1000,
+        inference: async () => ({ endOfTurn: async () => 0.9, tone: async () => ({ arousal: 0.5, dominance: 0.5, valence: 0.5 }), close() {} }),
+      });
+      try {
+        assert.equal(await ear.voicedNote({ id: 'never', startMs: 0, endMs: 1000, heardMs: 500 }), null, 'unknown id');
+        assert.doesNotThrow(() => ear.prepareVoiced());
+        assert.doesNotThrow(() => ear.prepareVoiced({ id: 'x', pcm: null, sampleRate: 24000 }));
+        assert.doesNotThrow(() => ear.prepareVoiced({ id: 'y', pcm: Buffer.alloc(8), sampleRate: 0 }));
+        ear.prepareVoiced({ id: 'cut', pcm: pcm16(concat(voiceLine(2000, 24000), silence(2000, 24000))), sampleRate: 24000, wordCount: 20 });
+        await ear.settle(5000);
+        assert.equal(await ear.voicedNote({ id: 'cut', startMs: 5000, endMs: 9000, heardMs: 2000 }), null);
+        const turn = ear.prosodyTurns()[0];
+        assert.deepEqual([turn.startMs, turn.endMs], [5000, 9000]);
+        assert.equal(turn.wordCount, 10, 'half the line was heard: half its words');
+        assert.ok(turn.speechMs > 1500 && turn.speechMs <= 2000, `speech time of the heard 2 s only (${turn.speechMs})`);
+        assert.equal(await ear.voicedNote({ id: 'cut', startMs: 5000, endMs: 5000 }), null, 'an empty span');
+        assert.equal(ear.prosodyTurns().length, 1, 'asking again does not add a second turn');
+      } finally { ear.close(); }
+      assert.equal(await ear.voicedNote({ id: 'cut', startMs: 5000, endMs: 9000, heardMs: 2000 }), null, 'closed');
+      assert.doesNotThrow(() => ear.prepareVoiced({ id: 'late', pcm: pcm16(sine(200, 500, 24000)), sampleRate: 24000 }));
+    },
+  },
+
+  {
+    name: 'practice ear: settle waits for voiced tone work, a note is not held up past a slow model, and the late tone still lands in the record',
+    async run() {
+      let release;
+      const gate = new Promise(resolveGate => { release = resolveGate; });
+      const tones = [];
+      const ear = createPracticeEar({
+        candidatePath: path.join(os.tmpdir(), 'no-such-candidate.wav'), minSpeechMs: 1000,
+        inference: async () => ({ endOfTurn: async () => 0.9, tone: async () => { await gate; return { arousal: 0.4, dominance: 0.4, valence: 0.4 }; }, close() {} }),
+        onToneSample: sample => tones.push(sample),
+      });
+      try {
+        ear.prepareVoiced({ id: 'slow', pcm: pcm16(voiceLine(2500, 24000, 180)), sampleRate: 24000, wordCount: 6 });
+        const started = Date.now();
+        await ear.settle(60);
+        assert.ok(Date.now() - started >= 50, 'settle waited for the voiced work until its timeout');
+        assert.deepEqual(tones, []);
+        const pending = ear.voicedNote({ id: 'slow', startMs: 0, endMs: 2500, heardMs: 2500 });
+        release();
+        assert.equal(await pending, null);
+        await ear.settle(2000);
+        assert.ok(tones.length >= 1 && tones.every(sample => sample.voiced === true), 'the tone arrived and was recorded once');
+        const count = tones.length;
+        await ear.voicedNote({ id: 'slow', startMs: 0, endMs: 2500, heardMs: 2500 });
+        assert.equal(tones.length, count, 'a second note does not record the same tone again');
+      } finally { ear.close(); }
+    },
+  },
+
+  {
+    name: 'call metrics: a voiced chat line is a spoken answer, never a typed one, and a typed line stays typed',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Tell me about a mistake.', startMs: 0, endMs: 3000 },
+        { speaker: 'candidate', text: 'The short version is that I was wrong about the cache and we fixed it together', channel: 'chat', voiced: true, startMs: 5000, endMs: 11000 },
+        { speaker: 'interviewer', text: 'And the number?', startMs: 12000, endMs: 13000 },
+        { speaker: 'candidate', text: 'Forty two percent', channel: 'chat', startMs: 14000, endMs: 14000 },
+      ];
+      const prosody = [{ startMs: 5000, endMs: 11000, speechMs: 5000, pitchRangeSt: 6, loudnessDb: -20, pauses: [{ startMs: 7000, endMs: 8500 }], voiced: true }];
+      const metrics = callMetrics({ transcript, candidateProsody: prosody, baselineSnapshot: { pitchRangeSt: 1, loudnessDb: -40 }, voicedBaselineSnapshot: { pitchRangeSt: 4, loudnessDb: -22 } });
+      assert.equal(metrics.answerCount, 1);
+      assert.equal(metrics.typedAnswerCount, 1, 'only the unvoiced line is typed');
+      assert.equal(metrics.typedOnly, false);
+      const answer = metrics.answers[0];
+      assert.equal(answer.speechMs, 5000, 'talk time from the measured prosody');
+      assert.equal(answer.wordCount, 16);
+      assert.equal(answer.wordsPerMinute, Math.round((16 / 5000) * 60000 * 10) / 10);
+      assert.equal(answer.pausesOver1s, 1);
+      assert.equal(answer.responseLatencyMs, 2000, 'latency from transcript times');
+      assert.equal(answer.pitchRangeDeltaSt, 2, 'compared with the synthetic baseline, not the microphone one');
+      assert.equal(answer.loudnessDeltaDb, 2);
+      assert.equal(metrics.candidateTalkMs, 5000);
+      const voicedOnly = callMetrics({ transcript: transcript.slice(0, 2) });
+      assert.equal(voicedOnly.typedOnly, false, 'a call answered only by voice is not typed-only');
+      assert.equal(voicedOnly.typedAnswerCount, 0);
+      const typedOnly = callMetrics({ transcript: [transcript[0], transcript[3]] });
+      assert.equal(typedOnly.typedOnly, true);
+    },
+  },
+
+  {
+    name: 'call metrics: a candidate line the interviewer cut in on is counted, spoken live or by voice',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Go on.', startMs: 0, endMs: 1000 },
+        { speaker: 'candidate', text: 'So first I', channel: 'chat', voiced: true, interrupted: true, cutOffBy: 'interviewer', startMs: 2000, endMs: 4000 },
+        { speaker: 'interviewer', text: 'Sorry, quickly.', startMs: 3800, endMs: 5000 },
+        { speaker: 'candidate', text: 'Right', interrupted: true, cutOffBy: 'interviewer', startMs: 6000, endMs: 7000 },
+        { speaker: 'candidate', text: 'Fine', interrupted: true, startMs: 8000, endMs: 9000 },
+      ];
+      const metrics = callMetrics({ transcript });
+      assert.deepEqual(metrics.interviewerCutIns.map(item => item.turnIndex), [1, 3]);
+      assert.equal(metrics.interviewerCutInCount, 2);
+    },
+  },
+
+  {
+    name: 'call metrics: measured turns attach to a voiced chat line they overlap, not to a typed one',
+    run() {
+      const transcript = [
+        { speaker: 'candidate', text: 'spoken by the voice', channel: 'chat', voiced: true, startMs: 1000, endMs: 5000 },
+        { speaker: 'candidate', text: 'typed', channel: 'chat', startMs: 6000, endMs: 6000 },
+      ];
+      const byEntry = prosodyByEntry(transcript, [{ startMs: 1000, endMs: 5000, speechMs: 3000 }, { startMs: 5900, endMs: 6100, speechMs: 100 }]);
+      assert.deepEqual(Object.keys(byEntry), ['0']);
     },
   },
 

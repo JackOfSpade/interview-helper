@@ -77,6 +77,7 @@ test('only the last 40 turns are kept', () => {
 
 test('cleanDraft drops a label and wrapping quotes and keeps within the chat limit at a sentence end', () => {
   assert.equal(cleanDraft('Reply: "Sure, happy to."'), 'Sure, happy to.');
+  assert.equal(cleanDraft('Here is where I land.\n\nMy leading explanation is the meter.\n'), 'Here is where I land. My leading explanation is the meter.', 'spoken as one flowing reply');
   assert.equal(cleanDraft('  plain  '), 'plain');
   const long = `${'This is one sentence. '.repeat(150)}`;
   const cleaned = cleanDraft(long);

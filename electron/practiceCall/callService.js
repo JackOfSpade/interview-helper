@@ -814,6 +814,13 @@ export function createPracticeCallService(deps = {}) {
       pause(id) { return helper.pause?.(id); },
       resume(id) { return helper.resume?.(id); },
       mute(muted) { return helper.mute?.(muted); },
+      // The candidate's voice mixed into the microphone signal: it goes on the candidate's own track (candidate.wav),
+      // so nothing here is recorded on the interviewer track and no codec touches it. An older helper cannot inject.
+      canInject() { return helper.canInject?.() === true; },
+      inject(id, sampleRate) { return helper.inject?.(id, sampleRate); },
+      injectAudio(id, pcm) { return helper.injectAudio?.(id, pcm); },
+      injectEnd(id) { return helper.injectEnd?.(id); },
+      injectCancel(id, fadeMs) { return helper.injectCancel?.(id, fadeMs); },
       stop() { return helper.stop?.(); },
       // R2: the helper forwards `utteranceId`; track timing follows the helper clock, not ours.
       helperEvent(event) {
@@ -839,7 +846,9 @@ export function createPracticeCallService(deps = {}) {
   function onHelperEvent(event) {
     const self = call;
     if (!self) return;
-    if (event?.type === 'vad' || event?.type === 'error' || event?.type === 'recording' || (event?.type === 'transcript' && event.final)) { const { type, ...fields } = event; dbg('helper', { type, ...fields }); }
+    if (event?.type === 'vad' || event?.type === 'status' || event?.type === 'error' || event?.type === 'recording' || (event?.type === 'transcript' && event.final)) { const { type, ...fields } = event; dbg('helper', { type, ...fields }); }
+    // Injected-line states (never the 50 ms positions), no text and no audio: tells in the debug log that a line went through the microphone.
+    if (event?.type === 'inject' && event.state !== 'position') dbg('inject', { state: event.state, utteranceId: event.utteranceId, positionMs: event.positionMs, atMs: event.atMs, ...(event.reason ? { reason: event.reason } : {}) });
     try { self.audioMirror?.helperEvent(event); } catch { /* track writer is best effort */ }
     // The recording's clock starts when capture starts, a few seconds after the helper is
     // launched. The newest helper time and when it arrived tell where that clock is now.
@@ -1152,6 +1161,8 @@ export function createPracticeCallService(deps = {}) {
       const persona = {
         ...leadVoice.persona,
         role: String(plan.lead.role ?? '').trim(),
+        // How this person interrupts a long answer (the planner's text), for the watcher and the diagnosis in call.json.
+        interrupting: String(plan.lead.interrupting ?? '').trim(),
         // A temperament the request or brief fixed still wins over the planner's.
         temperament: temperament ?? (plan.lead.temperament || 'neutral'),
         temperamentFrom: temperament ? 'request' : 'plan',
@@ -1171,7 +1182,7 @@ export function createPracticeCallService(deps = {}) {
         const stability = stabilityOr(member.stability);
         return {
           ...(roomAmount === null ? {} : { roomAmount }),
-          id: COLLEAGUE_IDS[at], key: member.voice, name: voice.name, role: String(member.role ?? ''), focus: String(member.focus ?? ''), joins,
+          id: COLLEAGUE_IDS[at], key: member.voice, name: voice.name, role: String(member.role ?? ''), focus: String(member.focus ?? ''), interrupting: String(member.interrupting ?? '').trim(), joins,
           voice: voice.persona.voice, voiceId: voice.voiceId, room: tools.roomOf(voice.voiceId) ?? voice.persona.room ?? null, stability, joinDelayMs,
           factory: voiceFactory({ key: self.key, voiceId: voice.voiceId, tier, stability }),
           joined: joins !== 'late', joinedAtMs: joins === 'late' ? null : 0,
@@ -1234,7 +1245,12 @@ export function createPracticeCallService(deps = {}) {
     for (const [id, visual] of made) {
       const dot = id.lastIndexOf('.');
       const part = self.prepared?.[id.slice(0, dot)]?.parts?.[Number(id.slice(dot + 1)) - 1];
-      if (part) part.visual = { id, kind: visual.kind };
+      if (part) {
+        part.visual = { id, kind: visual.kind };
+        // The screen was written before the picture was found: its lead ties the two together, so the screen
+        // reads as made around the picture. Only for a picture actually shown; a missing one leaves the text as it was.
+        if (visual.lead && typeof part.content === 'string') part.content = `${visual.lead}\n\n${part.content}`.slice(0, 6000);
+      }
       const file = `${id.replace(/[^A-Za-z0-9._-]/gu, '_')}.${visual.kind === 'diagram' ? 'svg' : visual.mime === 'image/png' ? 'png' : visual.mime === 'image/webp' ? 'webp' : 'jpg'}`;
       visual.file = file;
       try {
@@ -1264,10 +1280,11 @@ export function createPracticeCallService(deps = {}) {
       interviewKind: plan.interviewKind,
       // The lead first (id A), then each colleague still on the plan's cast.
       people: [
-        { id: 'A', name: self.persona.name, role: self.persona.role, focus: '', temperament: self.persona.temperament, manner: plan.lead.manner ?? '', voice: self.persona.voice },
+        { id: 'A', name: self.persona.name, role: self.persona.role, focus: '', temperament: self.persona.temperament, manner: plan.lead.manner ?? '', interrupting: self.persona.interrupting ?? plan.lead.interrupting ?? '', voice: self.persona.voice },
         ...(self.panel || []).map(entry => ({
           id: entry.id, name: entry.name, role: entry.role, focus: entry.focus,
           manner: (plan.panel || []).find(member => member.voice === entry.key)?.manner ?? '',
+          interrupting: entry.interrupting ?? (plan.panel || []).find(member => member.voice === entry.key)?.interrupting ?? '',
           joins: entry.joins, ...(entry.joined && entry.joins === 'late' ? { joined: true } : {}), voice: entry.voice,
         })),
       ],
@@ -1282,7 +1299,9 @@ export function createPracticeCallService(deps = {}) {
         ...problem,
         parts: problem.parts.map((part, index) => {
           const made = visualView(self, `${problem.ref}.${index + 1}`);
-          return { title: part.title, content: part.content, ...(made ? { visual: { kind: made.kind, description: made.description } } : {}) };
+          // The text as it is shown: a picture's lead sentence sits above it (settleVisuals).
+          const shown = self.prepared?.[problem.ref]?.parts?.[index]?.content;
+          return { title: part.title, content: typeof shown === 'string' ? shown : part.content, ...(made ? { visual: { kind: made.kind, description: made.description } } : {}) };
         }),
         edgeCases: [...(problem.edgeCases || [])], hints: [...(problem.hints || [])],
       })),
@@ -1584,28 +1603,37 @@ export function createPracticeCallService(deps = {}) {
     // 5 of 25 reactions ("that's a clear reason"), Sonnet at low effort in 0 of 25, at about +0.1 s
     // to the first word; with Sonnet the whole reaction took 794 ms at p95.
     // The reply's model is MAIN_REPLY_MODELS[mainModel] (see there for what each costs in time).
-    const SESSION_MODELS = { opener: { model: 'sonnet', effort: 'low' }, main: { model: mainReply.model, effort: mainReply.effort }, classifier: { model: 'haiku', effort: 'low' } };
+    const SESSION_MODELS = { opener: { model: 'sonnet', effort: 'low' }, main: { model: mainReply.model, effort: mainReply.effort }, classifier: { model: 'haiku', effort: 'low' },
+      // The cut-in watcher answers one tag (<listen/> or a cut-in) about the last seconds of an answer: Sonnet at low effort, aiming at 0.5 to 0.8 s.
+      watcher: { model: 'sonnet', effort: 'low' } };
     const create = async kind => watchSession(kind, await sessionsFactory(SESSION_MODELS[kind] || SESSION_MODELS.main));
-    const created = await Promise.all([create('opener'), create('main'), create('classifier')]);
+    // The watcher is optional: the app passes watcher: true in; without it the unit suites start no extra session and the engine keeps its timed looks.
+    const withWatcher = deps.watcher === true;
+    const created = await Promise.all([create('opener'), create('main'), create('classifier'), ...(withWatcher ? [create('watcher')] : [])]);
     let opener = created[0];
     const classifier = created[2];
     let main = created[1];
+    let watcher = withWatcher ? created[3] : null;
+    const owned = () => ({ opener, main, classifier, ...(watcher ? { watcher } : {}) });
     // Owned from here on, so a start that fails part-way still closes the ones already running.
-    self.sessions = { opener, main, classifier };
+    self.sessions = owned();
     const optionsFor = () => ({
       persona: {
-        name: self.persona.name, role: self.persona.role, team: self.persona.team, temperament: self.persona.temperament, voice: self.persona.voice,
+        name: self.persona.name, role: self.persona.role, team: self.persona.team, temperament: self.persona.temperament, interrupting: self.persona.interrupting ?? '', voice: self.persona.voice,
       },
       brief: self.promptBrief, plan: poolOf(self.plan), application: self.application, targetMinutes: self.targetMinutes, steering: self.steering,
       ...(self.candidateName ? { candidateName: self.candidateName } : {}),
       // The cast, the questions and the problems were settled by the planning step; no session chooses any of it.
-      panel: (self.panel || []).map(entry => ({ id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, joins: entry.joins, ...(entry.joined && entry.joins === 'late' ? { joined: true } : {}), voice: entry.voice })),
+      panel: (self.panel || []).map(entry => ({ id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, interrupting: entry.interrupting ?? '', joins: entry.joins, ...(entry.joined && entry.joins === 'late' ? { joined: true } : {}), voice: entry.voice })),
       picked: self.picked.slice(),
       callPlan: callPlanOf(self),
     });
     const settle = () => {
       const options = optionsFor();
-      self.instructions = { opener: prompts.buildOpenerInstructions(options), main: prompts.buildInterviewerInstructions(options) };
+      self.instructions = {
+        opener: prompts.buildOpenerInstructions(options), main: prompts.buildInterviewerInstructions(options),
+        ...(watcher ? { watcher: prompts.buildWatcherInstructions(options) } : {}),
+      };
     };
     settle();
     // Every session starts once, from the settled instructions, and replies a bare READY.
@@ -1613,11 +1641,12 @@ export function createPracticeCallService(deps = {}) {
     const classifierReady = started(classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }));
     const mainReady = started(main.start({ instructions: self.instructions.main }));
     const openerReady = started(opener.start({ instructions: self.instructions.opener }));
+    const watcherReady = watcher ? started(watcher.start({ instructions: self.instructions.watcher })) : Promise.resolve();
     // Each colleague gets the same warm-up line as the lead, beside the session starts. One whose
     // voice does not answer cannot speak, so they are left out rather than heard in the lead's voice.
     const warmed = await Promise.all((self.panel || []).map(entry => warmUpVoice({ factory: entry.factory, clock })));
-    await Promise.all([mainReady, openerReady, classifierReady]);
-    dbg('session-start', { ms: Math.round(clock.now() - (self.markAt ?? self.startedAt)), mainModel: mainReply.model, instructionChars: { main: self.instructions.main?.length ?? 0, opener: self.instructions.opener?.length ?? 0 } });
+    await Promise.all([mainReady, openerReady, classifierReady, watcherReady]);
+    dbg('session-start', { ms: Math.round(clock.now() - (self.markAt ?? self.startedAt)), mainModel: mainReply.model, watcher: Boolean(watcher), instructionChars: { main: self.instructions.main?.length ?? 0, opener: self.instructions.opener?.length ?? 0, ...(watcher ? { watcher: self.instructions.watcher?.length ?? 0 } : {}) } });
     if (warmed.some(ok => !ok)) {
       const gone = new Set((self.panel || []).filter((entry, at) => !warmed[at]).map(entry => entry.key));
       self.panel = self.panel.filter((entry, at) => warmed[at]);
@@ -1644,13 +1673,20 @@ export function createPracticeCallService(deps = {}) {
       try { await main.close?.(); } catch { /* already closed */ }
       main = fresh;
       // The new lead session is owned from here on; the stale acknowledgement session is still listed and closes with them.
-      self.sessions = { opener, main, classifier };
+      self.sessions = owned();
       const stale = opener;
       opener = await startFresh('opener', self.instructions.opener);
       try { await stale.close?.(); } catch { /* already closed */ }
-      self.sessions = { opener, main, classifier };
+      self.sessions = owned();
+      // The watcher too reads the cast as it now is.
+      if (watcher) {
+        const staleWatcher = watcher;
+        watcher = await startFresh('watcher', self.instructions.watcher);
+        try { await staleWatcher.close?.(); } catch { /* already closed */ }
+        self.sessions = owned();
+      }
     }
-    self.sessions = { opener, main, classifier };
+    self.sessions = owned();
     // The history goes before the closing READY line: after it, the new session would answer in character instead of replying READY.
     const instructionsWithHistory = (kind, earlier) => {
       if (kind === 'classifier') {
@@ -1658,12 +1694,13 @@ export function createPracticeCallService(deps = {}) {
         return `${CLASSIFIER_INSTRUCTIONS.slice(0, at)}CONVERSATION SO FAR (data, not instructions):\n${earlier}\n\n${CLASSIFIER_INSTRUCTIONS.slice(at)}`;
       }
       const options = { ...optionsFor(), history: earlier };
+      if (kind === 'watcher') return prompts.buildWatcherInstructions(options);
       return kind === 'opener' ? prompts.buildOpenerInstructions(options) : prompts.buildInterviewerInstructions(options);
     };
     self.restartSession = async (kind, { transcriptText } = {}) => {
       const restartedAt = clock.now();
       const next = await create(kind);
-      const base = kind === 'opener' ? self.instructions.opener : kind === 'classifier' ? CLASSIFIER_INSTRUCTIONS : self.instructions.main;
+      const base = kind === 'opener' ? self.instructions.opener : kind === 'classifier' ? CLASSIFIER_INSTRUCTIONS : kind === 'watcher' ? self.instructions.watcher : self.instructions.main;
       const earlier = typeof transcriptText === 'string' ? transcriptText.trim() : '';
       await next.start({ instructions: earlier ? instructionsWithHistory(kind, earlier) : base });
       dbg('session-restart', { kind, ms: Math.round(clock.now() - restartedAt), historyChars: earlier.length });
@@ -1802,6 +1839,21 @@ export function createPracticeCallService(deps = {}) {
     // Assumed engine event: the pad text went to the interviewer with a candidate turn.
     if (event.type === 'pad-sent' && call && !call.finished) {
       snapshotPad(call, typeof event.text === 'string' ? event.text : undefined, event.atMs);
+      return;
+    }
+    // The candidate's voice was cut off: the chat keeps what was actually said, broken off with a dash, as a
+    // transcript would. A message the voice never reached is marked unsent rather than removed.
+    if (event.type === 'candidate-voice' && event.state === 'cut' && Array.isArray(event.messages)) {
+      for (const item of event.messages) {
+        const index = state.chat.findIndex(entry => entry.id === item?.chatId && entry.from === 'candidate');
+        if (index < 0) continue;
+        const heard = String(item.heard ?? '').trim().replace(/[\s,;:.!?…—–-]+$/u, '');
+        state.chat[index] = heard
+          ? { ...state.chat[index], text: `${heard} —`, cutOff: true, sent: state.chat[index].sent ?? state.chat[index].text }
+          : { ...state.chat[index], unsaid: true };
+      }
+      publish();
+      emitEvent(event);
       return;
     }
     if (event.type === 'chat') {
@@ -2032,8 +2084,11 @@ export function createPracticeCallService(deps = {}) {
       try { await self.track.finalize(interviewerPath, { durationMs: durationMs + leadMs, fs: audioFs }); } catch (error) { finalizeError = error; }
       let candidateProsody = [];
       let voiceBaseline = null;
+      let voicedBaseline = null;
       try { const turns = self.ear?.prosodyTurns?.(); if (Array.isArray(turns)) candidateProsody = turns; } catch { /* prosody is best effort */ }
       try { voiceBaseline = self.ear?.baselineSnapshot?.() ?? null; } catch { /* baseline is best effort */ }
+      // The synthetic voice has a baseline of its own: an AI-voice answer is never compared with the microphone's.
+      try { voicedBaseline = self.ear?.voicedBaselineSnapshot?.() ?? null; } catch { /* baseline is best effort */ }
       closeEar(self);
       // The tracks began during setup, before the call was answered. Cutting that lead off both
       // and moving every time back by it puts the recording, the transcript and the chapters on
@@ -2072,7 +2127,7 @@ export function createPracticeCallService(deps = {}) {
         ...(self.endedBySilence ? { endedBy: 'silence' } : {}),
         persona: self.persona ? { ...self.persona, ...(Number.isFinite(self.leftAt?.A) ? { leftAtMs: self.leftAt.A } : {}) } : null,
         panel: (self.panel || []).map(entry => ({
-          id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, joins: entry.joins,
+          id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, interrupting: entry.interrupting ?? '', joins: entry.joins,
           joinedAtMs: entry.joinedAtMs, voiceId: entry.voiceId, room: entry.room ?? null, ...(Number.isFinite(entry.roomAmount) ? { roomAmount: entry.roomAmount } : {}), stability: entry.stability,
           ...(Number.isFinite(self.leftAt?.[entry.id]) ? { leftAtMs: self.leftAt[entry.id] } : {}),
         })),
@@ -2085,7 +2140,7 @@ export function createPracticeCallService(deps = {}) {
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
         pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
-        toneSamples: onCallClock(self.toneSamples.slice()), candidateProsody: onCallClock(candidateProsody), voiceBaseline, recordingLeadMs: leadMs - trimmedMs, thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...(deps.thresholds || {}) }, reason,
+        toneSamples: onCallClock(self.toneSamples.slice().sort((left, right) => (left.atMs ?? 0) - (right.atMs ?? 0))), candidateProsody: onCallClock(candidateProsody), voiceBaseline, ...(voicedBaseline ? { voicedBaseline } : {}), recordingLeadMs: leadMs - trimmedMs, thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...(deps.thresholds || {}) }, reason,
         ...(self.missedCall ? { returnedCall: self.missedCall.how } : {}),
         // Until the candidate chooses, the record reads as a call left without feedback: that is what it is if the window closes now.
         ...(wantsAnalysis && !asks ? {} : { feedbackSkipped: true }),
@@ -2358,6 +2413,8 @@ export function createPracticeCallService(deps = {}) {
       // The recording was removed because only the newest calls keep theirs.
       ...(!hasAudio && record.recordingPruned === true ? { recordingPruned: true, recordingsKept: RECORDINGS_KEPT } : {}),
       durationMs: Number(record.durationMs) || 0,
+      // When the call took place, for the replay's header.
+      ...(Number.isFinite(record.startedAt) ? { startedAt: record.startedAt } : {}),
       // Pauses on the audio timeline, and the call's length without them.
       pauseSpans: Array.isArray(record.pauseSpans) ? record.pauseSpans : [],
       pausedMs: Number(record.pausedMs) || 0,
@@ -2493,11 +2550,12 @@ export function createPracticeCallService(deps = {}) {
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
       const generated = options?.generated === true;
       dbg('user', { action: 'chat', text: value, ...(generated ? { generated } : {}) });
-      state.chat.push({ from: 'candidate', text: value, atMs: Math.round(clock.now() - (call?.startedAt || clock.now())) });
+      const chatId = `m${(state.chat.length + 1).toString(36)}-${clock.now().toString(36)}`;
+      state.chat.push({ id: chatId, from: 'candidate', text: value, atMs: Math.round(clock.now() - (call?.startedAt || clock.now())) });
       // While the interviewers are still leaving the line is typed into as in a real call: the message shows
       // in the chat, nobody answers it, and the interviewer sessions are never sent it.
       if (!call?.interviewerEnded) {
-        try { call?.engine?.typed?.(value, { generated }); } catch { /* engine already ended */ }
+        try { call?.engine?.typed?.(value, { generated, chatId }); } catch { /* engine already ended */ }
         // A typed message carries the pad text along, so it counts as sent.
         if (call && state.pad.open) snapshotPad(call, undefined);
       }

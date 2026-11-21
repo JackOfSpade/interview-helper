@@ -1,3 +1,5 @@
+import { replaySpeakerName } from './persona.js';
+
 // Pure positioning helpers for the practice call replay view. Times are
 // integer ms on the practice helper timeline (see
 // docs/interview-practice-call-build.md, "Time base").
@@ -18,9 +20,10 @@ const OVERLAY_WINDOW_MS = 1500;
 
 const startOf = turn => (typeof turn?.startMs === 'number' && Number.isFinite(turn.startMs) ? turn.startMs : null);
 const isOverlay = turn => Boolean(turn?.overlay) && (turn?.speaker ?? turn?.role) !== 'candidate';
-// A typed answer is stamped with its send time only (start and end are equal).
+// A typed answer is stamped with its send time only (start and end are equal). A chat line spoken in
+// the candidate's voice has a real span on the recording and plays like any spoken turn.
 const isTypedTurn = turn => (turn?.speaker ?? turn?.role) === 'candidate'
-  && (turn?.channel === 'chat' || (startOf(turn) !== null && Number.isFinite(turn?.endMs) && turn.endMs <= turn.startMs));
+  && ((turn?.channel === 'chat' && turn?.voiced !== true) || (startOf(turn) !== null && Number.isFinite(turn?.endMs) && turn.endMs <= turn.startMs));
 
 // Index of the transcript turn that is current at ms (final turn stays current
 // until the end of the recording) or -1 when nothing covers it. A remark said
@@ -289,3 +292,337 @@ export function callLengthMs(call) {
   const paused = asNumber(call?.pausedMs);
   return paused > 0 ? Math.max(0, total - paused) : total;
 }
+
+// ---------------------------------------------------------------------------
+// Active time. The recording keeps the stretches the call was held paused, but
+// everything the candidate sees (timeline, clock, seeking) leaves them out.
+
+// Inverse of activeTimeMs: the recording time of an active time. At a pause's
+// edge it lands after the pause, which is where playback would go anyway.
+export function activeToRecordingMs(spans, activeMs) {
+  let at = Math.max(0, asNumber(activeMs));
+  for (const span of Array.isArray(spans) ? spans : []) {
+    if (span.startMs <= at) at += span.endMs - span.startMs;
+    else break;
+  }
+  return at;
+}
+
+// ---------------------------------------------------------------------------
+// The chapter model: every chapter with its recording range, its active range,
+// its question/answer split, who asked, and the feedback that belongs to it.
+
+const isCandidate = turn => (turn?.speaker ?? turn?.role) === 'candidate';
+
+// Chapter ranges on the recording clock, contiguous and covering the whole call.
+// No chapters at all gives one block for the whole call.
+function chapterRanges(chapters, durationMs) {
+  const list = Array.isArray(chapters) ? chapters : [];
+  const total = Math.max(0, asNumber(durationMs));
+  if (!list.length) return [{ title: '', startMs: 0, endMs: total, questionTurnIndex: null, markers: [], synthetic: true }];
+  return list.map((chapter, index) => {
+    const own = Math.max(0, asNumber(chapter?.startMs));
+    const startMs = index === 0 ? 0 : own;
+    const next = list[index + 1];
+    const last = index === list.length - 1;
+    const nextStart = next ? Math.max(startMs, asNumber(next?.startMs)) : Infinity;
+    const declared = Number(chapter?.endMs);
+    let endMs = last ? Math.max(Number.isFinite(declared) ? declared : 0, total) : nextStart;
+    if (total > 0) endMs = Math.min(endMs, total);
+    endMs = Math.max(startMs, endMs);
+    return {
+      title: String(chapter?.title || '').trim() || `Part ${index + 1}`,
+      startMs: total > 0 ? Math.min(startMs, total) : startMs,
+      endMs,
+      questionTurnIndex: Number.isInteger(chapter?.questionTurnIndex) ? chapter.questionTurnIndex : null,
+      markers: Array.isArray(chapter?.markers) ? chapter.markers : [],
+      synthetic: false,
+    };
+  });
+}
+
+// Where the answer starts inside a chapter: the first candidate turn that begins in it, else null (all question).
+export function answerStartMs(transcript, startMs, endMs) {
+  for (const turn of Array.isArray(transcript) ? transcript : []) {
+    if (!isCandidate(turn)) continue;
+    const at = startOf(turn);
+    if (at === null || at < startMs || at >= endMs) continue;
+    return at;
+  }
+  return null;
+}
+
+// Who asked: the interviewer turn that opens the chapter, else the first interviewer turn inside it.
+function askerOf(replay, chapter, transcript) {
+  const list = Array.isArray(transcript) ? transcript : [];
+  let turn = Number.isInteger(chapter.questionTurnIndex) ? list[chapter.questionTurnIndex] : null;
+  if (!turn || isCandidate(turn)) {
+    turn = list.find(item => !isCandidate(item) && !item?.overlay && startOf(item) !== null && startOf(item) >= chapter.startMs && startOf(item) < chapter.endMs) || null;
+  }
+  if (!turn) return null;
+  const id = turn.speakerId || turn.segments?.[0]?.speakerId || '';
+  const panel = Array.isArray(replay?.panel) ? replay.panel : [];
+  const person = panel.find(item => item?.id === id) || (replay?.persona && (!id || id === 'A' || !panel.length) ? replay.persona : null);
+  return { id, name: replaySpeakerName(replay, id), role: String(person?.role || '') };
+}
+
+// ---------------------------------------------------------------------------
+// Matching feedback to chapters, deterministically.
+
+const AUDIO_TAG = /\[[^\]]{0,40}\]/gu;
+export function normalizeMatchText(text) {
+  return String(text ?? '')
+    .replace(AUDIO_TAG, ' ')
+    .toLowerCase()
+    .replace(/[‘’]/gu, "'")
+    .replace(/[^\p{L}\p{N}']+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+const OVERLAP_MIN = 0.6;
+// Words that say nothing about which line is meant: overlap is counted on the rest, so two unrelated questions that
+// share "what do you want to ... in this role" do not match (review, 2026-11-21).
+const STOPWORDS = new Set(('a an and are as at be but by can could did do does for from had has have how i if in is it its '
+  + 'me my of on or our so that the their them then there these they this to us was we were what when where which who '
+  + 'why will with would you your just about tell give me okay right well yeah').split(' '));
+
+// How well the interviewer's line `hay` is the line `needle` quotes: 0 for no match,
+// else up to 1 (equal). Substring either way beats word overlap; the overlap is the share of
+// the needle's distinct words found in the line and must reach 0.6.
+export function matchScore(needle, hay) {
+  const a = normalizeMatchText(String(needle ?? '').replace(/(?:\.{3}|…)\s*$/u, ''));
+  const b = normalizeMatchText(hay);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  // A quote of one or two words says too little to place: only an exact line matches.
+  if (a.split(' ').length < 3) return 0;
+  if (` ${b} `.includes(` ${a} `)) return 0.9 + 0.1 * (a.length / b.length);
+  if (b.split(' ').length >= 3 && ` ${a} `.includes(` ${b} `)) return 0.85 + 0.1 * (b.length / a.length);
+  const content = text => text.split(' ').filter(word => !STOPWORDS.has(word));
+  const wordsA = [...new Set(content(a))];
+  const wordsB = new Set(content(b));
+  if (wordsA.length < 2 || !wordsB.size) return 0;
+  const shared = wordsA.filter(word => wordsB.has(word)).length;
+  const ratio = shared / wordsA.length;
+  if (ratio < OVERLAP_MIN) return 0;
+  return ratio * 0.8 + 0.05 * (shared / wordsB.size);
+}
+
+// The interviewer turn that best matches a quoted line: { turnIndex, score } or null. A turn several
+// interviewers spoke in also matches on each of its parts; the earliest turn wins a tie.
+export function bestTurnFor(text, transcript) {
+  let best = null;
+  (Array.isArray(transcript) ? transcript : []).forEach((turn, turnIndex) => {
+    if (!turn || isCandidate(turn)) return;
+    let score = matchScore(text, turn.text);
+    for (const part of Array.isArray(turn.segments) ? turn.segments : []) score = Math.max(score, matchScore(text, part?.text));
+    if (score > 0 && (!best || score > best.score)) best = { turnIndex, score };
+  });
+  return best;
+}
+
+// The chapter a transcript turn belongs to: the one it opens, else the one containing its start time,
+// else the last chapter opened at or before it.
+function chapterOfTurn(chapters, transcript, turnIndex) {
+  const opened = chapters.findIndex(chapter => chapter.questionTurnIndex === turnIndex);
+  if (opened >= 0) return opened;
+  const at = startOf(transcript[turnIndex]);
+  if (at !== null) {
+    const found = chapters.findIndex(chapter => at >= chapter.startMs && at < chapter.endMs);
+    if (found >= 0) return found;
+  }
+  let result = -1;
+  chapters.forEach((chapter, index) => { if (chapter.questionTurnIndex !== null && chapter.questionTurnIndex <= turnIndex) result = index; });
+  return result;
+}
+
+// Attach each asked planned question and each moment to one chapter. `chapters` are the model's
+// chapters (recording ranges, questionTurnIndex). One item per chapter at most: the best match
+// wins, a planned question beating a moment on a tie. The rest are returned as leftovers.
+export function matchFeedbackToChapters(chapters, transcript, feedback) {
+  const list = Array.isArray(chapters) ? chapters : [];
+  const turns = Array.isArray(transcript) ? transcript : [];
+  const candidates = [];
+  (Array.isArray(feedback?.planned) ? feedback.planned : []).forEach((item, itemIndex) => {
+    if (!item || item.asked !== true || !item.askedAs) return;
+    candidates.push({ kind: 'planned', itemIndex, item, text: item.askedAs, rank: 1 });
+  });
+  (Array.isArray(feedback?.moments) ? feedback.moments : []).forEach((item, itemIndex) => {
+    if (!item || !item.prompt) return;
+    candidates.push({ kind: 'moment', itemIndex, item, text: item.prompt, rank: 0 });
+  });
+  const byChapter = list.map(() => null);
+  const leftover = { planned: [], moments: [] };
+  const placed = [];
+  for (const candidate of candidates) {
+    const hit = bestTurnFor(candidate.text, turns);
+    const chapterIndex = hit ? chapterOfTurn(list, turns, hit.turnIndex) : -1;
+    placed.push({ ...candidate, score: hit ? hit.score : 0, turnIndex: hit ? hit.turnIndex : -1, chapterIndex });
+  }
+  placed.sort((a, b) => (b.score - a.score) || (b.rank - a.rank) || (a.turnIndex - b.turnIndex));
+  const lost = new Set();
+  for (const entry of placed) {
+    if (entry.chapterIndex < 0) { lost.add(entry); continue; }
+    const held = byChapter[entry.chapterIndex];
+    // A second item for the same part (a follow-up moment after a planned question) is shown with it, not lost.
+    if (held) { if (entry.kind === 'moment') held.extras.push(entry.item); else lost.add(entry); continue; }
+    byChapter[entry.chapterIndex] = { kind: entry.kind, itemIndex: entry.itemIndex, item: entry.item, matchScore: entry.score, turnIndex: entry.turnIndex, extras: [] };
+  }
+  placed.filter(entry => lost.has(entry)).sort((a, b) => a.itemIndex - b.itemIndex)
+    .forEach(entry => (entry.kind === 'planned' ? leftover.planned : leftover.moments).push(entry.item));
+  return { byChapter, leftover };
+}
+
+// ---------------------------------------------------------------------------
+
+// The tint for a feedback score: green at 8 and up, amber at 5 and up, red below, neutral without one.
+export function scoreBand(score) {
+  if (typeof score !== 'number' || !Number.isFinite(score)) return 'none';
+  return score >= 8 ? 'good' : score >= 5 ? 'mid' : 'low';
+}
+
+// First n sentences of a text and whether anything was cut.
+export function firstSentences(text, count = 2) {
+  const clean = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  if (!clean) return { text: '', cut: false };
+  const sentences = clean.match(/[^.!?]+(?:[.!?]+["')\]]*(?=\s|$)|$)/gu) || [clean];
+  if (sentences.length <= count) return { text: clean, cut: false };
+  return { text: sentences.slice(0, count).join('').trim(), cut: true };
+}
+
+// The call overview: score, a short summary, the top priorities.
+export function overviewOf(feedback, { prioritiesMax = 3, sentences = 2 } = {}) {
+  const summary = firstSentences(feedback?.overall?.summary, sentences);
+  return {
+    score: typeof feedback?.overall?.score === 'number' ? feedback.overall.score : null,
+    summary: summary.text,
+    summaryCut: summary.cut,
+    fullSummary: String(feedback?.overall?.summary ?? ''),
+    priorities: (Array.isArray(feedback?.priorities) ? feedback.priorities : []).filter(Boolean).slice(0, prioritiesMax),
+  };
+}
+
+// Everything the replay screen needs about the call's parts, on both clocks.
+export function buildReplayModel(replay) {
+  const durationMs = Math.max(0, asNumber(replay?.durationMs));
+  const pauseSpans = normalizePauseSpans(replay?.pauseSpans, durationMs || Infinity);
+  const activeMs = activeLengthMs(durationMs, pauseSpans, replay?.activeMs);
+  const transcript = Array.isArray(replay?.transcript) ? replay.transcript : [];
+  const ranges = chapterRanges(replay?.chapters, durationMs);
+  const matched = replay?.feedback ? matchFeedbackToChapters(ranges, transcript, replay.feedback) : { byChapter: ranges.map(() => null), leftover: { planned: [], moments: [] } };
+  const chapters = ranges.map((range, index) => {
+    const answerMs = answerStartMs(transcript, range.startMs, range.endMs);
+    const questionEndMs = answerMs === null ? range.endMs : Math.max(range.startMs, answerMs);
+    const activeStartMs = activeTimeMs(pauseSpans, range.startMs);
+    const activeEndMs = activeTimeMs(pauseSpans, range.endMs);
+    const feedback = matched.byChapter[index];
+    return {
+      index,
+      title: range.title,
+      synthetic: range.synthetic,
+      questionTurnIndex: range.questionTurnIndex,
+      startMs: range.startMs,
+      endMs: range.endMs,
+      questionEndMs,
+      hasAnswer: answerMs !== null,
+      activeStartMs,
+      activeEndMs,
+      activeQuestionEndMs: activeTimeMs(pauseSpans, questionEndMs),
+      markers: range.markers,
+      asker: askerOf(replay, range, transcript),
+      feedback,
+      score: feedback && typeof feedback.item?.score === 'number' ? feedback.item.score : null,
+    };
+  });
+  return { durationMs, activeMs, pauseSpans, chapters, leftover: matched.leftover };
+}
+
+// Index of the chapter under an active-time playhead, or -1 for an empty model.
+export function chapterAtActive(chapters, activeMs) {
+  const list = Array.isArray(chapters) ? chapters : [];
+  if (!list.length) return -1;
+  const at = asNumber(activeMs);
+  let found = -1;
+  for (let index = 0; index < list.length; index += 1) {
+    if (list[index].activeStartMs <= at && at < list[index].activeEndMs) found = index;
+  }
+  if (found >= 0) return found;
+  // Past the last chapter's end (the very end of the call) stays in the last chapter that has any length.
+  for (let index = list.length - 1; index >= 0; index -= 1) if (list[index].activeEndMs > list[index].activeStartMs && at >= list[index].activeEndMs) return index;
+  return -1;
+}
+
+// Question or answer at an active time inside a chapter.
+export function partAtActive(chapter, activeMs) {
+  if (!chapter || !chapter.hasAnswer) return 'question';
+  return asNumber(activeMs) < chapter.activeQuestionEndMs ? 'question' : 'answer';
+}
+
+// Timeline blocks as percentages of the active length: the whole block and its question share.
+// Chapters with no active length (inside a pause) are dropped.
+export function timelineBlocks(chapters, activeMs) {
+  const total = asNumber(activeMs);
+  if (!(total > 0)) return [];
+  return (Array.isArray(chapters) ? chapters : [])
+    .filter(chapter => chapter.activeEndMs > chapter.activeStartMs)
+    .map(chapter => {
+      const length = chapter.activeEndMs - chapter.activeStartMs;
+      const question = Math.min(length, Math.max(0, (chapter.hasAnswer ? chapter.activeQuestionEndMs : chapter.activeEndMs) - chapter.activeStartMs));
+      return {
+        index: chapter.index,
+        leftPct: (chapter.activeStartMs / total) * 100,
+        widthPct: (length / total) * 100,
+        questionPct: (question / length) * 100,
+        band: scoreBand(chapter.score),
+      };
+    });
+}
+
+// Moment ticks on the active timeline.
+export function timelineTicks(chapters, pauseSpans, activeMs) {
+  const total = asNumber(activeMs);
+  const ticks = [];
+  if (!(total > 0)) return ticks;
+  (Array.isArray(chapters) ? chapters : []).forEach(chapter => (chapter.markers || []).forEach((marker, at) => {
+    const raw = Number(marker?.atMs);
+    if (!Number.isFinite(raw)) return;
+    const active = Math.min(total, activeTimeMs(pauseSpans, Math.max(0, raw)));
+    ticks.push({ key: `${chapter.index}-${at}`, kind: marker?.kind, label: String(marker?.label || marker?.kind || 'Moment'), activeMs: active, leftPct: (active / total) * 100 });
+  }));
+  return ticks;
+}
+
+// What a key does in the player, or null: Space toggles, Left/Right 5 s, Up/Down previous/next part.
+export function playerKeyAction(key, modifiers = {}) {
+  if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey) return null;
+  switch (key) {
+    case ' ': case 'Spacebar': return { type: 'toggle' };
+    case 'ArrowLeft': return { type: 'seekBy', deltaMs: -5000 };
+    case 'ArrowRight': return { type: 'seekBy', deltaMs: 5000 };
+    case 'ArrowUp': return { type: 'part', direction: -1 };
+    case 'ArrowDown': return { type: 'part', direction: 1 };
+    case 'Home': return { type: 'seekTo', ms: 0 };
+    case 'End': return { type: 'seekTo', ms: Infinity };
+    default: return null;
+  }
+}
+
+// Previous / next part start on the active clock. Previous restarts the current part unless we
+// are barely into it. Next at the last part goes to the end of the call.
+export function partJumpTarget(chapters, activeMs, direction, totalActiveMs, graceMs = 1500) {
+  const list = (Array.isArray(chapters) ? chapters : []).filter(chapter => chapter.activeEndMs > chapter.activeStartMs);
+  const at = asNumber(activeMs);
+  if (direction < 0) {
+    let current = -1;
+    list.forEach((chapter, index) => { if (chapter.activeStartMs <= at) current = index; });
+    if (current < 0) return 0;
+    if (at - list[current].activeStartMs > graceMs) return list[current].activeStartMs;
+    return current > 0 ? list[current - 1].activeStartMs : 0;
+  }
+  const next = list.find(chapter => chapter.activeStartMs > at);
+  return next ? next.activeStartMs : Math.max(0, asNumber(totalActiveMs));
+}
+
+// Names of the moment kinds the review reports.
+export const KIND_LABELS = Object.freeze({ 'small-talk': 'Small talk', curveball: 'Curveball', 'off-topic': 'Off-topic', 'follow-up': 'Follow-up', 'questions-for-interviewer': 'Your questions', closing: 'Closing', other: 'Moment' });

@@ -3,6 +3,7 @@
  * No I/O: time, sessions, audio and voice are all injected. No word lists: decisions use counts, durations and the classifier.
  */
 import { createReplyStreamParser, formatTurnMessage } from './interviewPracticeCallPrompt.js';
+import * as callPrompt from './interviewPracticeCallPrompt.js'; // formatWatchMessage and parseWatchDecision: read off the namespace so the engine loads whether or not they exist yet
 import { CUT_IN_OVERLAP_MS, fadeOutTail, firstSpeechSample, mixHeadInto, msSamples } from './practiceCall/audio/cutInMix.js';
 
 export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
@@ -42,6 +43,28 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   cutInEveryMs: 10000,
   cutInMinLeftMs: 2500,
   candidateVoiceStartMs: 15000,
+  // The interviewer cutting into the candidate's LIVE speech (the microphone): the first look comes once the answer has run
+  // cutInFirstMs, then one every cutInEveryMs while the candidate is still speaking. A person cannot stop at once, so for
+  // cutInYieldMs after such a cut-in starts playing, the candidate's trailing speech is never taken as an interruption of it.
+  cutInYieldMs: 2500,
+  // With a watcher session (sessions.watcher) the timed looks above are replaced by watcher checks: the first once the answer
+  // has run cutInFirstMs, then one at every breath and at least one every watchEveryMs while the candidate talks without a
+  // break, one at a time. A check not answered within watchTimeoutMs counts as <listen/>. A cut-in written while the
+  // candidate is mid-sentence is held to the next breath, at most cutInHoldMs; if more than cutInStaleWords words have been
+  // said since the look began, it is dropped unspoken and the watcher is asked again at once.
+  watchEveryMs: 2500,
+  watchTimeoutMs: 2500,
+  cutInHoldMs: 1500,
+  cutInStaleWords: 12,
+  // The tone note of a line spoken in the candidate's voice (ear.voicedNote) is waited for at most this long.
+  voicedNoteWaitMs: 300,
+  // The candidate's voice injected into the microphone (the helper can mix it into the mic signal): the line is then
+  // the candidate speaking, not an app-played utterance. When an interviewer reply starts playing over such a line, the
+  // candidate stops the way a person does: after a reaction time drawn from candidateYieldMinMs..candidateYieldMaxMs,
+  // at the end of the word being said, with a short fade (candidateYieldFadeMs, also used for a pause or hang-up).
+  candidateYieldMinMs: 300,
+  candidateYieldMaxMs: 900,
+  candidateYieldFadeMs: 60,
 });
 
 /** The pause a speaker leaves after a line, by how the line ended: a full stop pauses longer than a comma. */
@@ -57,6 +80,8 @@ export function joinPauseMs(text) {
 const CANCEL_WAIT_MS = 500;
 const OFFSET_WINDOW_MS = 2000;
 const START_WATCH_MS = 3000;
+// A look at live speech that cannot be sent yet (a reply is being made, no words yet) is tried again this often.
+const LIVE_LOOK_RETRY_MS = 1000;
 // A question was practised once this much followed it; fewer words is a greeting, a "say that again?" or nothing.
 const ANSWER_MIN_WORDS = 15;
 const ANSWER_MIN_PAD_CHARS = 20;
@@ -106,9 +131,29 @@ function parseVerdict(value) {
   return first.toLowerCase().replace(/[^a-z]/g, '') === 'interruption' ? 'interruption' : 'acknowledgement';
 }
 
-/** Words of `reply` whose end time is at or before the playback position. */
+/**
+ * Words of `reply` whose end time is at or before the playback position. A delivery tag of several words
+ * ("[slightly amused]") is timed as several words, so one only partly heard is dropped, not shown as "[slightly".
+ */
 function heardFor(reply, positionMs) {
-  return reply.words.filter(word => word.endMs <= positionMs).map(word => word.word).join(' ');
+  return reply.words.filter(word => word.endMs <= positionMs).map(word => word.word).join(' ').replace(/\[[^[\]\n]{0,80}$/, '');
+}
+
+/**
+ * A voice line cut short, message by message: the sent messages it was made of, each with the words of it that
+ * were heard (word counts, since the heard text is the voice's timed words with tags removed). Messages heard
+ * whole are left out; one never reached has heard ''. Only messages with a chat id are listed.
+ */
+function heardByMessage(texts, heard) {
+  let left = tokens(heard).length;
+  const out = [];
+  for (const entry of texts || []) {
+    const words = tokens(entry.text);
+    const take = Math.min(left, words.length);
+    left -= take;
+    if (take < words.length && entry.chatId) out.push({ chatId: entry.chatId, heard: words.slice(0, take).join(' ') });
+  }
+  return out;
 }
 
 const UNHEARD_MAX = 700;
@@ -127,10 +172,23 @@ function unheardFor(reply) {
   return rest.length > UNHEARD_MAX ? `${rest.slice(0, UNHEARD_MAX).trimEnd()}…` : rest;
 }
 
-/** Spoken letters and digits in the words of `reply` that have ended by the playback position (tag-only words add none). */
+/**
+ * Spoken letters and digits in the words of `reply` that have ended by the playback position. Tags add none: the
+ * voice times a tag of several words ("[slightly amused]") as several words, so the brackets are followed across
+ * words. Counting each word on its own let those letters through, and in call-mwq2lkdo-jz4w5m (2026-11-21) a share
+ * was set up one phrase early: the screen came up before "One moment." instead of after it.
+ */
 function heardChars(reply, positionMs) {
   let total = 0;
-  for (const word of reply.words) if (word.endMs <= positionMs) total += spokenChars(word.word);
+  let inTag = false;
+  for (const word of reply.words) {
+    if (word.endMs > positionMs) continue;
+    for (const char of String(word.word ?? '')) {
+      if (char === '[') inTag = true;
+      else if (char === ']') inTag = false;
+      else if (!inTag && /[\p{L}\p{N}]/u.test(char)) total += 1;
+    }
+  }
   return total;
 }
 
@@ -176,13 +234,18 @@ export function createPracticeCallEngine({
   // The candidate's voice: when given, a sent chat message is spoken on the call and the interviewer hears it as a
   // spoken line. `open({ utteranceId, text, signal })` → { sampleRate, onAudio, onWords, cancel, done }.
   candidateVoice = null,
+  random = Math.random, // seam for tests: the candidate's reaction time before yielding to an interviewer
+  formatWatch = callPrompt.formatWatchMessage, // seams for tests: the watcher check message and the reading of its decision
+  parseWatch = callPrompt.parseWatchDecision,
 }) {
   const th = { ...DEFAULT_CALL_THRESHOLDS, ...thresholds };
-  const live = { opener: sessions.opener, main: sessions.main, classifier: sessions.classifier };
+  const live = { opener: sessions.opener, main: sessions.main, classifier: sessions.classifier, watcher: sessions.watcher };
+  const watcherOn = !!sessions.watcher; // the watcher decides when the interviewer cuts into live speech; without it the timed looks run
   const transcript = [];
   const segments = new Map();
   const handles = new Set();
-  const named = { spec: null, commit: null, silence: null, typing: null, padIdle: null, padTyping: null };
+  const named = { spec: null, commit: null, silence: null, typing: null, padIdle: null, padTyping: null, liveLook: null, watch: null };
+  const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null }; // the watcher's checks: one at a time
   const classifierControllers = new Set();
   let phase = 'connecting';
   let startedAt = null;
@@ -204,6 +267,10 @@ export function createPracticeCallEngine({
   let overlapRecord = null; // the live overlap record, kept after the vad ends so a pause can end it
   let speaking = false;
   let candidateSpoke = false;
+  let answerSince = null; // clock ms the candidate's live answer began (its first speech); null when no answer is going on
+  let liveLookAt = null; // clock ms before which no further look at the live answer is sent
+  let liveCut = null; // { reply, entry, fromMs, timer }: the interviewer cut into live speech; the trailing speech is protected
+  const voicedNotes = new WeakMap(); // voice line entry -> the ear's pending tone note for it
   let lastVadEndMs = null;
   let typingNow = false;
   let paused = false; // hidden pause: silence accounting and the elapsed time the interviewer sees stand still
@@ -223,6 +290,8 @@ export function createPracticeCallEngine({
   let pendingInterruption = null;
   let current = null; // reply being generated, committed or played
   let said = null; // the candidate's voice line being spoken (see speakTyped)
+  let injecting = null; // the candidate's voice line being mixed into the microphone (see injectTyped); never in `said`
+  let injectQueue = []; // sent messages waiting for the injected line before them: { text, generated, chatId? }
   let voicedDone = []; // candidate voice lines heard in full or in part that no reply has answered yet
   let voicedHeld = false; // a voice line ended during a pause: the interviewer answers it on resume
   let cancelling = null; // reply stopped, waiting for the helper's cancelled event
@@ -378,6 +447,7 @@ export function createPracticeCallEngine({
     turnStartMs = Math.max(turnStartMs, span.endMs + 1);
     if (reply.typed) { pendingTyped = []; markTurnConsumed(); }
     candidateSpoke = false;
+    clearLiveAnswer();
     markNotesDelivered(reply);
     if (reply.padSnapshot !== null) markPadReceived(reply);
     if (reply.wait !== null) noteWait(reply);
@@ -444,7 +514,7 @@ export function createPracticeCallEngine({
 
   function beginTurn({
     greeting = false, typed = false, candidates = [], text = '', channel, silenceMs = null, padProgress = null, immediate = false,
-    lastWordAt = null, respeculated = 0, specTokens = null, pausedAck = null, spokenText = '', handover = false, cutInCheck = false,
+    lastWordAt = null, respeculated = 0, specTokens = null, pausedAck = null, spokenText = '', handover = false, cutInCheck = false, liveLook = false, voicedNote = null, mostRecent = '', cutInBy = null, watched = false,
   }) {
     disarm('spec');
     disarm('silence');
@@ -456,6 +526,13 @@ export function createPracticeCallEngine({
     reply.padProgress = padProgress !== null && padProgress !== undefined;
     // A look at the candidate's voice line while it is still being spoken: the interviewer may cut in or listen on.
     reply.cutIn = cutInCheck;
+    reply.liveLook = liveLook; // the look is at speech from the microphone, which is still going on
+    // A look the watcher asked for: how many words the answer had when it began (the stale guard), and the hold at the next breath.
+    reply.watched = watched;
+    reply.snapshotWords = tokens(text).length;
+    reply.cutInInfo = cutInBy ? { who: cutInBy.id ?? null, reason: cutInBy.reason ?? null } : null;
+    reply.holdAt = null;
+    reply.holdTimer = null;
     current = reply;
     setPhase('speculating');
     reply.used = { acks: pendingAcks.length, interruption: pendingInterruption, notSpoken, cutOff: cutOffNote, joined: greeting ? 0 : joinedQueue.length, absent: greeting ? 0 : absentQueue.length, unknown: greeting ? false : unknownPending, unknownScreens: greeting ? [] : unknownScreens.slice() };
@@ -474,7 +551,7 @@ export function createPracticeCallEngine({
       const base = {
         elapsedMs: elapsed(), candidateText: text, channel, silenceMs, acknowledgements: pendingAcks.slice(),
         interruption: pendingInterruption ? { heardText: pendingInterruption.reply.heardText ?? '', unheardText: unheardFor(pendingInterruption.reply) } : null,
-        notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true } : {}), ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
+        notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true, ...(mostRecent ? { mostRecent } : {}), ...(cutInBy ? { cutInBy } : {}) } : {}), ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
         ...(padText !== padSent ? { padText } : {}),
       };
@@ -492,7 +569,8 @@ export function createPracticeCallEngine({
       if (!withOpener) reply.openerSettled = true;
     }
     if (pausedAck !== null) reply.openerSettled = true;
-    reply.noteSettled = typed || greeting || pausedAck !== null || handover || cutInCheck;
+    // A line in the candidate's voice carries the ear's tone note when it has one (waited for only briefly), like spoken words do.
+    reply.noteSettled = (typed && !voicedNote) || greeting || pausedAck !== null || handover || cutInCheck;
     try {
       reply.stream = voice.open({ utteranceId: reply.utteranceId, signal: reply.ctl.voice.signal, ...(speakers ? { speakerId: floor } : {}) });
     } catch {
@@ -546,7 +624,7 @@ export function createPracticeCallEngine({
       });
       runOpener(reply);
     }
-    if (!reply.noteSettled) requestVoiceNote(reply);
+    if (!reply.noteSettled) { if (voicedNote) awaitVoicedNote(reply, voicedNote); else requestVoiceNote(reply); }
     else maybeStartMain(reply);
     return reply;
   }
@@ -595,6 +673,23 @@ export function createPracticeCallEngine({
     };
     timer = schedule(th.voiceNoteTimeoutMs, () => settle(null));
     Promise.resolve().then(() => ear.voiceNote({ startMs, endMs })).then(settle, () => settle(null));
+  }
+
+  /** A line spoken in the candidate's voice: its tone note, if the ear gives one within voicedNoteWaitMs, else none. */
+  function awaitVoicedNote(reply, pending) {
+    let settled = false;
+    let timer = null;
+    const settle = note => {
+      if (settled) return;
+      settled = true;
+      unschedule(timer);
+      if (current !== reply) return;
+      reply.voiceNote = typeof note === 'string' ? note.trim() : '';
+      reply.noteSettled = true;
+      maybeStartMain(reply);
+    };
+    timer = schedule(th.voicedNoteWaitMs, () => settle(null));
+    Promise.resolve(pending).then(settle, () => settle(null));
   }
 
   function transmit(reply, text) {
@@ -1339,7 +1434,37 @@ export function createPracticeCallEngine({
     if (!(reply.buffered.length || reply.silent)) return;
     // An interviewer cutting in: the candidate's voice stops first, the way theirs does when the candidate cuts in.
     if (reply.cutIn && said && reply.buffered.length) return cutInOnSaid(reply);
+    if (reply.watched && reply.liveLook && !reply.silent && !gateWatchedCutIn(reply)) return;
     commit(reply);
+  }
+
+  const wordsSinceLook = reply => Math.max(0, tokens(candidateText()).length - reply.snapshotWords);
+
+  /**
+   * A cut-in the watcher asked for is ready to commit. While the candidate is mid-sentence it waits for the next breath (the
+   * VAD end commits it), at most cutInHoldMs; then, if more than cutInStaleWords words have been said since the look began,
+   * it is about something said sentences ago: dropped unspoken, and the watcher is asked again at once. Returns whether to commit.
+   */
+  function gateWatchedCutIn(reply) {
+    const info = reply.cutInInfo ?? {};
+    if (speaking && !paused) {
+      if (reply.holdAt === null) {
+        reply.holdAt = now();
+        reply.holdTimer = schedule(th.cutInHoldMs, () => { reply.holdTimer = null; tryCommit(reply); });
+        emit({ type: 'cut-in', state: 'held', ...info, wordsSinceSnapshot: wordsSinceLook(reply) });
+      }
+      if (reply.holdTimer !== null) return false;
+    }
+    unschedule(reply.holdTimer);
+    reply.holdTimer = null;
+    const fresh = wordsSinceLook(reply);
+    if (fresh > th.cutInStaleWords) {
+      emit({ type: 'cut-in', state: 'stale', ...info, wordsSinceSnapshot: fresh });
+      discardPending(true, 'stale-cut-in');
+      if (watcherOn && answerSince !== null) { disarm('watch'); runWatch('stale'); }
+      return false;
+    }
+    return true;
   }
 
   function markTurnConsumed() {
@@ -1399,9 +1524,8 @@ export function createPracticeCallEngine({
    */
   function noteAnswer(entries = []) {
     if (!openQuestions.length) return;
-    // Only the candidate's own words practise a question: a line written by Suggest a reply is heard by the
-    // interviewer like any other, but does not count towards "Practised ×N".
-    for (const entry of entries) if (entry?.speaker === 'candidate' && !entry.acknowledgement && !entry.generated) answerWords += tokens(entry.text).length;
+    // Every answer counts the same, spoken aloud or in the candidate's voice, written by the candidate or by Suggest a reply.
+    for (const entry of entries) if (entry?.speaker === 'candidate' && !entry.acknowledgement) answerWords += tokens(entry.text).length;
     if (answerWords < ANSWER_MIN_WORDS && Math.abs(padText.length - padAtAsk) < ANSWER_MIN_PAD_CHARS) return;
     for (const number of openQuestions) if (!answeredQuestions.includes(number)) answeredQuestions.push(number);
     openQuestions = [];
@@ -1433,6 +1557,14 @@ export function createPracticeCallEngine({
   function commit(reply) {
     if (reply.specTokens !== null && tokens(candidateText()).length > reply.specTokens) return respeculate(reply);
     reply.committed = true;
+    if (reply.watched && reply.liveLook && !reply.silent) {
+      emit({ type: 'cut-in', state: 'committed', ...(reply.cutInInfo ?? {}), wordsSinceSnapshot: wordsSinceLook(reply), heldMs: reply.holdAt === null ? 0 : Math.round(now() - reply.holdAt) });
+    }
+    // A cut-in on live speech: the candidate is still talking, so the words so far (more than when the look began) are
+    // what the interviewer cut into. A reply with nothing to say takes nothing from the candidate.
+    if (reply.liveLook && !reply.silent && candidateText()) {
+      reply.candidates = [{ speaker: 'candidate', text: candidateText(), ...candidateSpan(), interrupted: true, cutOffBy: 'interviewer' }];
+    }
     // Commit is the one point where a reply is certain to be delivered: a speculative reply thrown away
     // (resumed, respeculated, listen) or one the voice never spoke never gets here, so it counts nothing.
     noteAnswer(reply.candidates); // these words answer what was asked before this reply, so they are counted first
@@ -1440,14 +1572,17 @@ export function createPracticeCallEngine({
     noteWait(reply);
     disarm('commit');
     markNotesDelivered(reply);
-    for (const entry of reply.candidates) addEntry({ ...entry });
+    const fromMs = turnStartMs;
+    let cutEntry = null;
+    for (const entry of reply.candidates) cutEntry = addEntry({ ...entry });
     if (reply.typed) pendingTyped = [];
     if (reply.padSnapshot !== null) {
       // The main session has now been told this text. A paused-acknowledgement message carries no
       // pad note, so it leaves the text owed for the next turn.
       markPadReceived(reply);
     }
-    if (reply.candidates.length) candidateSpoke = false;
+    if (reply.candidates.length) { candidateSpoke = false; clearLiveAnswer(); }
+    if (reply.liveLook && cutEntry) openLiveCut(reply, cutEntry, fromMs);
     if (reply.parts.length) {
       const at = helperTimelineMs();
       reply.entry = addEntry({ speaker: 'interviewer', text: stripAudioTags(reply.parts.join(' ')), startMs: at, endMs: at });
@@ -1466,7 +1601,7 @@ export function createPracticeCallEngine({
     for (const buffer of reply.buffered) pushReplyAudio(reply, buffer);
     reply.buffered = [];
     reply.startTimer = schedule(START_WATCH_MS, () => playbackStalled(reply));
-    if (speaking && !overlap && offset !== null) overlapStart(now() - offset); // committed over ongoing speech
+    if (speaking && !overlap && !reply.liveLook && offset !== null) overlapStart(now() - offset); // committed over ongoing speech (a cut-in on live speech protects it instead: openLiveCut)
     if (reply.voiceDone && !reply.endSent) sendEnd(reply);
   }
 
@@ -1545,8 +1680,13 @@ export function createPracticeCallEngine({
       endOverlapRecord(overlap);
       overlap = null;
     }
+    const answering = liveCutOver(reply);
     if (reply.endCall) return end('interviewer');
     setPhase('listening');
+    // The candidate began answering the cut-in before it ended: their words are a new answer, ended the usual way.
+    if (answering === 'ended' && !current && !said && !pendingTyped.length && !voicedDone.length) { scheduleTurnEnd(lastVadEndMs); return; }
+    // A candidate line held back while they gave way to this reply is spoken now.
+    if (injectQueue.length && !injecting && !current) { startInject(); return; }
     // A typed message queued behind this reply is answered now: the stop that would have started it is gone.
     if (pendingTyped.length && !current) { beginTyped(); return; }
     // A candidate voice line that ended while this reply was on air is answered now.
@@ -1558,7 +1698,7 @@ export function createPracticeCallEngine({
 
   /** The lead is told right away (when the candidate has not started to speak or type) that nothing was said for the absent colleague. */
   function startAbsentHandover() {
-    if (phase === 'ended' || current || said || paused || speaking || typingNow || named.spec || named.commit || pendingTyped.length) return false;
+    if (phase === 'ended' || current || said || injecting || injectQueue.length || paused || speaking || typingNow || named.spec || named.commit || pendingTyped.length) return false;
     if (!handoverNames().length && !unknownPending) { absentQueue = []; return false; }
     beginTurn({ immediate: true, handover: true });
     return true;
@@ -1662,6 +1802,7 @@ export function createPracticeCallEngine({
     if (event.state === 'started') {
       if (reply === current && !reply.playbackStarted) {
         reply.playbackStarted = true;
+        if (liveCut?.reply === reply) armLiveCutEnd(); // the window runs from when the cut-in is heard
         if (reply.entry && Number.isFinite(event.atMs)) {
           reply.entry.startMs = Math.round(event.atMs);
           reply.entry.endMs = reply.entry.startMs;
@@ -1674,6 +1815,7 @@ export function createPracticeCallEngine({
         emitTiming(reply, event.atMs);
         showSpeaker(reply);
         deliverDueControls(reply, reply.positionMs);
+        yieldInjected();
       }
       return;
     }
@@ -2084,7 +2226,7 @@ export function createPracticeCallEngine({
 
   function armSilence() {
     disarm('silence');
-    if (paused || phase !== 'listening' || typingNow || speaking || current || said || named.spec || named.commit) return;
+    if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting || named.spec || named.commit) return;
     if (maybeSendPadProgress()) return;
     // Like a person: the first check comes after a while, the next ones come further apart.
     // The interviewer judges the first wait (<wait>); the later gaps widen with it, like a person who gives more room.
@@ -2093,7 +2235,7 @@ export function createPracticeCallEngine({
       : nextGapMs !== null ? nextGapMs
         : silencePrompts === 1 ? clamp(first, 12000, 30000) : clamp(first * 1.5, 20000, 45000);
     arm('silence', waitMs, () => {
-      if (paused || phase !== 'listening' || typingNow || speaking || current || said) return;
+      if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting) return;
       // The interviewer has checked in the allowed number of times: the line drops, whatever the model would say.
       if (silencePrompts >= MAX_SILENCE_CHECKS) return end('interviewer', undefined, { cause: 'silence' });
       nextGapMs = null;
@@ -2123,13 +2265,292 @@ export function createPracticeCallEngine({
   }
 
   function maybeSendPadProgress() {
-    if (paused || phase !== 'listening' || typingNow || speaking || current || said || named.spec || named.commit) return false;
+    if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting || injectQueue.length || named.spec || named.commit) return false;
     const dueAt = padProgressDueAt();
     if (dueAt === null) { padDirty = padDirty && padText !== padSent; return false; }
     if (now() < dueAt) { schedulePadProgress(); return false; }
     const idleMs = now() - padEditedAt;
     beginTurn({ padProgress: { typing: idleMs < th.padIdleMs, idleMs }, immediate: true });
     return true;
+  }
+
+  // ---- the interviewer cutting into the candidate's live speech -----------------
+  // A spoken answer (microphone) that runs on gets the same looks as a line in the candidate's voice: from cutInFirstMs
+  // after its first speech, then every cutInEveryMs, the interviewer is asked whether a real interviewer would cut in.
+
+  /** The candidate's answer is over (consumed by a reply, or dropped by a pause): the next speech starts a new one. */
+  function clearLiveAnswer() {
+    answerSince = null;
+    liveLookAt = null;
+    disarm('liveLook');
+    cancelWatch();
+    watch.lastStartAt = null;
+    watch.again = false;
+    disarm('watch');
+  }
+
+  /** Live speech is going on: note when the answer began (its first word, else now) and arm the next look. */
+  function armLiveLook() {
+    if (phase === 'ended') return;
+    if (answerSince === null) {
+      const first = candidateText() ? toClock(candidateSpan().startMs) : null;
+      answerSince = Math.min(now(), first ?? now());
+    }
+    if (watcherOn) { armWatch(); return; }
+    if (named.liveLook === null) arm('liveLook', Math.max(0, Math.max(answerSince + th.cutInFirstMs, liveLookAt ?? -Infinity) - now()), liveLook);
+  }
+
+  function liveLook() {
+    if (phase === 'ended') return;
+    if (!candidateSpoke || answerSince === null) { clearLiveAnswer(); return; }
+    const dueAt = Math.max(answerSince + th.cutInFirstMs, liveLookAt ?? -Infinity);
+    if (now() < dueAt) { arm('liveLook', dueAt - now(), liveLook); return; }
+    // Still speaking: the microphone is live, or the pause is shorter than the speculation point (a held pause is not).
+    const still = speaking || (named.spec !== null && !audioHint);
+    // Nobody is talking and nothing is on its way: the answer is over (a bare noise, or a turn that ended), so stop retrying.
+    if (!still && !current && !said && !cancelling && named.commit === null) { clearLiveAnswer(); return; }
+    if (current || said || cancelling || paused || phase !== 'listening' || !still || !tokens(candidateText()).length) {
+      arm('liveLook', LIVE_LOOK_RETRY_MS, liveLook);
+      return;
+    }
+    liveLookAt = now() + th.cutInEveryMs;
+    arm('liveLook', th.cutInEveryMs, liveLook);
+    const reply = beginTurn({ text: candidateText(), channel: 'voice', immediate: true, cutInCheck: true, liveLook: true, candidates: [] });
+    if (current !== reply) { if (!speaking && candidateSpoke) scheduleTurnEnd(lastVadEndMs); return; } // the voice would not open
+    if (speaking) return;
+    // The look began in a pause: if the pause lasts to the speculation point the look is dropped and the turn ends as usual.
+    const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
+    arm('spec', th.speculateMs - since, lookPauseOver);
+  }
+
+  // ---- the watcher: when does the interviewer cut into live speech? -----------------
+  // With sessions.watcher, a fast session answers <listen/> or <cut-in who reason/> for the last few seconds of the answer.
+  // A yes starts today's live look (the main session writes the cut-in); the look's commit, hold and stale rules are above.
+
+  /** Still talking: the microphone is live, or the pause is shorter than the speculation point (a held pause is not). */
+  const stillTalking = () => speaking || (named.spec !== null && !audioHint);
+
+  function watchReady() {
+    return watcherOn && phase === 'listening' && !paused && !current && !said && !cancelling && candidateSpoke
+      && answerSince !== null && tokens(candidateText()).length > 0 && stillTalking();
+  }
+
+  /** Next check: the first at cutInFirstMs into the answer, then at least every watchEveryMs from the start of the last one. */
+  function armWatch() {
+    if (!watcherOn || phase === 'ended' || answerSince === null || named.watch !== null || watch.running) return;
+    const dueAt = Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs);
+    arm('watch', Math.max(0, dueAt - now()), onWatchDue);
+  }
+
+  function onWatchDue() {
+    if (phase === 'ended') return;
+    if (!candidateSpoke || answerSince === null) { clearLiveAnswer(); return; }
+    const dueAt = Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs);
+    if (now() < dueAt) { arm('watch', dueAt - now(), onWatchDue); return; }
+    if (watch.running) { watch.again = true; return; }
+    if (watchReady()) { runWatch('timer'); return; }
+    // Nobody is talking and nothing is on its way: the answer is over, so stop retrying.
+    if (!stillTalking() && !current && !said && !cancelling && named.commit === null) { clearLiveAnswer(); return; }
+    arm('watch', LIVE_LOOK_RETRY_MS, onWatchDue);
+  }
+
+  /** A breath (a VAD end): the next check starts at once, or as soon as the one in flight returns. */
+  function watchBreath() {
+    if (!candidateSpoke || answerSince === null || now() < answerSince + th.cutInFirstMs) return;
+    if (watch.running) { watch.again = true; return; }
+    if (!watchReady()) return;
+    disarm('watch');
+    runWatch('breath');
+  }
+
+  /** The answer is over (or the call paused): an in-flight check's result is dropped. */
+  function cancelWatch() {
+    if (!watch.running) return;
+    watch.token += 1;
+    watch.running = false;
+    watch.again = false;
+    attempt(() => watch.controller?.abort());
+    watch.controller = null;
+  }
+
+  /** The last sentence heard of the answer so far; text that has no sentence end falls back to its last ~20 words. */
+  function lastSentenceOf(text) {
+    const parts = String(text ?? '').split(/(?<=[.!?…])\s+/u).map(part => part.trim()).filter(Boolean);
+    const last = parts.at(-1) ?? '';
+    const list = tokens(last);
+    return list.length > 30 || (parts.length === 1 && list.length > 20) ? list.slice(-20).join(' ') : last;
+  }
+
+  /** The question this answer is for: the last interviewer line before it, who asked it and its plan number. */
+  function watchQuestion() {
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
+      const entry = transcript[index];
+      if (entry.speaker !== 'interviewer' || entry.channel === 'chat' || entry.overlay || !entry.text) continue;
+      const segment = entry.segments?.at(-1);
+      return { text: stripAudioTags(segment?.text ?? entry.text), askedBy: segment?.speakerId ?? entry.speakerId ?? leadId };
+    }
+    return { text: '', askedBy: leadId };
+  }
+
+  function runWatch(trigger) {
+    if (!watchReady()) { armWatch(); return; }
+    if (watch.running) { watch.again = true; return; }
+    const text = candidateText();
+    const question = watchQuestion();
+    const mostRecent = lastSentenceOf(text);
+    let message;
+    try {
+      message = formatWatch({
+        elapsedMs: elapsed(), questionText: question.text, questionNumber: openQuestions.at(-1) ?? askedQuestions.at(-1) ?? null,
+        askedBy: question.askedBy, answerText: text, answerMs: Math.max(0, now() - answerSince), mostRecent,
+      });
+    } catch { message = null; }
+    if (typeof message !== 'string' || !message) { armWatch(); return; }
+    const controller = new AbortController();
+    watch.running = true;
+    watch.again = false;
+    watch.lastStartAt = now();
+    watch.controller = controller;
+    watch.token += 1;
+    const token = watch.token;
+    const answerAt = answerSince;
+    const startedAt = now();
+    const snapshotWords = tokens(text).length;
+    let settled = false;
+    let timer = null;
+    const finish = parsed => {
+      if (settled) return;
+      settled = true;
+      unschedule(timer);
+      if (phase === 'ended' || watch.token !== token) return; // cancelled: the answer is over
+      watch.running = false;
+      watch.controller = null;
+      const decision = parsed && (parsed.decision === 'cut-in' || parsed.decision === 'listen') ? parsed : { decision: 'listen', who: null, reason: null };
+      const ready = answerSince === answerAt && watchReady();
+      emit({
+        type: 'watch', ms: Math.round(now() - startedAt), decision: decision.decision, who: decision.who ?? null, reason: decision.reason ?? null,
+        wordsSinceSnapshot: Math.max(0, tokens(candidateText()).length - snapshotWords), trigger, ...(ready ? {} : { ignored: true }),
+      });
+      if (!ready) { watch.again = false; if (answerSince === answerAt) armWatch(); return; }
+      if (decision.decision === 'cut-in') { watch.again = false; startWatchedLook(decision, question.askedBy); return; }
+      // A breath came while this one ran: the check it owed starts as soon as this one returns. A failed or timed-out
+      // check never chains straight into another one (review 2026-11-21: a slow watcher ran back to back): the
+      // periodic schedule decides when the next one goes.
+      if (watch.again && !failed) { watch.again = false; runWatch('again'); return; }
+      watch.again = false;
+      if (failed) watch.lastStartAt = now(); // after a failure the next check waits a full watchEveryMs
+      armWatch();
+    };
+    let failed = false;
+    timer = schedule(th.watchTimeoutMs, () => { failed = true; attempt(() => controller.abort()); finish(null); });
+    Promise.resolve(watch.restart).then(() => live.watcher.turn(message, { signal: controller.signal })).then(
+      result => finish(parseWatch(result?.text)),
+      error => {
+        const crashed = !settled && !isCancel(error) && phase !== 'ended';
+        failed = true;
+        // The restart is in flight before anything can start the next check, so that check waits for it; one at a time.
+        if (crashed && !watch.restart) {
+          const restarting = Promise.resolve(restart('watcher')).catch(() => false);
+          watch.restart = restarting;
+          restarting.then(() => { if (watch.restart === restarting) watch.restart = null; });
+        }
+        finish(null);
+      },
+    );
+  }
+
+  /** The watcher said a real interviewer would cut in: the main session gets a look and writes it as that person. */
+  function startWatchedLook(decision, askedBy) {
+    let id = leadId;
+    if (speakers) id = onCall(decision.who) ? decision.who : (onCall(askedBy) ? askedBy : leadId);
+    const name = speakers?.find(item => item.id === id)?.name;
+    const text = candidateText();
+    const reply = beginTurn({
+      text, channel: 'voice', immediate: true, cutInCheck: true, liveLook: true, candidates: [], watched: true,
+      mostRecent: lastSentenceOf(text), cutInBy: { id, ...(name ? { name } : {}), reason: decision.reason ?? undefined },
+    });
+    if (current !== reply) { if (!speaking && candidateSpoke) scheduleTurnEnd(lastVadEndMs); return; } // the voice would not open
+    if (speaking) return;
+    // The look began in a breath: if the pause lasts to the speculation point the look is dropped and the turn ends as usual.
+    const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
+    arm('spec', th.speculateMs - since, lookPauseOver);
+  }
+
+  /** The candidate paused: a cut-in that was held for the breath goes out now; a look still being written waits out the pause. */
+  function holdLookThroughBreath() {
+    const reply = current;
+    tryCommit(reply);
+    if (current !== reply || reply.committed) return;
+    arm('spec', th.speculateMs, lookPauseOver);
+  }
+
+  function lookPauseOver() {
+    dropLiveLook();
+    if (!current && !speaking && !paused && phase === 'listening' && candidateSpoke) scheduleTurnEnd(lastVadEndMs);
+  }
+
+  /** The look is at speech that is still going on, never answered as a finished turn: drop it when the candidate stops. */
+  function dropLiveLook(markNotSpoken = true, reason = 'look-dropped') {
+    if (current?.liveLook && !current.committed) discardPending(markNotSpoken, reason);
+  }
+
+  /** The candidate's trailing speech is protected: it cannot stop, pause, floor-bid or classify against this cut-in. */
+  const liveCutProtects = reply => !!liveCut && liveCut.reply === reply && current === reply;
+
+  /** The cut-in has committed over live speech: the words so far are an entry, and speech that follows is added to it. */
+  function openLiveCut(reply, entry, fromMs) {
+    if (liveCut) unschedule(liveCut.timer);
+    liveCut = { reply, entry, fromMs, timer: null };
+    markTurnConsumed();
+    armLiveCutEnd();
+  }
+
+  function armLiveCutEnd() {
+    if (!liveCut) return;
+    unschedule(liveCut.timer);
+    liveCut.timer = schedule(th.cutInYieldMs, endLiveCut);
+  }
+
+  /**
+   * The cut-in is over (played out, or cut off itself): its protected window closes with it, so words said after this
+   * are a new answer, never added to the cut-off entry (call-review 2026-11-21: a short "Go on." finished inside the
+   * window and the start of the answer was swallowed into the old entry). Returns 'speaking' when the candidate is
+   * talking now, 'ended' when they already said something since and stopped, else null.
+   */
+  function liveCutOver(reply) {
+    if (!liveCut || liveCut.reply !== reply) return null;
+    unschedule(liveCut.timer);
+    liveCut = null;
+    if (speaking && !paused) { candidateSpoke = true; clearLiveAnswer(); armLiveLook(); return 'speaking'; }
+    if (!paused && tokens(candidateText()).length) { candidateSpoke = true; return 'ended'; }
+    return null;
+  }
+
+  /** The trailing words join the candidate's cut-off entry; the next turn starts after them. */
+  function syncLiveCut() {
+    if (!liveCut) return;
+    const text = candidateText(liveCut.fromMs);
+    if (text) {
+      liveCut.entry.text = text;
+      liveCut.entry.endMs = Math.max(liveCut.entry.endMs, candidateSpan(liveCut.fromMs).endMs);
+    }
+    markTurnConsumed();
+  }
+
+  /**
+   * The protected window is over. Speech that is still going is a candidate pushing back: an ordinary overlap judged by
+   * the usual rules, measured from here. If the cut-in is already over, the candidate carries on with a new answer.
+   */
+  function endLiveCut() {
+    const cut = liveCut;
+    if (!cut || current !== cut.reply) return; // a cut-in that is over closed its window itself (liveCutOver)
+    syncLiveCut();
+    liveCut = null;
+    unschedule(cut.timer);
+    if (!speaking || paused) return;
+    const atMs = offset === null ? helperTimelineMs() : now() - offset;
+    if (current === cut.reply && cut.reply.committed) { if (!overlap) overlapStart(atMs); return; }
+    if (!current && !said) { candidateSpoke = true; disarm('silence'); armLiveLook(); }
   }
 
   // ---- helper events --------------------------------------------------------
@@ -2142,7 +2563,16 @@ export function createPracticeCallEngine({
       audioHint = false; // the candidate resumed: no stale Smart Turn hint
       disarm('silence');
       if (current && current.committed) {
+        if (liveCutProtects(current)) { syncLiveCut(); return; } // trailing speech over a cut-in: not an interruption
         if (!overlap) overlapStart(event.atMs);
+        return;
+      }
+      if (current && current.liveLook) {
+        // A look at speech that is still going on: the candidate keeping talking is what it is looking at.
+        disarm('spec');
+        disarm('commit');
+        candidateSpoke = true;
+        armLiveLook();
         return;
       }
       if (current && !current.typed) {
@@ -2150,19 +2580,27 @@ export function createPracticeCallEngine({
         disarm('commit');
         candidateSpoke = true;
         discardPending(true);
+        armLiveLook();
         return;
       }
       if (!current) {
         disarm('spec');
         disarm('commit');
         candidateSpoke = true;
+        armLiveLook();
       }
       return;
     }
     speaking = false;
     if (overlap) overlapEnd(event.atMs);
+    if (liveCutProtects(current)) syncLiveCut(); // the trailing speech stopped: never a turn end while the cut-in plays
+    // The candidate stopped: the whole answer goes the normal way. A look the watcher asked for is kept through a breath
+    // (a cut-in waiting for it goes out now) and dropped only if the pause lasts to the speculation point.
+    if (current?.liveLook && current.watched && !current.committed) holdLookThroughBreath();
+    else dropLiveLook();
     if (phase === 'listening' && !current && candidateSpoke) scheduleTurnEnd(event.atMs);
     else if (phase === 'listening') armSilence();
+    if (watcherOn) watchBreath();
   }
 
   function onTranscript(event) {
@@ -2170,6 +2608,8 @@ export function createPracticeCallEngine({
     segments.set(event.segmentId, { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final });
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
     if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; } // the candidate actually said something
+    if (liveCutProtects(current)) syncLiveCut();
+    else if (candidateSpoke && speaking) armLiveLook();
     if (overlapWait && current === overlapWait.reply && tokens(overlapText(overlapWait)).length >= 1) {
       const record = overlapWait;
       overlapWait = null;
@@ -2195,6 +2635,7 @@ export function createPracticeCallEngine({
       case 'vad': return onVad(event);
       case 'transcript': return onTranscript(event);
       case 'playback': return onPlayback(event);
+      case 'inject': return onInject(event);
       case 'level': noteHelperTime(event.atMs); return;
       default: return;
     }
@@ -2252,12 +2693,21 @@ export function createPracticeCallEngine({
     attempt(() => utterance.stream?.cancel());
   }
 
+  /** Hand the ear the line's audio once (tone note, prosody): when its voice is whole, or at its end if it never was. */
+  function prepareVoicedLine(utterance) {
+    if (utterance.prepared || typeof ear?.prepareVoiced !== 'function' || !utterance.pcm.length) return;
+    utterance.prepared = true;
+    attempt(() => ear.prepareVoiced({ id: utterance.utteranceId, pcm: Buffer.concat(utterance.pcm), sampleRate: utterance.sampleRate, wordCount: tokens(utterance.text).length }));
+  }
+
   /** The voice has sent everything it will: let the line play out. */
   function saidVoiceDone(utterance, failed) {
     if (said !== utterance || utterance.stopping) return;
     utterance.voiceDone = true;
     if (!utterance.gotAudio) return saidFailed(utterance);
     if (failed) emit({ type: 'error', code: 'candidate-voice-failed' });
+    // The line's voice is whole: the ear can start listening to how it sounds (tone note, prosody) in the background.
+    else prepareVoicedLine(utterance);
     attempt(() => audio.endUtterance(utterance.utteranceId));
     armSaidFinishWatch(utterance);
   }
@@ -2345,7 +2795,7 @@ export function createPracticeCallEngine({
     if (!heard) return;
     utterance.nextCheckMs = position + th.cutInEveryMs;
     const earlier = voicedDone.map(entry => entry.text);
-    beginTurn({ text: [...earlier, heard].join(' '), channel: 'voice', immediate: true, cutInCheck: true, candidates: [] });
+    beginTurn({ text: [...earlier, heard].join(' ').replace(/\s+/gu, ' ').trim(), channel: 'voice', immediate: true, cutInCheck: true, candidates: [] });
   }
 
   /**
@@ -2425,7 +2875,18 @@ export function createPracticeCallEngine({
       ...(whole ? {} : { interrupted: true, heardText: heard, ...(utterance.cutBy ? { cutOffBy: 'interviewer' } : {}) }),
     } : null;
     if (heard) captionSaid(utterance, true, heard);
-    emit({ type: 'candidate-voice', state: whole ? 'finished' : 'cut', heardChars: heard.length });
+    // A line cut while its voice was still streaming, or whose stream failed late, was never prepared: the audio so far is.
+    if (entry) prepareVoicedLine(utterance);
+    if (entry && typeof ear?.voicedNote === 'function') {
+      // How much of the line was heard: all of it when whole, else the part before the cut. The ear also records its prosody.
+      const bytesMs = utterance.sampleRate ? (utterance.audioBytes / 2 / utterance.sampleRate) * 1000 : 0;
+      const heardMs = Math.max(0, Math.round(whole ? bytesMs : (Number.isFinite(positionMs) ? positionMs : livePosition(utterance))));
+      const args = { id: utterance.utteranceId, startMs: entry.startMs, endMs: entry.endMs, heardMs };
+      const pending = Promise.resolve().then(() => ear.voicedNote(args));
+      pending.catch(() => {});
+      voicedNotes.set(entry, pending);
+    }
+    emit({ type: 'candidate-voice', state: whole ? 'finished' : 'cut', heardChars: heard.length, ...(whole ? {} : { messages: heardByMessage(utterance.texts, heard) }) });
     if (heard) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; }
     const reply = utterance.cutBy;
     if (reply && current === reply && !reply.committed) {
@@ -2451,18 +2912,209 @@ export function createPracticeCallEngine({
     voicedDone = [];
     const spokenText = candidateText();
     const spoken = spokenText ? [{ speaker: 'candidate', text: spokenText, ...candidateSpan() }] : [];
+    const pending = voicedNotes.get(entries.at(-1)) ?? null; // the note of the last line, which the interviewer has just heard
     beginTurn({
-      text: entries.map(entry => entry.text).join(' '), channel: 'voice', typed: true, immediate: true, spokenText,
+      voicedNote: pending,
+      // Heard speech has no paragraphs: a sent message's line breaks would mark the line as typed, so they go.
+      text: entries.map(entry => entry.text).join(' ').replace(/\s+/gu, ' ').trim(), channel: 'voice', typed: true, immediate: true, spokenText,
       candidates: [...spoken, ...entries],
     });
   }
 
+  // ---- the candidate's voice, injected into the microphone ---------------------
+  // When the helper can inject, a sent message is synthesised as above but its audio is mixed into the microphone signal
+  // (after echo cancellation, before level, vad, the recogniser and candidate.wav) and the candidate hears it through a
+  // monitor. From there it is the candidate speaking: vad and transcript events, the turn end, Smart Turn, live looks,
+  // overlap and interruption rules and the ear all run on the microphone path. None of the app-played machinery above
+  // (said, maybeCutIn, cutInOnSaid, deliverVoiced, the voiced tone note) is used. This block only runs the line itself:
+  // synthesis and retry, the queue behind it, the chat sync, yielding to an interviewer like a person, pause and hang-up.
+
+  const injectMode = () => !!candidateVoice && attempt(() => audio.canInject?.()) === true;
+
+  function injectTyped(item) {
+    injectQueue.push(item);
+    if (!injecting) startInject();
+  }
+
+  /** Synthesise every queued message as one line and mix it into the microphone as the voice delivers it. */
+  function startInject(tries = 1) {
+    if (!injectQueue.length || injecting || paused || phase === 'ended') return;
+    const texts = injectQueue;
+    injectQueue = [];
+    const line = texts.map(entry => entry.text).join(' ');
+    const utterance = {
+      utteranceId: newId(), texts, text: line, tries, words: [], positionMs: 0, positionAt: null, audioBytes: 0, sampleRate: null,
+      gotAudio: false, sent: false, voiceDone: false, started: false, startMs: null, ending: false, overInterviewer: false, extraTexts: [],
+      ctl: new AbortController(), stream: null, startTimer: null, finishTimer: null, cancelWait: null, yieldTimer: null, boundaryTimer: null,
+    };
+    let stream;
+    try {
+      stream = candidateVoice.open({ utteranceId: utterance.utteranceId, text: line, signal: utterance.ctl.signal });
+    } catch {
+      return injectLost(texts, tries);
+    }
+    injecting = utterance;
+    utterance.stream = stream;
+    utterance.sampleRate = stream.sampleRate;
+    stream.onAudio(buffer => {
+      if (injecting !== utterance || utterance.ending || !buffer?.length) return;
+      if (!utterance.gotAudio) {
+        utterance.gotAudio = true;
+        utterance.sent = true;
+        // A rate the helper cannot take (inject returns false) is a voice that failed, like one that sent nothing.
+        if (attempt(() => audio.inject(utterance.utteranceId, utterance.sampleRate)) === false) { utterance.sent = false; return injectFailed(utterance); }
+      }
+      utterance.audioBytes += buffer.length;
+      attempt(() => audio.injectAudio(utterance.utteranceId, buffer));
+    });
+    stream.onWords(list => { if (injecting === utterance && Array.isArray(list)) utterance.words.push(...list); });
+    utterance.startTimer = schedule(th.candidateVoiceStartMs, () => { if (!utterance.gotAudio) injectFailed(utterance); });
+    Promise.resolve(stream.done).then(() => injectVoiceDone(utterance, false), () => injectVoiceDone(utterance, true));
+    emit({ type: 'candidate-voice', state: 'speaking', chars: line.length, injected: true });
+  }
+
+  function dropInject(utterance) {
+    for (const key of ['startTimer', 'finishTimer', 'cancelWait', 'yieldTimer', 'boundaryTimer']) { unschedule(utterance[key]); utterance[key] = null; }
+    attempt(() => utterance.ctl.abort());
+    attempt(() => utterance.stream?.cancel());
+  }
+
+  /** The voice has sent everything it will: tell the helper the line is complete (it ends once every sample is mixed). */
+  function injectVoiceDone(utterance, failed) {
+    if (injecting !== utterance || utterance.ending) return;
+    utterance.voiceDone = true;
+    if (!utterance.gotAudio) return injectFailed(utterance);
+    if (failed) emit({ type: 'error', code: 'candidate-voice-failed' });
+    attempt(() => audio.injectEnd(utterance.utteranceId));
+    armInjectWatch(utterance);
+  }
+
+  function armInjectWatch(utterance) {
+    unschedule(utterance.finishTimer);
+    utterance.finishTimer = null;
+    if (injecting !== utterance || !utterance.voiceDone || utterance.ending) return;
+    utterance.finishTimer = schedule(remainingMs(utterance) + FINISH_SLACK_MS, () => {
+      emit({ type: 'error', code: 'playback-stalled' });
+      stopInjected(utterance);
+    });
+  }
+
+  /** No sound came out of the line (or the helper refused it): the line is tried once more, then lost. */
+  function injectFailed(utterance) {
+    if (injecting !== utterance) return;
+    injecting = null;
+    dropInject(utterance);
+    if (utterance.sent) attempt(() => audio.injectCancel(utterance.utteranceId, 0));
+    injectLost(utterance.texts, utterance.tries);
+  }
+
+  /** As candidateVoiceLost: the interviewer only ever hears the candidate, so a line the voice could not say is never passed on as text. */
+  function injectLost(texts, tries) {
+    if (phase === 'ended') return;
+    if (tries < 2) {
+      injectQueue = [...texts, ...injectQueue];
+      return startInject(tries + 1);
+    }
+    emit({ type: 'error', code: 'candidate-voice-failed' });
+    if (injectQueue.length) return startInject();
+    armSilence();
+  }
+
+  function onInject(event) {
+    const utterance = injecting;
+    if (!utterance || utterance.utteranceId !== event.utteranceId) return;
+    noteHelperTime(event.atMs);
+    if (event.state === 'position') {
+      if (Number.isFinite(event.positionMs)) utterance.positionMs = event.positionMs;
+      utterance.positionAt = now();
+      armInjectWatch(utterance);
+      return;
+    }
+    if (event.state === 'started') {
+      if (utterance.started) return;
+      utterance.started = true;
+      utterance.startMs = Number.isFinite(event.atMs) ? Math.round(event.atMs) : helperTimelineMs();
+      utterance.positionAt = now();
+      unschedule(utterance.startTimer);
+      utterance.startTimer = null;
+      // A line that begins while an interviewer is already speaking is talking over them on purpose.
+      utterance.overInterviewer = !!(current && current.playbackStarted);
+      armInjectWatch(utterance);
+      return;
+    }
+    if (event.state === 'finished') return endInjected(utterance, Infinity);
+    // A cancel the wrapper made itself (backpressure) does not know how far the helper got: the last position stands.
+    if (event.state === 'cancelled') return endInjected(utterance, event.reason ? utterance.positionMs : event.positionMs);
+  }
+
+  /**
+   * An interviewer reply has started playing: a line the candidate was already in the middle of makes them stop like a
+   * person. They carry on for a reaction time, then to the end of the word being said, then stop with a short fade.
+   * A line that began over an interviewer is never stopped here: the interruption rules decide.
+   */
+  function yieldInjected() {
+    const utterance = injecting;
+    if (!utterance || !utterance.started || utterance.ending || utterance.overInterviewer || utterance.yieldTimer || utterance.boundaryTimer) return;
+    const span = Math.max(0, th.candidateYieldMaxMs - th.candidateYieldMinMs);
+    const delay = th.candidateYieldMinMs + clamp(Number(random()) || 0, 0, 1) * span;
+    utterance.yieldTimer = schedule(delay, () => {
+      utterance.yieldTimer = null;
+      if (injecting !== utterance || utterance.ending) return;
+      utterance.boundaryTimer = afterWordBoundary(utterance, () => {
+        utterance.boundaryTimer = null;
+        if (injecting !== utterance) return;
+        utterance.yielded = true;
+        stopInjected(utterance);
+      });
+    });
+  }
+
+  /** Stop the line now with a short fade; the helper reports where it stopped (or the estimate stands). */
+  function stopInjected(utterance) {
+    if (injecting !== utterance || utterance.ending) return;
+    utterance.ending = true;
+    for (const key of ['startTimer', 'finishTimer', 'yieldTimer', 'boundaryTimer']) { unschedule(utterance[key]); utterance[key] = null; }
+    attempt(() => utterance.ctl.abort());
+    attempt(() => utterance.stream?.cancel());
+    if (!utterance.sent) return endInjected(utterance, utterance.positionMs);
+    attempt(() => audio.injectCancel(utterance.utteranceId, th.candidateYieldFadeMs));
+    utterance.cancelWait = schedule(CANCEL_WAIT_MS + th.candidateYieldFadeMs, () => endInjected(utterance, utterance.started ? livePosition(utterance) : utterance.positionMs));
+  }
+
+  /** A pause drops speech: the line and everything queued behind it stop, and their chat entries are cut where they stand. */
+  function stopInjection() {
+    const queued = injectQueue;
+    injectQueue = [];
+    if (injecting) { injecting.extraTexts = queued; stopInjected(injecting); return; }
+    if (queued.length) emit({ type: 'candidate-voice', state: 'cut', heardChars: 0, injected: true, messages: heardByMessage(queued, '') });
+  }
+
+  /** The helper says the line is over: mixed to the end (positionMs Infinity) or cut at positionMs. */
+  function endInjected(utterance, positionMs) {
+    if (injecting !== utterance) return;
+    injecting = null;
+    dropInject(utterance);
+    const heard = stripAudioTags(heardFor(utterance, Number.isFinite(positionMs) ? positionMs : utterance.positionMs));
+    const whole = positionMs === Infinity || (!utterance.extraTexts.length && tokens(heard).length >= tokens(stripAudioTags(utterance.text)).length && tokens(heard).length > 0);
+    emit({
+      type: 'candidate-voice', state: whole ? 'finished' : 'cut', injected: true, heardChars: whole ? utterance.text.length : heard.length,
+      ...(whole ? {} : { messages: heardByMessage([...utterance.texts, ...utterance.extraTexts], heard) }),
+    });
+    if (paused || phase === 'ended') return;
+    // A person who gave way to an interviewer does not start the next thing they meant to say over them: the rest
+    // waits until the interviewer has finished (finishReply starts it).
+    if (injectQueue.length && !(utterance.yielded && current)) return startInject();
+    // The microphone path takes it from here: a turn ends on the vad end; if nothing was recognised the call waits as ever.
+    if (phase === 'listening') armSilence();
+  }
+
   // ---- chat and typing ------------------------------------------------------
-  /** A sent chat message. `generated`: the text was written by Suggest a reply (heard the same, never counted as practice). */
-  function typed(value, { generated = false } = {}) {
+  /** A sent chat message. `generated`: the text was written by Suggest a reply (spoken, heard, counted and judged like any answer). */
+  function typed(value, { generated = false, chatId = null } = {}) {
     const text = String(value ?? '').trim();
     if (!text || paused) return false; // only the shortcut resumes: a message typed during a pause is refused
-    queueTyped({ text, generated: generated === true });
+    // chatId: the window's chat entry for this message, so a line cut short can be cut short there too.
+    queueTyped({ text, generated: generated === true, ...(chatId != null ? { chatId: String(chatId) } : {}) });
     return true;
   }
 
@@ -2493,6 +3145,9 @@ export function createPracticeCallEngine({
     silencePrompts = 0;
     silenceTotalMs = 0;
     nextGapMs = null;
+    // The helper can mix the candidate's voice into the microphone: the message is spoken as live speech, and everything
+    // that follows (turn end, looks, cut-ins, talking over the interviewer) is the microphone path.
+    if (injectMode()) return injectTyped(item);
     if (said) {
       // The candidate's voice is still on an earlier message: this one is spoken straight after it.
       pendingTyped.push(item);
@@ -2527,12 +3182,13 @@ export function createPracticeCallEngine({
       pausedAt = now();
       disarm('silence');
       disarm('padIdle'); // the progress wait stands still too: it starts again from zero on resume
+      stopInjection(); // speech during a pause is dropped anyway: the injected line is cut where it stands
       dropCandidateActivity();
     } else {
       pausedTotalMs += now() - pausedAt;
       pausedAt = null;
       // Speech that began during the pause can still deliver words after it: they start before this mark.
-      if (!current) { markTurnConsumed(); candidateSpoke = false; }
+      if (!current) { markTurnConsumed(); candidateSpoke = false; clearLiveAnswer(); }
       if (padDirty) { padEditedAt = now(); padDirtySince = padEditedAt; schedulePadProgress(); }
       if (voicedHeld) { voicedHeld = false; deliverVoiced(); } else armSilence();
     }
@@ -2554,7 +3210,9 @@ export function createPracticeCallEngine({
     }
     disarm('spec');
     disarm('commit');
-    if (!current) { candidateSpoke = false; audioHint = false; markTurnConsumed(); }
+    dropLiveLook(false, 'paused'); // a look at speech from before the pause is never spoken
+    cancelWatch();
+    if (!current) { candidateSpoke = false; audioHint = false; markTurnConsumed(); clearLiveAnswer(); }
   }
 
   function typing(isTyping) {
@@ -2587,11 +3245,21 @@ export function createPracticeCallEngine({
       dropSaid(line);
       attempt(() => audio.cancel(line.utteranceId));
     }
+    if (injecting) {
+      const line = injecting;
+      injecting = null;
+      injectQueue = [];
+      dropInject(line);
+      if (line.sent) attempt(() => audio.injectCancel(line.utteranceId, th.candidateYieldFadeMs));
+    }
     phase = 'ended';
     for (const handle of [...handles]) { handles.delete(handle); attempt(() => clock.clearTimeout(handle)); }
     for (const controller of classifierControllers) attempt(() => controller.abort());
     classifierControllers.clear();
-    named.spec = null; named.commit = null; named.silence = null; named.typing = null; named.padIdle = null; named.padTyping = null;
+    named.spec = null; named.commit = null; named.silence = null; named.typing = null; named.padIdle = null; named.padTyping = null; named.liveLook = null; named.watch = null;
+    attempt(() => watch.controller?.abort());
+    watch.controller = null; watch.running = false;
+    liveCut = null;
     endOverlapRecord(overlap);
     overlap = null;
     overlapWait = null;

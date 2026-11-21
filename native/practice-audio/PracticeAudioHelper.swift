@@ -205,9 +205,15 @@ enum Command: Sendable {
     case pause(id: String)
     case resume(id: String)
     case mute(Bool)
+    case inject(id: String, sampleRate: Int)
+    case injectAudio(id: String, pcm: Data)
+    case injectEnd(id: String)
+    case injectCancel(id: String, fadeMs: Int)
     case stop
 
     static let maxLineBytes = 262_144
+    /// Largest `inject-audio` chunk before base64 (the wrapper's chunk size).
+    static let maxInjectChunkBytes = 96_000
 
     static func validID(_ value: Any?) -> String? {
         guard let id = value as? String, (1...64).contains(id.utf8.count),
@@ -244,6 +250,25 @@ enum Command: Sendable {
         case "mute":
             guard let muted = object["muted"] as? Bool else { return nil }
             return .mute(muted)
+        case "inject":
+            guard let id = validID(object["utteranceId"]), let rate = object["sampleRate"] as? Int,
+                  rate == 16_000 || rate == 24_000 || rate == 44_100 else { return nil }
+            return .inject(id: id, sampleRate: rate)
+        case "inject-audio":
+            guard let id = validID(object["utteranceId"]), let text = object["pcm"] as? String,
+                  let data = Data(base64Encoded: text), data.count <= maxInjectChunkBytes else { return nil }
+            return .injectAudio(id: id, pcm: data)
+        case "inject-end":
+            guard let id = validID(object["utteranceId"]) else { return nil }
+            return .injectEnd(id: id)
+        case "inject-cancel":
+            guard let id = validID(object["utteranceId"]) else { return nil }
+            var fade = 60
+            if let raw = object["fadeMs"] {
+                guard let value = raw as? Int, (0...500).contains(value) else { return nil }
+                fade = value
+            }
+            return .injectCancel(id: id, fadeMs: fade)
         case "stop": return .stop
         default: return nil
         }
@@ -294,15 +319,70 @@ final class TimelineClock: @unchecked Sendable {
     }
 }
 
+/// Which stretches of the timeline carry an injected line. While the microphone is muted,
+/// transcripts are dropped unless they overlap one of these (the line is "spoken" on the mic).
+final class InjectSpans: @unchecked Sendable {
+    private let lock = NSLock()
+    private var spans: [(id: String, startMs: Int, endMs: Int)] = []
+
+    func open(id: String, startMs: Int) {
+        lock.lock(); defer { lock.unlock() }
+        spans.append((id, startMs, Int.max))
+        if spans.count > 32 { spans.removeFirst(spans.count - 32) }
+    }
+
+    func close(id: String, endMs: Int) {
+        lock.lock(); defer { lock.unlock() }
+        for index in spans.indices where spans[index].id == id && spans[index].endMs == Int.max {
+            spans[index].endMs = endMs
+        }
+    }
+
+    func overlaps(startMs: Int, endMs: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return spans.contains { $0.startMs <= endMs && startMs <= $0.endMs }
+    }
+}
+
 /// Mic buffers arrive on the render thread; they are only copied there. All
-/// conversion, VAD, analyzer feeding and WAV writing happen on `queue`.
+/// conversion, injection, VAD, analyzer feeding and WAV writing happen on `queue`.
+/// An injected line (the candidate's AI voice) is summed into the mono microphone
+/// samples at the start of `process`, so it takes exactly the path real speech takes.
 final class MicProcessor: @unchecked Sendable {
+    /// One injected line: PCM waiting for conversion, then a FIFO at the mic rate.
+    private final class InjectLine {
+        let id: String
+        let lineRate: Double
+        var pending: [Float] = []   // at the line's rate, not yet converted
+        var fifo: [Float] = []      // at `targetRate`
+        var read = 0
+        var converter: AVAudioConverter?
+        var targetRate = 0.0
+        var carry: UInt8?
+        var receivedFrames: Int64 = 0
+        var ended = false
+        var flushOwed = false   // inject-end arrived before the mic rate was known
+        var started = false
+        var mixedSec = 0.0
+        var lastPositionSec = -1.0
+        var lastCount = 0
+        var fading = false
+        var fadeTotal = 1
+        var fadeLeft = 0
+        init(id: String, lineRate: Double) { self.id = id; self.lineRate = lineRate }
+        var available: Int { fifo.count - read }
+    }
+
+    private static let maxInjectSeconds = 600.0
+    private static let injectTailSec = 0.4
+
     private let queue = DispatchQueue(label: "practice-audio.mic", qos: .userInitiated)
-    private let analyzerFormat: AVAudioFormat
-    private let input: AsyncStream<AnalyzerInput>.Continuation
+    private let analyzerFormat: AVAudioFormat?
+    private let input: AsyncStream<AnalyzerInput>.Continuation?
     private let writer: ProtocolWriter
     private let wav: WavWriter
     private let clock: TimelineClock
+    private let spans: InjectSpans
     private let fail: @Sendable (String) -> Void
     private let wavFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000,
                                           channels: 1, interleaved: true)!
@@ -323,12 +403,17 @@ final class MicProcessor: @unchecked Sendable {
     private var levelCount = 0
     private var timer: DispatchSourceTimer?
     private var stopped = false
+    private var micFormat: AVAudioFormat?
+    private var lines: [InjectLine] = []
+    private var injectTailUntilSec = 0.0
 
-    init(analyzerFormat: AVAudioFormat, input: AsyncStream<AnalyzerInput>.Continuation,
-         writer: ProtocolWriter, wav: WavWriter, clock: TimelineClock,
+    /// `analyzerFormat` and `input` are nil when on-device recognition is unavailable (a call
+    /// without microphone access whose speech assets could not be prepared).
+    init(analyzerFormat: AVAudioFormat?, input: AsyncStream<AnalyzerInput>.Continuation?,
+         writer: ProtocolWriter, wav: WavWriter, clock: TimelineClock, spans: InjectSpans,
          fail: @escaping @Sendable (String) -> Void) {
         self.analyzerFormat = analyzerFormat; self.input = input; self.writer = writer
-        self.wav = wav; self.clock = clock; self.fail = fail
+        self.wav = wav; self.clock = clock; self.spans = spans; self.fail = fail
     }
 
     func startLevelTimer() {
@@ -349,7 +434,8 @@ final class MicProcessor: @unchecked Sendable {
                 self.stopped = true
                 self.timer?.cancel(); self.timer = nil
                 self.analyzerConverter = nil; self.wavConverter = nil
-                self.input.finish()
+                self.lines.removeAll()
+                self.input?.finish()
                 continuation.resume()
             }
         }
@@ -360,9 +446,12 @@ final class MicProcessor: @unchecked Sendable {
             guard !self.stopped, self.muted != value else { return }
             self.muted = value
             if value {
-                if self.vad.speaking { self.emitVad(false, atSec: self.timelineSec) }
-                self.vad.reset()
-                self.levelSumSquares = 0; self.levelCount = 0
+                // An injected line is still "spoken" while muted: keep its VAD and level state.
+                if self.lines.isEmpty {
+                    if self.vad.speaking { self.emitVad(false, atSec: self.timelineSec) }
+                    self.vad.reset()
+                    self.levelSumSquares = 0; self.levelCount = 0
+                }
             } else {
                 self.analyzerNeedsStart = true
                 self.analyzerConverter = nil; self.wavConverter = nil; self.sourceRate = 0
@@ -373,6 +462,213 @@ final class MicProcessor: @unchecked Sendable {
     /// The engine was reconfigured; the next buffer adds the gap as silence.
     func markInterruption() {
         queue.async { self.interrupted = true }
+    }
+
+    // MARK: Injection (the candidate's AI voice mixed into the microphone signal)
+
+    /// Starts a line; a line that is still active is cancelled with a fast fade.
+    func injectStart(id: String, sampleRate: Int) {
+        queue.async {
+            guard !self.stopped else { return }
+            for line in self.lines where !line.fading { self.cancelLine(line, fadeMs: 30) }
+            self.lines.append(InjectLine(id: id, lineRate: Double(sampleRate)))
+        }
+    }
+
+    func injectAudio(id: String, pcm: Data) {
+        queue.async {
+            guard !self.stopped, let line = self.activeLine(id), !line.ended else { return }
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(pcm.count + 1)
+            if let carry = line.carry { bytes.append(carry); line.carry = nil }
+            bytes.append(contentsOf: pcm)
+            if bytes.count % 2 == 1 { line.carry = bytes.removeLast() }
+            let frames = bytes.count / 2
+            guard frames > 0,
+                  Double(line.receivedFrames + Int64(frames)) / line.lineRate <= Self.maxInjectSeconds else { return }
+            line.receivedFrames += Int64(frames)
+            line.pending.reserveCapacity(line.pending.count + frames)
+            for index in 0..<frames {
+                let sample = Int16(bitPattern: UInt16(bytes[index * 2]) | (UInt16(bytes[index * 2 + 1]) << 8))
+                line.pending.append(Float(sample) / 32768)
+            }
+            self.convertPending(line, flush: false)
+        }
+    }
+
+    func injectEnd(id: String) {
+        queue.async {
+            guard !self.stopped, let line = self.activeLine(id), !line.ended else { return }
+            line.ended = true
+            self.convertPending(line, flush: true)
+        }
+    }
+
+    func injectCancel(id: String, fadeMs: Int) {
+        queue.async {
+            guard !self.stopped, let line = self.activeLine(id) else { return }
+            self.cancelLine(line, fadeMs: fadeMs)
+        }
+    }
+
+    /// Every line stops at once (the engine was reconfigured and the monitor is gone).
+    func injectCancelAll() {
+        queue.async {
+            for line in self.lines where !line.fading { self.cancelLine(line, fadeMs: 0) }
+        }
+    }
+
+    private func activeLine(_ id: String) -> InjectLine? {
+        lines.first { $0.id == id && !$0.fading }
+    }
+
+    private func nowMs() -> Int { Int((timelineSec * 1000).rounded()) }
+
+    private func emitInject(_ line: InjectLine, _ state: String, positionMs: Int, atMs: Int) {
+        writer.send(["type": "inject", "utteranceId": line.id, "state": state,
+                     "positionMs": max(0, positionMs), "atMs": max(0, atMs)])
+    }
+
+    private func positionMs(_ line: InjectLine) -> Int { Int((line.mixedSec * 1000).rounded()) }
+
+    /// Reports the cancel now with the position reached; the audible fade finishes in the mix.
+    private func cancelLine(_ line: InjectLine, fadeMs: Int) {
+        guard !line.fading else { return }
+        emitInject(line, "cancelled", positionMs: positionMs(line), atMs: nowMs())
+        spans.close(id: line.id, endMs: Int((timelineSec * 1000).rounded()) + 500)
+        let rate = line.targetRate > 0 ? line.targetRate : (micFormat?.sampleRate ?? line.lineRate)
+        let fadeFrames = Int(rate * Double(fadeMs) / 1000)
+        if fadeFrames <= 0 || line.available == 0 {
+            lines.removeAll { $0 === line }
+        } else {
+            line.fading = true
+            line.fadeTotal = fadeFrames
+            line.fadeLeft = fadeFrames
+        }
+    }
+
+    private func floatBuffer(_ samples: ArraySlice<Float>, format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, samples.count))),
+              let channel = buffer.floatChannelData?[0] else { return nil }
+        for (offset, value) in samples.enumerated() { channel[offset] = value }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        return buffer
+    }
+
+    private func append(_ buffer: AVAudioPCMBuffer, to line: InjectLine) {
+        guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+        line.fifo.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+    }
+
+    /// Converts a flush of an AVAudioConverter (the samples it still holds back).
+    private func flushed(_ converter: AVAudioConverter, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else { return nil }
+        var conversionError: NSError?
+        let status = converter.convert(to: out, error: &conversionError) { _, outStatus in
+            outStatus.pointee = .endOfStream; return nil
+        }
+        guard conversionError == nil, status != .error else { return nil }
+        return out
+    }
+
+    /// Converts what has arrived at the line's rate into the mic-rate FIFO. Waits (keeping the
+    /// samples) until the first mic buffer says what the mic rate is; follows a mic rate change.
+    private func convertPending(_ line: InjectLine, flush: Bool) {
+        // inject-end can come before the first mic buffer: the flush is remembered and done once the mic rate is known.
+        guard let target = micFormat else { if flush { line.flushOwed = true }; return }
+        let flush = flush || line.flushOwed
+        line.flushOwed = false
+        if line.targetRate != target.sampleRate {
+            retarget(line, to: target)
+        }
+        if line.read > 16_384 { line.fifo.removeFirst(line.read); line.read = 0 }
+        if !line.pending.isEmpty {
+            if line.lineRate == target.sampleRate {
+                line.fifo.append(contentsOf: line.pending)
+            } else if let source = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: line.lineRate,
+                                                 channels: 1, interleaved: false) {
+                if line.converter == nil {
+                    line.converter = AVAudioConverter(from: source, to: target)
+                    line.converter?.primeMethod = .none
+                }
+                if let converter = line.converter, let input = floatBuffer(line.pending[...], format: source),
+                   let out = convert(input, with: converter, to: target) {
+                    append(out, to: line)
+                }
+            }
+            line.pending.removeAll(keepingCapacity: true)
+        }
+        if flush, line.lineRate != target.sampleRate, let converter = line.converter,
+           let out = flushed(converter, to: target) {
+            append(out, to: line)
+        }
+    }
+
+    /// The mic rate changed (or became known): resample what is queued and rebuild the converter.
+    private func retarget(_ line: InjectLine, to target: AVAudioFormat) {
+        let oldRate = line.targetRate
+        if oldRate > 0, line.available > 0,
+           let oldFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: oldRate, channels: 1, interleaved: false),
+           let converter = AVAudioConverter(from: oldFormat, to: target),
+           let input = floatBuffer(line.fifo[line.read...], format: oldFormat),
+           let out = convert(input, with: converter, to: target) {
+            let tail = flushed(converter, to: target)
+            line.fifo.removeAll(keepingCapacity: true); line.read = 0
+            append(out, to: line)
+            if let tail { append(tail, to: line) }
+        } else if oldRate > 0 {
+            line.fifo.removeAll(keepingCapacity: true); line.read = 0
+        }
+        line.converter = nil
+        line.targetRate = target.sampleRate
+    }
+
+    /// Sums every line into the mono mic samples (clamped); reports started, position and finished.
+    private func mixInjected(into samples: UnsafeMutablePointer<Float>, frames: Int, rate: Double, startSec: Double) {
+        for line in lines { convertPending(line, flush: false) }
+        let endSec = startSec + Double(frames) / rate
+        for line in lines {
+            let count = min(line.available, frames)
+            if count > 0, !line.fading, !line.started {
+                line.started = true
+                let startMs = Int((startSec * 1000).rounded())
+                spans.open(id: line.id, startMs: startMs)
+                emitInject(line, "started", positionMs: 0, atMs: startMs)
+            }
+            for index in 0..<frames {
+                var gain: Float = 1
+                if line.fading {
+                    guard line.fadeLeft > 0 else { break }
+                    gain = Float(line.fadeLeft) / Float(line.fadeTotal)
+                    line.fadeLeft -= 1
+                }
+                guard index < count else { if line.fading { continue } else { break } }
+                let mixed = samples[index] + line.fifo[line.read + index] * gain
+                samples[index] = min(1, max(-1, mixed))
+            }
+            line.read += count
+            line.lastCount = count
+            line.mixedSec += Double(count) / rate
+        }
+        // Retire lines: faded out, or finished (inject-end received and every sample mixed).
+        var retired: [InjectLine] = []
+        for line in lines {
+            if line.fading {
+                if line.fadeLeft <= 0 || line.available == 0 { retired.append(line) }
+                continue
+            }
+            if line.ended, line.available == 0, line.pending.isEmpty {
+                let finishedSec = startSec + Double(line.lastCount) / rate
+                emitInject(line, "finished", positionMs: positionMs(line), atMs: Int((finishedSec * 1000).rounded()))
+                spans.close(id: line.id, endMs: Int((endSec * 1000).rounded()) + 500)
+                injectTailUntilSec = endSec + Self.injectTailSec
+                retired.append(line)
+            } else if line.started, endSec - line.lastPositionSec >= 0.04 {
+                line.lastPositionSec = endSec
+                emitInject(line, "position", positionMs: positionMs(line), atMs: Int((endSec * 1000).rounded()))
+            }
+        }
+        if !retired.isEmpty { lines.removeAll { line in retired.contains { $0 === line } } }
     }
 
     /// Render-thread entry: copy channel 0 only, then hop to the serial queue.
@@ -394,10 +690,24 @@ final class MicProcessor: @unchecked Sendable {
         queue.async { self.process(mono, arrival: arrival) }
     }
 
+    /// Without microphone access: a silent mic signal of `frames` samples at 16 kHz goes through
+    /// the very same processing, so an injected line still reaches the VAD, analyzer and WAV.
+    func ingestSilence(frames: Int) {
+        guard frames > 0, let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+                                                      channels: 1, interleaved: false),
+              let mono = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = mono.floatChannelData?[0] else { return }
+        channel.update(repeating: 0, count: frames)
+        mono.frameLength = AVAudioFrameCount(frames)
+        let arrival = ProcessInfo.processInfo.systemUptime
+        queue.async { self.process(mono, arrival: arrival) }
+    }
+
     private func emitLevel() {
         guard !stopped else { return }
+        // Nothing accumulates while muted with no injected line, so this reads 0 then.
         var rms = 0.0
-        if !muted, levelCount > 0 { rms = min(1, (levelSumSquares / Double(levelCount)).squareRoot()) }
+        if levelCount > 0 { rms = min(1, (levelSumSquares / Double(levelCount)).squareRoot()) }
         levelSumSquares = 0; levelCount = 0
         writer.send(["type": "level", "rms": (rms * 1000).rounded() / 1000,
                      "atMs": Int((timelineSec * 1000).rounded())])
@@ -454,16 +764,27 @@ final class MicProcessor: @unchecked Sendable {
             analyzerConverter = nil; wavConverter = nil; sourceRate = 0
         }
         lastArrival = arrival
-        if rate != sourceRate || analyzerConverter == nil || wavConverter == nil {
+        if rate != sourceRate || wavConverter == nil || (analyzerFormat != nil && analyzerConverter == nil) {
             sourceRate = rate
-            analyzerConverter = AVAudioConverter(from: mono.format, to: analyzerFormat)
+            if let analyzerFormat {
+                analyzerConverter = AVAudioConverter(from: mono.format, to: analyzerFormat)
+                analyzerConverter?.primeMethod = .none
+            }
             wavConverter = AVAudioConverter(from: mono.format, to: wavFormat)
-            analyzerConverter?.primeMethod = .none
             wavConverter?.primeMethod = .none
         }
+        if micFormat?.sampleRate != rate { micFormat = mono.format }
         let startSec = timelineSec
         timelineSec += duration
-        if muted {
+        // A muted mic is zeroed; an injected line still goes through everything below.
+        let mixing = !lines.isEmpty || startSec < injectTailUntilSec
+        if muted, let samples = mono.floatChannelData?[0] { samples.update(repeating: 0, count: frames) }
+        if mixing, let samples = mono.floatChannelData?[0] {
+            mixInjected(into: samples, frames: frames, rate: rate, startSec: startSec)
+        }
+        if muted, !mixing {
+            if vad.speaking { emitVad(false, atSec: startSec); vad.reset() }
+            analyzerNeedsStart = true
             alignWav(to: timelineSec, samples: nil)
             clock.publish(endSec: timelineSec, arrival: arrival)
             return
@@ -486,21 +807,25 @@ final class MicProcessor: @unchecked Sendable {
                 index += count
             }
         }
-        guard let analyzerConverter, let wavConverter else { fail("capture-failed"); return }
-        guard let forAnalyzer = convert(mono, with: analyzerConverter, to: analyzerFormat),
-              let forWav = convert(mono, with: wavConverter, to: wavFormat) else {
+        guard let wavConverter else { fail("capture-failed"); return }
+        guard let forWav = convert(mono, with: wavConverter, to: wavFormat) else {
             fail("capture-failed"); return
         }
-        if forAnalyzer.frameLength > 0 {
-            let item: AnalyzerInput
-            if analyzerNeedsStart {
-                analyzerNeedsStart = false
-                item = AnalyzerInput(buffer: forAnalyzer, bufferStartTime:
-                    CMTime(value: Int64((startSec * 1_000_000).rounded()), timescale: 1_000_000))
-            } else {
-                item = AnalyzerInput(buffer: forAnalyzer)
+        if let analyzerFormat, let input {
+            guard let analyzerConverter, let forAnalyzer = convert(mono, with: analyzerConverter, to: analyzerFormat) else {
+                fail("capture-failed"); return
             }
-            if case .dropped = input.yield(item) { fail("recognition-failed") } // Never silently lose speech.
+            if forAnalyzer.frameLength > 0 {
+                let item: AnalyzerInput
+                if analyzerNeedsStart {
+                    analyzerNeedsStart = false
+                    item = AnalyzerInput(buffer: forAnalyzer, bufferStartTime:
+                        CMTime(value: Int64((startSec * 1_000_000).rounded()), timescale: 1_000_000))
+                } else {
+                    item = AnalyzerInput(buffer: forAnalyzer)
+                }
+                if case .dropped = input.yield(item) { fail("recognition-failed") } // Never silently lose speech.
+            }
         }
         alignWav(to: timelineSec, samples: forWav)
         clock.publish(endSec: timelineSec, arrival: arrival)
@@ -508,28 +833,26 @@ final class MicProcessor: @unchecked Sendable {
 }
 
 /// Stands in for the microphone when access is denied: the call still runs and the candidate
-/// is simply not heard. The timeline, the level events and the recording length keep moving
-/// exactly as they would with a silent microphone, so nothing downstream needs to know.
+/// is simply not heard. A silent 16 kHz signal is fed through the same MicProcessor a real
+/// microphone uses, so the timeline, the level events and the recording length keep moving
+/// exactly as with a silent microphone and an injected line (the candidate's AI voice) still
+/// goes through the VAD, the analyzer and the recording.
 final class SilentMic: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "practice-audio.silent-mic", qos: .utility)
-    private let writer: ProtocolWriter
-    private let wav: WavWriter
-    private let clock: TimelineClock
-    private let fail: @Sendable (String) -> Void
+    private let queue = DispatchQueue(label: "practice-audio.silent-mic", qos: .userInitiated)
+    private let processor: MicProcessor
     private var timer: DispatchSourceTimer?
     private var startedAt: TimeInterval = 0
+    private var produced: Int64 = 0
     private var stopped = false
 
-    init(writer: ProtocolWriter, wav: WavWriter, clock: TimelineClock, fail: @escaping @Sendable (String) -> Void) {
-        self.writer = writer; self.wav = wav; self.clock = clock; self.fail = fail
-    }
+    init(processor: MicProcessor) { self.processor = processor }
 
     func start() {
         queue.async {
             guard !self.stopped, self.timer == nil else { return }
             self.startedAt = ProcessInfo.processInfo.systemUptime
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
+            timer.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20))
             // Retained until stop() cancels the timer.
             timer.setEventHandler { self.tick() }
             self.timer = timer
@@ -539,13 +862,12 @@ final class SilentMic: @unchecked Sendable {
 
     private func tick() {
         guard !stopped else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        let seconds = max(0, now - startedAt)
-        clock.publish(endSec: seconds, arrival: now)
-        let target = Int64((seconds * Double(WavWriter.sampleRate)).rounded())
-        do { try wav.appendSilence(frames: Int(max(0, target - wav.frames))) }
-        catch { stopped = true; timer?.cancel(); timer = nil; fail("recording-failed"); return }
-        writer.send(["type": "level", "rms": 0, "atMs": Int((seconds * 1000).rounded())])
+        let seconds = max(0, ProcessInfo.processInfo.systemUptime - startedAt)
+        let target = Int64((seconds * 16_000).rounded())
+        let frames = Int(max(0, target - produced))
+        guard frames > 0 else { return }
+        produced += Int64(frames)
+        processor.ingestSilence(frames: frames)
     }
 
     func stop() async {
@@ -774,6 +1096,144 @@ final class SilentMic: @unchecked Sendable {
     }
 }
 
+/// What the candidate hears of an injected line: separate player nodes on the SHARED engine's
+/// main mixer (so voice processing has the sound as echo reference and the real microphone does
+/// not pick it back up). Independent of the interviewer's PlaybackController, so both can sound
+/// at once. The monitor is audio only: it reports nothing and its failures are never fatal,
+/// because the line itself reaches the app through the mic signal.
+@MainActor final class InjectMonitor {
+    private final class Slot {
+        let player = AVAudioPlayerNode()
+        var connectedRate = 0.0
+        var id: String?
+        var rate = 0.0
+        var generation = 0
+        var pending = 0
+        var ended = false
+        var fading = false
+        var carry: UInt8?
+        var fadeTimer: DispatchSourceTimer?
+    }
+
+    private let engine: AVAudioEngine
+    private let slots: [Slot] = (0..<3).map { _ in Slot() }
+    private static let maxSecondsPerLine = 600.0
+
+    init(engine: AVAudioEngine) { self.engine = engine }
+
+    /// Attach and connect before the engine starts.
+    func attach() {
+        for slot in slots { engine.attach(slot.player); connect(slot, rate: 24_000) }
+    }
+
+    /// Re-establish the connections after an engine restart (queued buffers are gone).
+    func reconnect() {
+        for slot in slots {
+            release(slot)
+            connect(slot, rate: slot.connectedRate > 0 ? slot.connectedRate : 24_000)
+        }
+    }
+
+    private func connect(_ slot: Slot, rate: Double) {
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false) else { return }
+        engine.disconnectNodeOutput(slot.player)
+        engine.connect(slot.player, to: engine.mainMixerNode, format: format)
+        slot.connectedRate = rate
+    }
+
+    /// Stops a slot at once and frees it.
+    private func release(_ slot: Slot) {
+        slot.fadeTimer?.cancel(); slot.fadeTimer = nil
+        slot.generation += 1
+        slot.player.stop(); slot.player.reset()
+        slot.player.volume = 1
+        slot.id = nil; slot.fading = false; slot.ended = false; slot.pending = 0; slot.carry = nil
+    }
+
+    private func fadeOut(_ slot: Slot, ms: Int) {
+        guard slot.id != nil, !slot.fading else { return }
+        guard ms > 0 else { release(slot); return }
+        slot.fading = true
+        let steps = max(1, ms / 10)
+        var step = 0
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+        let token = slot.generation
+        timer.setEventHandler { [weak self, weak slot] in
+            Task { @MainActor in
+                guard let self, let slot, slot.generation == token else { return }
+                step += 1
+                if step >= steps { self.release(slot) }
+                else { slot.player.volume = max(0, 1 - Float(step) / Float(steps)) }
+            }
+        }
+        slot.fadeTimer = timer
+        timer.resume()
+    }
+
+    func start(id: String, sampleRate: Int) {
+        for slot in slots where slot.id != nil && !slot.fading { fadeOut(slot, ms: 30) }
+        guard engine.isRunning else { return }
+        let slot = slots.first { $0.id == nil && !$0.fading }
+            ?? slots.first { $0.fading }   // all busy: the oldest fade ends now
+        guard let slot else { return }
+        if slot.fading || slot.id != nil { release(slot) }
+        let rate = Double(sampleRate)
+        slot.player.stop()
+        if slot.connectedRate != rate { connect(slot, rate: rate) }
+        slot.id = id; slot.rate = rate; slot.ended = false; slot.pending = 0; slot.carry = nil
+        slot.generation += 1
+    }
+
+    func audio(id: String, pcm: Data) {
+        guard let index = slots.firstIndex(where: { $0.id == id && !$0.fading && !$0.ended }) else { return }
+        let slot = slots[index]
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(pcm.count + 1)
+        if let carry = slot.carry { bytes.append(carry); slot.carry = nil }
+        bytes.append(contentsOf: pcm)
+        if bytes.count % 2 == 1 { slot.carry = bytes.removeLast() }
+        let frames = bytes.count / 2
+        guard frames > 0, engine.isRunning,
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: slot.rate, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = buffer.floatChannelData?[0] else { return }
+        for i in 0..<frames {
+            let sample = Int16(bitPattern: UInt16(bytes[i * 2]) | (UInt16(bytes[i * 2 + 1]) << 8))
+            channel[i] = Float(sample) / 32768
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        slot.pending += 1
+        let token = slot.generation
+        slot.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in self?.bufferPlayed(index, token) }
+        }
+        if !slot.player.isPlaying { slot.player.play() }
+    }
+
+    func end(id: String) {
+        guard let slot = slots.first(where: { $0.id == id && !$0.fading }) else { return }
+        slot.ended = true
+        if slot.pending == 0 { release(slot) }
+    }
+
+    func cancel(id: String, fadeMs: Int) {
+        guard let slot = slots.first(where: { $0.id == id && !$0.fading }) else { return }
+        fadeOut(slot, ms: fadeMs)
+    }
+
+    func cancelAll() { for slot in slots { release(slot) } }
+
+    func shutdown() { cancelAll() }
+
+    private func bufferPlayed(_ index: Int, _ token: Int) {
+        let slot = slots[index]
+        guard slot.generation == token else { return }
+        slot.pending = max(0, slot.pending - 1)
+        if slot.pending == 0, slot.ended, !slot.fading { release(slot) }
+    }
+}
+
 @available(macOS 26.0, *)
 @MainActor final class PracticeSession {
     private let parentPID: pid_t
@@ -784,6 +1244,9 @@ final class SilentMic: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let clock = TimelineClock()
     private var playback: PlaybackController?
+    private var injectMonitor: InjectMonitor?
+    private let injectSpans = InjectSpans()
+    private var hasMicrophone = false
     private var mic: MicProcessor?
     private var silentMic: SilentMic?
     private var analyzer: SpeechAnalyzer?
@@ -810,6 +1273,13 @@ final class SilentMic: @unchecked Sendable {
         case .pause(let id): playback?.pause(id: id)
         case .resume(let id): playback?.resume(id: id)
         case .mute(let value): muted = value; mic?.setMuted(value)
+        case .inject(let id, let rate):
+            mic?.injectStart(id: id, sampleRate: rate); injectMonitor?.start(id: id, sampleRate: rate)
+        case .injectAudio(let id, let pcm):
+            mic?.injectAudio(id: id, pcm: pcm); injectMonitor?.audio(id: id, pcm: pcm)
+        case .injectEnd(let id): mic?.injectEnd(id: id); injectMonitor?.end(id: id)
+        case .injectCancel(let id, let fadeMs):
+            mic?.injectCancel(id: id, fadeMs: fadeMs); injectMonitor?.cancel(id: id, fadeMs: fadeMs)
         case .stop: finish.yield("stopped")
         }
     }
@@ -824,32 +1294,9 @@ final class SilentMic: @unchecked Sendable {
             }
             try Task.checkCancellation()
             guard !stopped else { return }
-            guard granted else { try startWithoutMicrophone(); return }
+            guard granted else { try await startWithoutMicrophone(); return }
 
-            guard SpeechTranscriber.isAvailable,
-                  let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
-                throw HelperFailure.code("unsupported-locale")
-            }
-            let transcriber = SpeechTranscriber(locale: supportedLocale, transcriptionOptions: [],
-                reportingOptions: [.volatileResults, .fastResults], attributeOptions: [])
-            // Only language-model assets may be downloaded.
-            if await AssetInventory.status(forModules: [transcriber]) != .installed {
-                do {
-                    if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                        try await install.downloadAndInstall()
-                    } else if await AssetInventory.status(forModules: [transcriber]) != .installed {
-                        throw HelperFailure.code("speech-assets")
-                    }
-                } catch { throw HelperFailure.code("speech-assets") }
-            }
-            try Task.checkCancellation()
-            guard !stopped, await AssetInventory.status(forModules: [transcriber]) == .installed,
-                  let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                throw HelperFailure.code("speech-assets")
-            }
-            let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .whileInUse))
-            self.analyzer = analyzer
-            try await analyzer.prepareToAnalyze(in: format)
+            let prepared = try await prepareAnalysis()
             try Task.checkCancellation()
             guard !stopped else { return }
 
@@ -864,41 +1311,16 @@ final class SilentMic: @unchecked Sendable {
             do { try engine.inputNode.setVoiceProcessingEnabled(true) }
             catch { diagnose("voice processing", error); throw HelperFailure.code("capture-failed") }
 
-            let (inputs, continuation) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(100))
-            let micProcessor = MicProcessor(analyzerFormat: format, input: continuation, writer: writer,
-                                            wav: wav, clock: clock) { [weak self] code in
-                Task { @MainActor in self?.fail(code) }
-            }
-            mic = micProcessor
-            let playbackController = PlaybackController(engine: engine, writer: writer, clock: clock) { [weak self] code in
-                self?.fail(code)
-            }
-            playback = playbackController
-            resultsTask = Task { [weak self] in
-                do {
-                    for try await result in transcriber.results {
-                        guard let self, !self.stopped, !Task.isCancelled else { return }
-                        guard !self.muted else { continue }
-                        let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { continue }
-                        guard text.count <= 4000 else { self.fail("recognition-failed"); return }
-                        let start = result.range.start.seconds
-                        let end = CMTimeRangeGetEnd(result.range).seconds
-                        guard start.isFinite, end.isFinite, start >= 0, end >= start,
-                              end < Double(Int.max / 1000) else { self.fail("recognition-failed"); return }
-                        let startMs = Int((start * 1000).rounded())
-                        let endMs = Int((end * 1000).rounded())
-                        self.writer.send(["type": "transcript", "text": text, "segmentId": String(startMs),
-                            "final": result.isFinal, "startMs": startMs, "endMs": endMs])
-                    }
-                } catch { if !Task.isCancelled { self?.fail("recognition-failed") } }
-            }
-            try await analyzer.start(inputSequence: inputs)
+            let continuation = try await startAnalysis(prepared)
             try Task.checkCancellation()
             guard !stopped else { return }
+            let micProcessor = makeMicProcessor(format: prepared.format, input: continuation)
+            let playbackController = makePlayback()
 
             playbackController.attach()
+            injectMonitor?.attach()
             connectMixerToOutput()
+            hasMicrophone = true
             installTap()
             engine.prepare()
             do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("capture-failed") }
@@ -926,25 +1348,126 @@ final class SilentMic: @unchecked Sendable {
             }
         }
         parentTimer = timer; timer.resume()
-        writer.send(["type": "status", "state": "ready"])
+        writer.send(["type": "status", "state": "ready", "inject": true])
+    }
+
+    /// Speech recognition set-up, shared by both paths: on-device assets are checked and the
+    /// analyzer is prepared. Throws a HelperFailure code on failure.
+    /// allowDownload false (no microphone): use the speech assets only if they are already installed, so a call
+    /// without microphone access never waits on a download before it is ready.
+    private func prepareAnalysis(allowDownload: Bool = true) async throws -> (transcriber: SpeechTranscriber, analyzer: SpeechAnalyzer, format: AVAudioFormat) {
+            guard SpeechTranscriber.isAvailable,
+                  let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+                throw HelperFailure.code("unsupported-locale")
+            }
+            let transcriber = SpeechTranscriber(locale: supportedLocale, transcriptionOptions: [],
+                reportingOptions: [.volatileResults, .fastResults], attributeOptions: [])
+            // Only language-model assets may be downloaded.
+            if await AssetInventory.status(forModules: [transcriber]) != .installed {
+                guard allowDownload else { throw HelperFailure.code("speech-assets") }
+                do {
+                    if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                        try await install.downloadAndInstall()
+                    } else if await AssetInventory.status(forModules: [transcriber]) != .installed {
+                        throw HelperFailure.code("speech-assets")
+                    }
+                } catch { throw HelperFailure.code("speech-assets") }
+            }
+            try Task.checkCancellation()
+            guard !stopped, await AssetInventory.status(forModules: [transcriber]) == .installed,
+                  let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                throw HelperFailure.code("speech-assets")
+            }
+            let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .whileInUse))
+            self.analyzer = analyzer
+            try await analyzer.prepareToAnalyze(in: format)
+            try Task.checkCancellation()
+            guard !stopped else { throw CancellationError() }
+        return (transcriber, analyzer, format)
+    }
+
+    /// Feeds the analyzer from a stream the MicProcessor writes to, and forwards its results.
+    private func startAnalysis(_ prepared: (transcriber: SpeechTranscriber, analyzer: SpeechAnalyzer, format: AVAudioFormat))
+        async throws -> AsyncStream<AnalyzerInput>.Continuation {
+        let transcriber = prepared.transcriber
+        let (inputs, continuation) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(100))
+        resultsTask = Task { [weak self] in
+            do {
+                for try await result in transcriber.results {
+                    guard let self, !self.stopped, !Task.isCancelled else { return }
+                    let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !text.isEmpty else { continue }
+                    guard text.count <= 4000 else { self.fail("recognition-failed"); return }
+                    let start = result.range.start.seconds
+                    let end = CMTimeRangeGetEnd(result.range).seconds
+                    guard start.isFinite, end.isFinite, start >= 0, end >= start,
+                          end < Double(Int.max / 1000) else { self.fail("recognition-failed"); return }
+                    let startMs = Int((start * 1000).rounded())
+                    let endMs = Int((end * 1000).rounded())
+                    // A muted mic is silent, except where an injected line was mixed in.
+                    guard !self.muted || self.injectSpans.overlaps(startMs: startMs, endMs: endMs) else { continue }
+                    self.writer.send(["type": "transcript", "text": text, "segmentId": String(startMs),
+                        "final": result.isFinal, "startMs": startMs, "endMs": endMs])
+                }
+            } catch { if !Task.isCancelled { self?.fail("recognition-failed") } }
+        }
+        try await prepared.analyzer.start(inputSequence: inputs)
+        return continuation
+    }
+
+    private func makeMicProcessor(format: AVAudioFormat?, input: AsyncStream<AnalyzerInput>.Continuation?) -> MicProcessor {
+        let processor = MicProcessor(analyzerFormat: format, input: input, writer: writer, wav: wav,
+                                     clock: clock, spans: injectSpans) { [weak self] code in
+            Task { @MainActor in self?.fail(code) }
+        }
+        mic = processor
+        return processor
+    }
+
+    private func makePlayback() -> PlaybackController {
+        let controller = PlaybackController(engine: engine, writer: writer, clock: clock) { [weak self] code in
+            self?.fail(code)
+        }
+        playback = controller
+        injectMonitor = InjectMonitor(engine: engine)
+        return controller
     }
 
     /// Microphone access was refused. The interviewer is still played and the candidate can
     /// type; the input node is never touched, so nothing here can ask for the microphone.
-    private func startWithoutMicrophone() throws {
+    /// A silent signal still goes through the MicProcessor (VAD, analyzer when its assets are
+    /// available, recording), so a line injected in the candidate's AI voice works as with a mic.
+    private func startWithoutMicrophone() async throws {
         FileHandle.standardError.write(Data("practice-audio-helper: no microphone access, running without capture\n".utf8))
-        let playbackController = PlaybackController(engine: engine, writer: writer, clock: clock) { [weak self] code in
-            self?.fail(code)
+        var format: AVAudioFormat?
+        var continuation: AsyncStream<AnalyzerInput>.Continuation?
+        do {
+            let prepared = try await prepareAnalysis(allowDownload: false)
+            try Task.checkCancellation()
+            guard !stopped else { return }
+            continuation = try await startAnalysis(prepared)
+            format = prepared.format
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Recognition is optional here: the call still runs, the line is just not transcribed.
+            diagnose("speech recognition (no microphone)", error)
+            resultsTask?.cancel(); resultsTask = nil
+            await analyzer?.cancelAndFinishNow(); analyzer = nil
+            format = nil; continuation = nil
         }
-        playback = playbackController
+        try Task.checkCancellation()
+        guard !stopped else { return }
+        let micProcessor = makeMicProcessor(format: format, input: continuation)
+        let playbackController = makePlayback()
         playbackController.attach()
+        injectMonitor?.attach()
         connectMixerToOutput()
         engine.prepare()
         do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("playback-failed") }
-        let silent = SilentMic(writer: writer, wav: wav, clock: clock) { [weak self] code in
-            Task { @MainActor in self?.fail(code) }
-        }
+        let silent = SilentMic(processor: micProcessor)
         silentMic = silent
+        micProcessor.startLevelTimer()
         silent.start()
         engineStarted(playbackController)
     }
@@ -962,7 +1485,7 @@ final class SilentMic: @unchecked Sendable {
     }
 
     private func installTap() {
-        guard let mic else { return }
+        guard hasMicrophone, let mic else { return }
         // format: nil taps the input node at its native (voice-processed) output
         // format; the processor reads each buffer's own format and channel 0.
         engine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
@@ -977,9 +1500,11 @@ final class SilentMic: @unchecked Sendable {
         if let last = lastRestartAt, now - last < 10 { fail("capture-failed"); return }
         lastRestartAt = now
         mic?.markInterruption()
+        mic?.injectCancelAll() // The monitor's queued buffers do not survive either.
         playback?.cancelActive() // The queued buffers do not survive a reconfiguration.
-        if mic != nil { engine.inputNode.removeTap(onBus: 0) }
+        if hasMicrophone { engine.inputNode.removeTap(onBus: 0) }
         playback?.reconnect()
+        injectMonitor?.reconnect()
         connectMixerToOutput()
         installTap()
         engine.prepare()
@@ -999,10 +1524,11 @@ final class SilentMic: @unchecked Sendable {
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
         playback?.shutdown()
-        if mic != nil { engine.inputNode.removeTap(onBus: 0) }
+        injectMonitor?.shutdown()
+        if hasMicrophone { engine.inputNode.removeTap(onBus: 0) }
         engine.stop()
+        await silentMic?.stop(); silentMic = nil // Its last silence reaches the mic processor first.
         await mic?.stop(); mic = nil
-        await silentMic?.stop(); silentMic = nil
         resultsTask?.cancel(); resultsTask = nil
         await analyzer?.cancelAndFinishNow(); analyzer = nil
         if let durationMs = wav.finalize() {

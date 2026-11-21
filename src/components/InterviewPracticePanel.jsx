@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Mic } from 'lucide-react';
-import { callLengthMs } from '../practice-call/replayModel.js';
+import { callLengthMs, KIND_LABELS } from '../practice-call/replayModel.js';
 
 // The hub side of practice mode: starts the in-app local voice practice call and
 // lists past calls so a recorded call can be replayed with its feedback.
-const KIND_LABELS = Object.freeze({ 'small-talk': 'Small talk', curveball: 'Curveball', 'off-topic': 'Off-topic', 'follow-up': 'Follow-up', 'questions-for-interviewer': 'Your questions', closing: 'Closing', other: 'Moment' });
 
 const scoreTone = score => (typeof score !== 'number' ? 'text-white/50' : score >= 8 ? 'text-emerald-200' : score >= 5 ? 'text-amber-100' : 'text-red-200');
 const Score = ({ value }) => (typeof value === 'number' ? <span className={`text-[11px] font-semibold ${scoreTone(value)}`}>{value}/10</span> : null);
@@ -13,19 +12,20 @@ const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) |
 const SPOKEN_ONLY_NOTES = new Set(['pace', 'pauses', 'confidence', 'filler', 'fillers']);
 const when = iso => { const date = new Date(iso || ''); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(); };
 
-export function FeedbackView({ feedback, typedOnly = false }) {
+// `compact` leaves out the overall score, summary and priorities, for a screen that already shows them.
+export function FeedbackView({ feedback, typedOnly = false, compact = false }) {
   if (!feedback) return null;
   const allPlanned = [...(feedback.planned || [])];
   const unasked = allPlanned.filter(item => !item.asked);
   const planned = allPlanned.filter(item => item.asked).sort((a, b) => (a.asked === b.asked ? (a.score ?? 11) - (b.score ?? 11) : a.asked ? -1 : 1));
   const communication = Object.entries(feedback.communication || {}).filter(([key, text]) => text && !(typedOnly && SPOKEN_ONLY_NOTES.has(key)));
   return <div className="space-y-2" data-testid="practice-feedback">
-    <p className="text-xs text-white/80"><span className="font-semibold">Overall</span> <Score value={feedback.overall?.score} />{feedback.receivedAt ? <span className="text-[10px] text-white/45"> · {when(feedback.receivedAt)}</span> : null}</p>
-    <p className="text-[11px] text-white/75 whitespace-pre-wrap">{feedback.overall?.summary}</p>
-    {feedback.priorities?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Work on first</p><ol className="list-decimal pl-4 text-[11px] text-amber-100 space-y-0.5">{feedback.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol></div>}
+    {!compact && <p className="text-xs text-white/80"><span className="font-semibold">Overall</span> <Score value={feedback.overall?.score} />{feedback.receivedAt ? <span className="text-[10px] text-white/45"> · {when(feedback.receivedAt)}</span> : null}</p>}
+    {!compact && <p className="text-[11px] text-white/75 whitespace-pre-wrap">{feedback.overall?.summary}</p>}
+    {!compact && feedback.priorities?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Work on first</p><ol className="list-decimal pl-4 text-[11px] text-amber-100 space-y-0.5">{feedback.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol></div>}
     {(planned.length > 0 || unasked.length > 0) && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="break-inside-avoid rounded-md border border-white/10 bg-black/20 p-1.5">
       <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{item.question}</p>
-      {item.askedAs && <p className="text-[10px] text-white/55">Asked as: {item.askedAs}</p>}
+      {!compact && item.askedAs && <p className="text-[10px] text-white/55">Asked as: {item.askedAs}</p>}
       <section className="practice-memorized" aria-label="Memorized answer"><p className="text-[10px] font-semibold uppercase text-white/40">Memorized answer</p>
         {item.covered && <p className="text-[11px] text-white/70">{item.covered}</p>}
         {item.adapted && <p className="text-[11px] text-white/70">Adapting: {item.adapted}</p>}
@@ -39,7 +39,6 @@ export function FeedbackView({ feedback, typedOnly = false }) {
         <ul className="mt-1 list-disc space-y-0.5 pl-4">{unasked.map((item, index) => <li key={index}>{item.question}</li>)}</ul></details>}</div>}
     {feedback.moments?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Rest of the call</p><ul className="space-y-1">{feedback.moments.map((item, index) => <li key={index} className="text-[11px] text-white/75"><span className="text-violet-200">{KIND_LABELS[item.kind] || item.kind}</span> <Score value={item.score} /> · {item.prompt}{item.note ? <span className="text-white/60"> — {item.note}</span> : null}</li>)}</ul></div>}
     {communication.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Communication</p><ul className="space-y-0.5">{communication.map(([key, text]) => <li key={key} className="text-[11px] text-white/75"><span className="capitalize text-violet-200">{key}</span>: {text}</li>)}</ul></div>}
-    {feedback.transcript?.length > 0 && <details className="text-[11px]"><summary className="cursor-pointer text-white/55">Transcript · {feedback.transcript.length} turns</summary><ol className="mt-1 max-h-64 space-y-1 overflow-y-auto">{feedback.transcript.map((turn, index) => <li key={index} className={turn.role === 'candidate' ? 'text-white/85' : 'text-white/60'}><span className="font-semibold">{turn.role === 'candidate' ? 'You' : 'Interviewer'}:</span> {turn.text}</li>)}</ol></details>}
   </div>;
 }
 

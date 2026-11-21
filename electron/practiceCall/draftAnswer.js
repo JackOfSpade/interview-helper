@@ -34,7 +34,8 @@ export function transcriptLines(transcript, { interviewerName = 'Interviewer' } 
     .filter(entry => entry && typeof entry.text === 'string' && entry.text.trim() && !entry.acknowledgement);
   return entries.slice(-TRANSCRIPT_TURNS).map(entry => {
     const who = entry.speaker === 'candidate' ? 'Candidate' : interviewerName;
-    const how = entry.channel === 'chat' ? ' (typed in chat)' : '';
+    // A sent message the candidate's voice spoke on the call was heard, not read.
+    const how = entry.channel === 'chat' && !entry.voiced ? ' (typed in chat)' : '';
     return `${who}${how}: ${clip(entry.text, TURN_MAX)}`;
   });
 }
@@ -66,16 +67,18 @@ export function draftAnswerPrompt(context = {}) {
   const section = (title, body) => (body ? `\n<${title}>\n${body}\n</${title}>\n` : '');
   return [
     `You are ${name || 'the candidate'}, a job candidate in a live video interview for ${brief.role || 'the role'}${brief.company ? ` at ${brief.company}` : ''}.`,
-    'Write the reply you would type into the call chat right now, answering what the interviewer most recently asked or said.',
+    'Write what you would say out loud right now, answering what the interviewer most recently asked or said. It is spoken on the call in your voice, word for word, so write it to be heard, not read.',
     '',
     'How to write it:',
     '- First person, as yourself, in natural spoken English: the way a prepared, confident candidate answers out loud. No headings, lists, markdown, quotation marks around the whole reply, or sign-off.',
+    '- Every sentence is one a person would actually say. Never open a sentence with a label and a colon the way notes or slides do ("Short version: I was wrong", "Leading explanation: the meter", "What\'s changed: the current fell", "To the ground:"); say it as speech instead ("The short version is that I was wrong", "My leading explanation is the meter", "What\'s changed is that the current fell", "and to the ground I\'d say"). The same goes for a dash or semicolon used to stitch notes together. One flowing reply, no paragraph breaks.',
+    '- Say numbers and units the way people say them aloud when it reads oddly otherwise ("about 170 kilograms an hour", "two point nine amps").',
     '- Stay in character the whole time. You are this person speaking from memory, not an assistant reading files: never mention documents, notes, a résumé as a source, a prompt, being an AI, or what you can or cannot say, and never hedge or refuse because something is not written down.',
     '- Build on the career documents below: they are your history, so use their employers, projects, tools and results. Where they do not cover what was asked (why you left a job, a specific story, a number, an opinion, a hobby), make up plausible, specific details that fit them. This reply is for rehearsing the interview, so sounding like a real, well-prepared candidate matters more than sticking to what is written.',
     '- Keep anything you make up consistent with the documents (do not contradict their employers, titles or dates) and with what you have already said in the conversation.',
     '- Answer the question that was asked, directly, the way a strong candidate would.',
     '- Fit the length to the question: a greeting or small talk gets one or two sentences; a behavioural or experience question gets a short story (situation, what you did, the result) in about 80 to 180 words; a technical question gets a clear, direct explanation. Never more than 250 words.',
-    '- If the interviewer asked you to write code or work in the shared pad, describe your approach briefly in chat; the pad text, if any, is below.',
+    '- If the interviewer asked you to write code or work in the shared pad, describe your approach briefly; the pad text, if any, is below.',
     '- The interviewer may be sharing their screen (a problem, a diagram, data, a timeline); its text is below. You can see it, so work from it directly: use its actual numbers, names and details, and never say you cannot see it or ask them to share or paste it.',
     '- If the last thing said is not a question (for example, they are wrapping up or asking if you have questions), reply as a candidate naturally would, using the listing and company to ask one good question when that fits.',
     '- Output only the reply text, nothing before or after it.',
@@ -97,6 +100,8 @@ export function cleanDraft(text) {
   let value = String(text ?? '').trim();
   value = value.replace(/^(?:your reply|reply|candidate|answer)\s*:\s*/iu, '').trim();
   if (value.length > 1 && /^["“]/u.test(value) && /["”]$/u.test(value)) value = value.slice(1, -1).trim();
+  // It is spoken as one flowing reply: measured 2026-11-21, the prompt alone left paragraph breaks in 39 of 52 replies.
+  value = value.replace(/\s*\n+\s*/gu, ' ').trim();
   if (value.length > DRAFT_ANSWER_MAX_CHARS) {
     const cut = value.slice(0, DRAFT_ANSWER_MAX_CHARS);
     const end = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('? '), cut.lastIndexOf('! '));
