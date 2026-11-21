@@ -1207,6 +1207,88 @@ export default [
     },
   },
   {
+    name: 'practice call render: the wand keeps spinning until its line starts playing, through a pause that holds it, and stops when the line is given up on',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          let answer = null;
+          let release;
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }];
+          let paused = false;
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, paused });
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            sendChat: async (text, options) => {
+              if (paused) return { ...current(), paused: true };
+              sent.push({ text, options });
+              chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 2000, voice: 'waiting' }];
+              return current();
+            },
+            setTyping: async () => {},
+            draftAnswer: () => new Promise(resolve => { release = () => resolve(answer); }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = () => act(() => new Promise(resolve => setTimeout(resolve, 5)));
+          const spinning = () => !!byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]') && byLabel('Suggest a reply').disabled === true;
+          const setVoice = async (id, voice) => { chat = chat.map(item => (item.id === id ? { ...item, voice } : item)); await act(() => pushState?.(current())); await settle(); };
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Suggest a reply').click());
+            answer = { text: 'A line in my voice.' };
+            await act(() => release());
+            await settle();
+            assert(sent.length === 1, "the reply is sent");
+            assert(spinning(), 'the reply is sent but not heard yet: still spinning');
+            await act(() => pushState?.(current()));
+            await settle();
+            assert(spinning(), 'a state where the line still waits keeps it spinning');
+            await setVoice('m1', 'playing');
+            assert(!spinning(), 'the line started playing: the wand is back');
+            // Ready during a pause: held, still spinning, sent on resume, and spinning until heard.
+            paused = true;
+            await act(() => pushState?.(current()));
+            await act(() => byLabel('Suggest a reply').click());
+            answer = { text: 'Held line.' };
+            await act(() => release());
+            await settle();
+            assert(sent.length === 1 && spinning(), 'held through the pause, still spinning');
+            paused = false;
+            await act(() => pushState?.(current()));
+            await settle();
+            assert(sent.length === 2 && spinning(), 'sent on resume, still spinning until it is heard');
+            await setVoice('m2', 'failed');
+            assert(!spinning(), 'a line given up on stops the spinner');
+            // No voice on the call: the entry never waits, so the wand is back as soon as it is sent.
+            window.practiceCallAPI.sendChat = async text => { sent.push({ text }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 3000 }]; return current(); };
+            await act(() => byLabel('Suggest a reply').click());
+            answer = { text: 'Typed only.' };
+            await act(() => release());
+            await settle();
+            assert(sent.length === 3 && !spinning(), 'without a voice nothing is waited for');
+            // Everyone leaving stops the wait.
+            window.practiceCallAPI.sendChat = async text => { sent.push({ text }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 4000, voice: 'waiting' }]; return current(); };
+            await act(() => byLabel('Suggest a reply').click());
+            answer = { text: 'Last words.' };
+            await act(() => release());
+            await settle();
+            assert(spinning());
+            await act(() => pushState?.({ ...current(), interviewerLeft: true }));
+            await settle();
+            assert(!byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'nobody is left to hear it');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
     name: 'practice call render: chat sends on Enter, keeps Shift+Enter for new lines, reports typing only while the draft has text, and clears the unread dot when opened',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');

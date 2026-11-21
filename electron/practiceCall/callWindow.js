@@ -249,6 +249,14 @@ export function createPracticeCallController(deps = {}) {
       if (!args || typeof args.nodeId !== 'string' || !args.nodeId) throw new TypeError('Practice calls require a node id.');
       return service.list(args.nodeId);
     }));
+    ipcMain.handle('practice-call:list-saved', guardCanvas(async args => {
+      if (!args || typeof args.nodeId !== 'string' || !args.nodeId) throw new TypeError('Saved interviews require a node id.');
+      return typeof service.listSaved === 'function' ? service.listSaved(args.nodeId) : [];
+    }));
+    ipcMain.handle('practice-call:remove-saved', guardCanvas(async args => {
+      if (!args || typeof args.nodeId !== 'string' || !args.nodeId || typeof args.id !== 'string') throw new TypeError('Removing a saved interview requires a node id and its id.');
+      return typeof service.removeSaved === 'function' ? service.removeSaved(args.nodeId, args.id) : false;
+    }));
     for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, guardWindow(handler));
   }
   /**
@@ -274,7 +282,7 @@ export function createPracticeCallController(deps = {}) {
     getWindow: () => (windowAlive() ? win : null),
     dispose() {
       if (registerIpc) {
-        for (const channel of ['practice-call:start', 'practice-call:open-replay', 'practice-call:list', ...Object.keys(handlers)]) {
+        for (const channel of ['practice-call:start', 'practice-call:open-replay', 'practice-call:list', 'practice-call:list-saved', 'practice-call:remove-saved', ...Object.keys(handlers)]) {
           try { ipcMain.removeHandler(channel); } catch { /* not registered */ }
         }
       }

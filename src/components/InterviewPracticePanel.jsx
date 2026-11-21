@@ -11,6 +11,16 @@ const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) |
 // Communication notes that need spoken answers to mean anything.
 const SPOKEN_ONLY_NOTES = new Set(['pace', 'pauses', 'confidence', 'filler', 'fillers']);
 const when = iso => { const date = new Date(iso || ''); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(); };
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+/** One saved interview in the chooser: who runs it, what it covers and when it was last held. */
+function savedInterviewLabel(item) {
+  const lead = item?.lead?.name ? `${item.lead.name}${item.lead.role ? ` (${item.lead.role})` : ''}` : 'Interviewer';
+  const others = Array.isArray(item?.panel) && item.panel.length ? ` + ${plural(item.panel.length, 'colleague')}` : '';
+  const parts = [`${lead}${others}`, plural(Number(item?.questionCount) || 0, 'question')];
+  if (Number(item?.problemCount) > 0) parts.push(plural(Number(item.problemCount), 'problem'));
+  if (Number(item?.minutes) > 0) parts.push(`~${item.minutes} min`);
+  return parts.join(' · ');
+}
 
 // `compact` leaves out the overall score, summary and priorities, for a screen that already shows them.
 export function FeedbackView({ feedback, typedOnly = false, compact = false }) {
@@ -53,7 +63,20 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   };
   const [pastCalls, setPastCalls] = useState([]);
   const [pastNotice, setPastNotice] = useState(null);
+  // Interviews held before for this job and company: after Start, the candidate picks a new one or one of these again.
+  const [savedInterviews, setSavedInterviews] = useState([]);
+  const [choosing, setChoosing] = useState(false);
   const api = typeof window !== 'undefined' ? window.electronAPI : null;
+  const savedReady = typeof api?.listSavedPracticeInterviews === 'function';
+  const loadSaved = useCallback(async () => {
+    if (!savedReady) return [];
+    try {
+      const result = await api.listSavedPracticeInterviews({ nodeId });
+      const list = Array.isArray(result) ? result.filter(item => item && typeof item.id === 'string') : [];
+      setSavedInterviews(list);
+      return list;
+    } catch { return null; }
+  }, [api, nodeId, savedReady]);
 
   // Past practice calls are local: list them whenever the hub mounts (and after
   // a call finishes) so a replay opens without leaving this panel.
@@ -68,21 +91,35 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   const pastCallsReady = typeof api?.listPracticeCalls === 'function';
   useEffect(() => {
     if (!pastCallsReady) return undefined;
-    const timer = setTimeout(() => { void loadPastCalls(); }, 0);
+    const timer = setTimeout(() => { void loadPastCalls(); if (savedReady) void loadSaved(); }, 0);
     const unsubscribe = typeof api.onPracticeCallUpdated === 'function' ? api.onPracticeCallUpdated(event => { if (!event || !event.nodeId || event.nodeId === nodeId) void loadPastCalls(); }) : null;
     const onFocus = () => { void loadPastCalls(); };
     window.addEventListener('focus', onFocus);
     return () => { clearTimeout(timer); if (typeof unsubscribe === 'function') unsubscribe(); window.removeEventListener('focus', onFocus); };
-  }, [api, nodeId, pastCallsReady, loadPastCalls]);
+  }, [api, nodeId, pastCallsReady, loadPastCalls, savedReady, loadSaved]);
+  // Start: with interviews held before for this job, the candidate chooses first; otherwise a new one starts at once.
   const startCall = async () => {
     if (typeof api?.startPracticeCall !== 'function' || practiceBusy) return;
+    setPastNotice(null);
+    if (savedReady) {
+      setPracticeBusy(true);
+      const list = await loadSaved();
+      setPracticeBusy(false);
+      if ((list ?? savedInterviews).length) { setChoosing(true); return; }
+    }
+    await launch(null);
+  };
+  const launch = async repeatInterviewId => {
+    if (typeof api?.startPracticeCall !== 'function') return;
+    setChoosing(false);
     setPracticeBusy(true);
     setPastNotice(null);
     const focus = steeringText.trim();
     try {
       const result = await api.startPracticeCall({
         nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest,
-        ...(focus ? { steering: focus } : {}),
+        // A repeat keeps the steering it was planned with; the box steers only a new interview.
+        ...(repeatInterviewId ? { repeatInterviewId } : focus ? { steering: focus } : {}),
       });
       if (result && result.success === false) setPastNotice(result.error || 'The practice call could not start.');
       // A call that could not start comes back as an error state and opens no window,
@@ -90,7 +127,13 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
       else if (result?.phase === 'error') setPastNotice(result.error?.message || 'The practice call could not start.');
       else if (result?.note) setPastNotice(result.note);
     } catch (error) { setPastNotice(error?.message || 'The practice call could not start.'); }
-    finally { setPracticeBusy(false); }
+    finally { setPracticeBusy(false); void loadSaved(); }
+  };
+  const forgetSaved = async id => {
+    if (typeof api?.removeSavedPracticeInterview !== 'function') return;
+    try { await api.removeSavedPracticeInterview({ nodeId, id }); } catch (error) { setPastNotice(error?.message || 'The saved interview could not be removed.'); }
+    const list = await loadSaved();
+    if (Array.isArray(list) && !list.length) setChoosing(false);
   };
   const openReplay = async callId => {
     if (typeof api?.openPracticeReplay !== 'function' || !callId) return;
@@ -111,7 +154,27 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
         <span className="text-[10px] font-semibold uppercase text-white/45">Steer this interview (optional)</span>
         <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30 disabled:opacity-50" rows={3} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} disabled={!canCall} placeholder={'e.g. "First recruiter screen: light questions, no deep technicals" or "Final round before an offer: ask my salary expectations"'} aria-label="Steer this interview (optional)" />
       </label>
-      <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>
+      {choosing ? <div className="space-y-1.5 rounded-md border border-violet-300/20 bg-violet-500/5 p-2" aria-label="Choose an interview">
+        <p className="text-[11px] text-white/75">You have practised this job before. Start a new interview, or take one of the earlier ones again exactly as it was.</p>
+        <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={() => launch(null)} disabled={!canCall}>Generate a new interview</button>
+        <p className="text-[10px] font-semibold uppercase text-white/45">Or repeat an earlier one</p>
+        <ul className="space-y-1">{savedInterviews.map(item => <li key={item.id} className="rounded-md border border-white/10 bg-black/20 p-1.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 text-[11px] text-white/75">
+              <p className="truncate">{savedInterviewLabel(item)}</p>
+              <p className="text-[10px] text-white/45">Last held {(Number(item.lastUsedAt) > 0 && when(new Date(Number(item.lastUsedAt)).toISOString())) || 'earlier'}{Number(item.timesUsed) > 1 ? ` · held ${item.timesUsed} times` : ''}</p>
+              {item.steering && <p className="truncate text-[10px] text-white/45" title={item.steering}>Steered: {item.steering}</p>}
+            </div>
+            <div className="flex shrink-0 gap-1">
+              <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-white/5 disabled:opacity-40" onClick={() => launch(item.id)} disabled={!canCall} aria-label={`Repeat the interview with ${item?.lead?.name || 'this interviewer'}`}>Repeat</button>
+              <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50 hover:bg-white/5 disabled:opacity-40" onClick={() => forgetSaved(item.id)} disabled={practiceBusy} aria-label={`Forget the interview with ${item?.lead?.name || 'this interviewer'}`}>Forget</button>
+            </div>
+          </div>
+        </li>)}</ul>
+        <p className="text-[10px] text-white/40">A repeat uses the same interviewers, questions and screens, and the steering it was planned with.</p>
+        <button type="button" className="nodrag text-[10px] text-white/50 underline hover:text-white/70" onClick={() => setChoosing(false)}>Cancel</button>
+      </div>
+        : <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>}
       {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; the call uses the prepared questions and answers.</p>}
       <div aria-label="Past calls">
         <p className="text-[10px] font-semibold uppercase text-white/45">Past calls</p>

@@ -381,6 +381,40 @@ posting (`practice-question-history.json`). The planner favours entries asked
 least, so repeated practice goes through the pool. For a topic the interviewer
 makes up its own question or exercise each call.
 
+## Holding the same interview again (built 2026-11-21)
+
+Every answered practice call keeps the interview it was made from, so the same
+interview can be taken again without drawing voices or planning anew
+(`electron/practiceCall/savedInterviews.js`, `<interview-data>/practice-interviews/<id>/`).
+Kept: the drawn interviewer voices, the planner's plan, each colleague's late-join
+draw, the candidate voices, the steering it was planned with, the prepared
+questions it picked (id, text and answer) and its screens' pictures and diagrams
+(`visuals/`). Saved when the call is answered (`keepInterview`); a missed or
+failed setup keeps nothing.
+
+- **Choice.** After Start practice call, a job and company that has kept
+  interviews shows a choice in the hub panel: Generate a new interview, or Repeat
+  one of the earlier ones (lead, colleagues, questions, length, last held), or
+  Forget one. With none kept the call starts at once, as before. A repeat passes
+  `repeatInterviewId` to `practice-call:start`; it keeps the steering it was
+  planned with and the box's steering is not sent.
+- **Same job and company** is the posting key the question history uses
+  (`postingCountsKey`: company + job link + role title, else the interview id).
+  A kept interview of another job is refused (`saved-interview-unavailable`).
+- **Replay of the setup.** The setup step skips the voice draws, the planner
+  and the visuals; warm-ups, sessions, audio and the ring run as always. Plan
+  question numbers are positions in the pool of the first call, so each is found
+  again by card id and wording in today's pool; a card removed or reworded since
+  joins this call's pool as it was, since the plan's probes and screens were written for it. A voice that has left the library fails the warm-up as before.
+  The repeat's `call.json` has `repeatOf`; it is not kept a second time, it moves
+  to the front of the queue (`lastUsedAt`, `timesUsed`). Asked questions still
+  count in the question history.
+- **How many are kept.** Measured 2026-11-21 on the calls on disk, a kept
+  interview's JSON is 4–25 KB; a diagram adds a few KB and a photo up to 5 MB
+  (at most 4 per interview). So 5 are kept per job and company and 40 in all,
+  under a 100 MB budget that only photo-heavy interviews reach. The least
+  recently held goes first; the one just saved is never removed.
+
 ## Removed: the live cue card (2026-11-20)
 
 The always-on-top live window that listened to the interview audio, matched each
@@ -400,7 +434,7 @@ not deleted by code.
   files, plus the Claude worker's bookkeeping (`non-api-ai-handoffs.json`,
   `claude-accounts/`, usage and replay logs).
 - **Interview data** (`~/Library/Application Support/Interview Helper/interview-data`):
-  `career-text`, `interview-helper-*`, `practice-calls`, `practice-models`,
+  `career-text`, `interview-helper-*`, `practice-calls`, `practice-interviews`, `practice-models`,
   `practice-voice-pool.json`, `practice-question-history.json` and the list of
   interviews in `interview-helper-sessions.json`.
 - **First start after the split**: `electron/interviewApp/migrateFromCanvas.js`

@@ -162,6 +162,11 @@ function heardFor(reply, positionMs) {
  * were heard (word counts, since the heard text is the voice's timed words with tags removed). Messages heard
  * whole are left out; one never reached has heard ''. Only messages with a chat id are listed.
  */
+/** The chat ids of the sent messages a candidate-voice line was made from (messages without one are left out). */
+function chatIdsOf(texts) {
+  return (texts || []).map(entry => entry?.chatId).filter(id => typeof id === 'string' && id);
+}
+
 function heardByMessage(texts, heard) {
   let left = tokens(heard).length;
   const out = [];
@@ -473,12 +478,22 @@ export function createPracticeCallEngine({
    * force unless this reply wrote its own. (<listen/> is the other silence: the line is unfinished and is not kept here.)
    * A typed line follows the same rule: a sent message is finished, so <listen/> on it counts as <pass/>.
    */
+  /**
+   * A typed turn is answered: the sent messages still queued are let go. Without a voice they are in the turn already;
+   * with one they were never spoken (speakTyped takes what it says), so their chat entries are marked unsaid.
+   */
+  function dropPendingTyped() {
+    const dropped = pendingTyped;
+    pendingTyped = [];
+    if (candidateVoice && dropped.length) emit({ type: 'candidate-voice', state: 'cut', heardChars: 0, messages: heardByMessage(dropped, '') });
+  }
+
   function keepPassedLine(reply) {
     const span = candidateSpan();
     noteAnswer(reply.candidates);
     for (const entry of reply.candidates) addEntry({ ...entry }); // a typed turn's entries include any spoken words it overtook
     turnStartMs = Math.max(turnStartMs, span.endMs + 1);
-    if (reply.typed) { pendingTyped = []; markTurnConsumed(); }
+    if (reply.typed) { dropPendingTyped(); markTurnConsumed(); }
     candidateSpoke = false;
     clearLiveAnswer();
     markNotesDelivered(reply);
@@ -1698,7 +1713,7 @@ export function createPracticeCallEngine({
     const fromMs = turnStartMs;
     let cutEntry = null;
     for (const entry of reply.candidates) cutEntry = addEntry({ ...entry });
-    if (reply.typed) pendingTyped = [];
+    if (reply.typed) dropPendingTyped();
     if (reply.padSnapshot !== null) {
       // The main session has now been told this text. A paused-acknowledgement message carries no
       // pad note, so it leaves the text owed for the next turn.
@@ -2919,7 +2934,7 @@ export function createPracticeCallEngine({
       pendingTyped = [...texts, ...pendingTyped];
       return speakTyped(undefined, tries + 1);
     }
-    emit({ type: 'error', code: 'candidate-voice-failed' });
+    emit({ type: 'error', code: 'candidate-voice-failed', chatIds: chatIdsOf(texts) });
     if (pendingTyped.length) return speakTyped();
     deliverVoiced();
   }
@@ -2954,6 +2969,8 @@ export function createPracticeCallEngine({
       unschedule(utterance.startTimer);
       utterance.startTimer = null;
       armSaidFinishWatch(utterance);
+      // The line is now heard: the window stops waiting on it (the wand's spinner runs until here).
+      emit({ type: 'candidate-voice', state: 'started', chatIds: chatIdsOf(utterance.texts) });
       return;
     }
     if (event.state === 'finished') return saidEnded(utterance, utterance.stopping ? livePosition(utterance) : Infinity, event.atMs);
@@ -3216,7 +3233,7 @@ export function createPracticeCallEngine({
       injectQueue = [...texts, ...injectQueue];
       return startInject(tries + 1);
     }
-    emit({ type: 'error', code: 'candidate-voice-failed' });
+    emit({ type: 'error', code: 'candidate-voice-failed', chatIds: chatIdsOf(texts) });
     if (injectQueue.length) return startInject();
     if (resumeDeferredTurnEnd()) return;
     armSilence();
@@ -3242,6 +3259,7 @@ export function createPracticeCallEngine({
       // A line that begins while an interviewer is already speaking is talking over them on purpose.
       utterance.overInterviewer = !!(current && current.playbackStarted);
       armInjectWatch(utterance);
+      emit({ type: 'candidate-voice', state: 'started', injected: true, chatIds: chatIdsOf(utterance.texts) });
       return;
     }
     if (event.state === 'finished') return endInjected(utterance, Infinity);

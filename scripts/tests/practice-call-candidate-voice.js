@@ -922,4 +922,80 @@ test('injected: a helper that cannot inject keeps the old app-played path', asyn
   assert(rig.engine.state().transcript.some(item => item.voiced), 'the AI-voice entry exists on the fallback');
 });
 
+test('a line reports when it starts playing, naming its messages, so the window stops waiting only then', async () => {
+  const { rig, voice } = await voicedRig();
+  rig.engine.typed('First answer.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  line.audioCb(Buffer.alloc(48000 * 4));
+  line.wordsCb(timed(line.text));
+  line.finish();
+  await flush();
+  assert(!rig.of('candidate-voice').some(item => item.state === 'started'), 'audio arriving is not the line being heard');
+  rig.h.playback(line.utteranceId, 'started');
+  rig.h.playback(line.utteranceId, 'started');
+  await flush();
+  assert.deepEqual(rig.of('candidate-voice').filter(item => item.state === 'started').map(item => item.chatIds), [['m1']], 'once, when the helper starts playing it');
+  // Two messages queued behind a line are spoken as one line: it names both.
+  rig.engine.typed('Second.', { chatId: 'm2' });
+  rig.engine.typed('Third.', { chatId: 'm3' });
+  await flush();
+  rig.h.playback(line.utteranceId, 'finished', 900);
+  await flush();
+  await playLine(rig, voice.lines[1]);
+  assert.deepEqual(rig.of('candidate-voice').filter(item => item.state === 'started').at(-1).chatIds, ['m2', 'm3']);
+});
+
+test('a message queued behind a line the interviewer cuts into is let go as unsaid, so nothing waits on it', async () => {
+  const { rig, voice } = await voicedRig({ cutInFirstMs: 1000, cutInEveryMs: 1000, cutInMinLeftMs: 0 });
+  rig.engine.typed('So the first thing we did was move every job onto one queue and then we split the workers by region', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await playLine(rig, line);
+  rig.engine.typed('And a second thought.', { chatId: 'm2' });
+  await flush();
+  rig.h.playback(line.utteranceId, 'position', 1250);
+  await flush();
+  rig.sessions.main.answer('Sorry to jump in, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const cuts = rig.of('candidate-voice').filter(item => item.state === 'cut');
+  assert(cuts.some(item => item.messages.some(message => message.chatId === 'm1')), 'the cut line is cut in the chat');
+  assert(cuts.some(item => item.messages.some(message => message.chatId === 'm2' && message.heard === '')), 'the queued message is marked never said');
+  assert.equal(voice.lines.length, 1, 'it is not spoken after the cut');
+});
+
+test('a line the voice gives up on names its messages in the failure', async () => {
+  const { rig, voice } = await voicedRig();
+  rig.engine.typed('A line that fails.', { chatId: 'm7' });
+  await flush();
+  voice.lines[0].fail();
+  await flush();
+  voice.lines[1].fail();
+  await flush();
+  assert.deepEqual(rig.of('error').filter(item => item.code === 'candidate-voice-failed').map(item => item.chatIds), [['m7']]);
+  assert(!rig.of('candidate-voice').some(item => item.state === 'started'));
+});
+
+test('injected: a line reports when the helper starts mixing it, naming its messages; a failure names them too', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  await injectLine(rig, voice.lines[0], false);
+  assert(!rig.of('candidate-voice').some(item => item.state === 'started'), 'not before the helper starts it');
+  rig.h.inject(voice.lines[0].utteranceId, 'started');
+  await flush();
+  const started = rig.of('candidate-voice').filter(item => item.state === 'started');
+  assert.deepEqual(started.map(item => [item.injected, item.chatIds]), [[true, ['m1']]]);
+  rig.h.inject(voice.lines[0].utteranceId, 'finished', 4000);
+  await flush();
+  rig.engine.typed('A line that fails.', { chatId: 'm2' });
+  await flush();
+  voice.lines[1].fail();
+  await flush();
+  voice.lines[2].fail();
+  await flush();
+  assert.deepEqual(rig.of('error').filter(item => item.code === 'candidate-voice-failed').map(item => item.chatIds), [['m2']]);
+});
+
 export default cases;

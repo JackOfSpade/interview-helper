@@ -5,6 +5,7 @@ import syncFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createCallStore } from '../../electron/practiceCall/callStore.js';
+import { createSavedInterviewStore } from '../../electron/practiceCall/savedInterviews.js';
 import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { createPracticeCallService, generatedRunFor, stampInjectedLines, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
@@ -244,7 +245,8 @@ test('hang-up finalises in order and deletes WAVs only with audio', async () => 
   const state = await service.hangUp();
   assert.equal(state.phase, 'replay');
   assert.deepEqual(finished.filter(op => op.startsWith('write:') || op === 'afconvert' || op === 'analyze'),
-    ['write:call.json', 'afconvert', 'write:call.json', 'analyze', 'write:analysis.json']);
+    // The interview is kept for holding again when the call is answered, before anything of the hang-up.
+    ['write:interview.json', 'write:call.json', 'afconvert', 'write:call.json', 'analyze', 'write:analysis.json']);
   const analysisAt = finished.indexOf('write:analysis.json');
   assert.equal(finished.indexOf('unlink:candidate.wav') > analysisAt, true);
   assert.equal(finished.indexOf('unlink:interviewer.wav') > analysisAt, true);
@@ -2568,6 +2570,201 @@ test('panel: a colleague who never joined has a null join time and every way a c
       assert.equal(record.panel[0].joinedAtMs, null);
     }
   }
+});
+
+test('panel: a pause holds a late colleague\'s wait on the call clock, and the resume waits only for what is left', async () => {
+  const setup = panelHarness({ random: () => 0.1 });
+  const built = await panelStart(setup);
+  await built.service.answer();
+  const engine = setup.engineOptions[0].onEvent;
+  const [first] = setup.clock.lateTimers();
+  assert.equal(first.ms, 57000);
+  setup.clock.setNow(1000 + 20000);
+  engine({ type: 'paused', paused: true });
+  assert.equal(first.cleared, true, 'the pause stops the wait');
+  // However long the pause, nobody joins during it, even from a timer a clock failed to clear.
+  setup.clock.setNow(1000 + 20000 + 300000);
+  first.cleared = false;
+  setup.clock.fire(first);
+  assert.deepEqual(built.service.getState().participants.map(item => item.id), ['A'], 'nobody joins a paused call');
+  assert.equal(setup.clock.pending().filter(timer => timer !== first && timer.ms === 37000).length, 0, 'no wait is armed while paused');
+  engine({ type: 'paused', paused: false });
+  const resumed = setup.clock.pending().filter(timer => timer.ms === 37000);
+  assert.equal(resumed.length, 1, 'the resume waits for the 37 s left of the 57 s');
+  // A second resume event, or a pause state set to what it already is, arms nothing more.
+  engine({ type: 'paused', paused: false });
+  assert.equal(setup.clock.pending().filter(timer => timer.ms === 37000).length, 1);
+  setup.clock.setNow(setup.clock.now() + 37000);
+  setup.clock.fire(resumed[0]);
+  assert.deepEqual(built.service.getState().participants.map(item => item.id), ['A', 'B'], 'the colleague joins 57 s into the call as its clock counts it');
+  assert.deepEqual(setup.engineCalls, ['joined:B']);
+});
+
+test('with a candidate voice each sent message waits on it until its line starts playing or is given up on', async () => {
+  const typed = [];
+  const setup = panelHarness({ random: () => 0.1, deps: {
+    candidateVoices: true,
+    candidateVoice: () => ({ open() { throw new Error('not opened here'); } }),
+  } });
+  setup.overrides.engineFactory = options => {
+    setup.engineOptions.push(options);
+    return { start() {}, hangUp() {}, helperEvent() {}, typed: (text, flags) => { typed.push(flags); return true; }, participantJoined() {}, state: () => ({ transcript: [], elapsedMs: 0 }) };
+  };
+  const built = await panelStart(setup);
+  await built.service.answer();
+  assert(setup.engineOptions[0].candidateVoice, 'the engine has the candidate voice');
+  const engine = setup.engineOptions[0].onEvent;
+  let state = built.service.sendChat('First.', { generated: true });
+  assert.equal(state.chat.at(-1).voice, 'waiting', 'the returned state already shows the message waiting');
+  built.service.sendChat('Second.');
+  built.service.sendChat('Third.');
+  const [a, b, c] = typed.map(flag => flag.chatId);
+  engine({ type: 'candidate-voice', state: 'speaking', chars: 6 });
+  assert.equal(built.service.getState().chat.find(item => item.id === a).voice, 'waiting', 'the voice being written is not the line being heard');
+  engine({ type: 'candidate-voice', state: 'started', chatIds: [a] });
+  state = built.service.getState();
+  assert.deepEqual(state.chat.filter(item => item.from === 'candidate').map(item => item.voice), ['playing', 'waiting', 'waiting']);
+  engine({ type: 'error', code: 'candidate-voice-failed', chatIds: [b] });
+  state = built.service.getState();
+  assert.equal(state.chat.find(item => item.id === b).voice, 'failed');
+  assert.equal(state.notice?.code, 'candidate-voice-failed', 'the failure is still shown');
+  // A message cut before it was ever heard (a pause on the injected path) is given up on too.
+  engine({ type: 'candidate-voice', state: 'cut', heardChars: 0, injected: true, messages: [{ chatId: c, heard: '' }] });
+  assert.deepEqual(built.service.getState().chat.find(item => item.id === c), { ...built.service.getState().chat.find(item => item.id === c), unsaid: true, voice: 'failed' });
+  // The interviewer ending the call lets go of anything still waiting.
+  built.service.sendChat('Fourth.');
+  assert.equal(built.service.getState().chat.at(-1).voice, 'waiting');
+  engine({ type: 'ended', reason: 'interviewer' });
+  assert.equal(built.service.getState().chat.at(-1).voice, 'failed');
+});
+
+test('without a candidate voice a sent message never waits on one', async () => {
+  const setup = panelHarness({ random: () => 0.1 });
+  const built = await panelStart(setup);
+  await built.service.answer();
+  const state = built.service.sendChat('Plain typed line.');
+  assert.equal('voice' in state.chat.at(-1), false);
+});
+
+// --- holding the same interview again ----------------------------------------
+
+const OTHER_CARD = Object.freeze({ id: 'q0', question: 'Why this team?', answer: 'Because of the work.' });
+const waitFor = async (check, label) => {
+  for (let i = 0; i < 100; i += 1) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+  assert.fail(`timed out waiting: ${label}`);
+};
+/** A panel service that keeps its interviews in `saved`; `extra` replaces deps (cards, posting key, random). */
+async function savedPanel(saved, { random = () => 0.1, extra = {} } = {}) {
+  const setup = panelHarness({ random, deps: { savedInterviews: saved, ...extra } });
+  const started = await startOf({ modelReady: true, deps: setup.overrides });
+  return { setup, ...started };
+}
+
+test('saved interviews: an answered call is kept, and a repeat for the same job holds it again with nothing drawn or planned', async () => {
+  const saved = createSavedInterviewStore({ rootDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews') });
+  const first = await savedPanel(saved);
+  assert.deepEqual(await first.service.listSaved('node-1'), [], 'nothing is kept before a call is answered');
+  await first.service.start(ARGS);
+  const persona = first.service.getState().persona.name;
+  await first.service.answer();
+  assert.equal(first.setup.clock.lateTimers()[0].ms, 57000);
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'the interview is kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  assert.equal(kept.lead.name, 'Nora Lead');
+  assert.deepEqual(kept.panel.map(item => item.name), ['Ben Specialist']);
+  assert.equal(kept.questionCount, 1);
+  assert.equal(kept.company, 'Acme');
+  assert.equal(kept.timesUsed, 1);
+
+  // A different draw (0.9 makes the colleague join at the start) and a reordered pool: the repeat still matches the first.
+  const again = await savedPanel(saved, { random: () => 0.9, extra: { loadCards: async () => [OTHER_CARD, CARD] } });
+  const state = await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.notEqual(state.phase, 'error', JSON.stringify(state.error));
+  assert.equal(again.setup.draws.length, 0, 'no voice is drawn');
+  assert.equal(again.setup.planner.calls.length, 0, 'nothing is planned');
+  assert.equal(again.service.getState().persona.name, persona, 'the same lead');
+  const main = again.setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(main.options.callPlan.questions.map(question => question.number), [2], 'the question is found again by id in the reordered pool');
+  assert.deepEqual(main.options.plan.map(item => item.id), ['q0', 'q1'], 'number 2 is that question in today\'s pool');
+  await again.service.answer();
+  const late = again.setup.clock.lateTimers();
+  assert.equal(late.length, 1, 'the colleague joins late again');
+  assert.equal(late[0].ms, 57000, 'at the same moment as the first time');
+  await waitFor(async () => (await again.service.listSaved('node-1'))[0]?.timesUsed === 2, 'the repeat is counted');
+  await again.service.hangUp();
+  const record = await again.deps.store.readRecord('call-1');
+  assert.equal(record.repeatOf, kept.id);
+  assert.deepEqual(record.pickedQuestions, [2]);
+  assert.equal((await again.service.listSaved('node-1')).length, 1, 'a repeat is not kept a second time');
+
+  // A card removed since: the question comes back with the answer it had.
+  const removed = await savedPanel(saved, { extra: { loadCards: async () => [OTHER_CARD] } });
+  await removed.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  const mainRemoved = removed.setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(mainRemoved.options.callPlan.questions.map(question => question.number), [2]);
+  assert.deepEqual(mainRemoved.options.plan.map(item => [item.id, item.question]), [['q0', 'Why this team?'], ['q1', 'Tell me about a launch.']], 'the removed card joins the pool as it was');
+  await removed.service.hangUp();
+
+  // A card reworded since: the plan was written for the old wording, so that is the one asked.
+  const reworded = await savedPanel(saved, { extra: { loadCards: async () => [{ ...CARD, question: 'Walk me through a release.' }] } });
+  await reworded.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  const mainReworded = reworded.setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(mainReworded.options.callPlan.questions.map(question => question.number), [2]);
+  assert.deepEqual(mainReworded.options.plan.map(item => item.question), ['Walk me through a release.', 'Tell me about a launch.'], 'the question is asked as it was planned');
+  await reworded.service.hangUp();
+});
+
+test('saved interviews: a repeat brings back the screens\' diagrams and pictures as they were, without making new ones', async () => {
+  const saved = createSavedInterviewStore({ rootDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews') });
+  const made = [];
+  const visualDeps = {
+    visualPickText: async () => ({}),
+    visuals: async ({ parts }) => { made.push(parts.map(part => part.id)); return new Map([[parts[0].id, { kind: 'diagram', mime: 'image/svg+xml', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), svg: '<svg xmlns="http://www.w3.org/2000/svg"/>', description: 'Two queues side by side.', lead: 'Here is the layout.' }]]); },
+  };
+  const withProblem = drawn => soloPlan(drawn, {
+    questions: [{ number: 1, askedBy: drawn[0].key, minutes: 10, probes: [] }],
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Queues', content: 'How would you split this?', visual: { kind: 'diagram', search: '', shows: 'two queues' } }], solution: 'Split.', edgeCases: [], hints: [] }],
+  });
+  const firstSetup = panelHarness({ plan: withProblem, deps: { savedInterviews: saved, ...visualDeps } });
+  const first = await startOf({ modelReady: true, deps: firstSetup.overrides });
+  await first.service.start(ARGS);
+  await first.service.answer();
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  assert.equal((await saved.read(kept.id)).visuals.length, 1, 'the diagram is kept with the interview');
+  const againSetup = panelHarness({ plan: withProblem, deps: { savedInterviews: saved, ...visualDeps } });
+  const again = await startOf({ modelReady: true, deps: againSetup.overrides });
+  await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.equal(made.length, 1, 'nothing is drawn or searched for the repeat');
+  const part = againSetup.built.find(item => item.kind === 'main').options.callPlan.problems[0].parts[0];
+  assert.equal(part.content, 'Here is the layout.\n\nHow would you split this?', 'the lead sits above the screen once, as the first time');
+  assert.deepEqual(part.visual, { kind: 'diagram', description: 'Two queues side by side.' });
+  await again.service.hangUp();
+});
+
+test('saved interviews: one of another job, or a bad id, is refused before anything is drawn; forgetting one is per job', async () => {
+  const saved = createSavedInterviewStore({ rootDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews') });
+  const first = await savedPanel(saved);
+  await first.service.start(ARGS);
+  await first.service.answer();
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  const other = await savedPanel(saved, { extra: { storeKey: async () => 'posting:other-job' } });
+  assert.deepEqual(await other.service.listSaved('node-1'), [], 'another job lists none of them');
+  const refused = await other.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.equal(refused.phase, 'error');
+  assert.equal(refused.error.code, 'saved-interview-unavailable');
+  assert.equal(other.setup.draws.length, 0);
+  assert.equal(await other.service.removeSaved('node-1', kept.id), false, 'another job cannot forget it');
+  const bad = await savedPanel(saved);
+  const invalid = await bad.service.start({ ...ARGS, repeatInterviewId: '../call-1' });
+  assert.equal(invalid.phase, 'error');
+  assert.equal(invalid.error.code, 'invalid-request');
+  assert.equal(await first.service.removeSaved('node-1', kept.id), true);
+  assert.deepEqual(await first.service.listSaved('node-1'), []);
 });
 
 test('panel: a late timer that fires after the interviewers left does not add anyone', async () => {

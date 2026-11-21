@@ -194,6 +194,69 @@ export default [
       } finally { controller.abort(); await bundle?.dispose(); await fs.promises.rm(directory, { recursive: true, force: true }); }
     });
   } },
+  { name: 'practice panel render: with interviews held before for this job, Start offers a new one or an earlier one again', async run() {
+    await withDom(async window => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-practice-saved-'));
+      const entry = path.join(directory, 'PracticePanelProbe.jsx');
+      const controller = new AbortController();
+      let bundle;
+      try {
+        await fs.promises.writeFile(entry, `import React from 'react';\nimport { InterviewPracticePanel } from ${JSON.stringify(path.resolve('src/components/InterviewPracticePanel.jsx'))};\nexport function PanelProbe(props) { return <InterviewPracticePanel {...props} />; }\n`);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+        const started = [];
+        const removed = [];
+        let saved = [];
+        const SAVED = { id: 'iv-abcd1234-000001', lastUsedAt: Date.UTC(2026, 10, 20, 15), timesUsed: 2, lead: { name: 'Nora Lead', role: 'Hiring Manager' }, panel: [{ name: 'Ben Second', role: 'Staff Engineer' }], questionCount: 6, problemCount: 1, minutes: 27, steering: 'Final round' };
+        window.electronAPI = {
+          startPracticeCall: async args => { started.push(args); return { success: true }; },
+          listSavedPracticeInterviews: async ({ nodeId }) => { assert.equal(nodeId, 'helper-1'); return saved; },
+          removeSavedPracticeInterview: async args => { removed.push(args); saved = []; return true; },
+        };
+        const root = bundle.module.createRoot(window.document.getElementById('root'));
+        const props = { nodeId: 'helper-1', briefRecordId: 'c'.repeat(64), snapshotId: 'd'.repeat(64), canonicalJobUrl: 'https://jobs.example/1', ready: true, steering: 'Go easy on me' };
+        const settle = () => bundle.module.act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
+        const click = async node => { await bundle.module.act(async () => { node.dispatchEvent(new window.Event('click', { bubbles: true })); await new Promise(resolve => setTimeout(resolve, 5)); }); };
+        await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, props)); await new Promise(resolve => setTimeout(resolve, 5)); });
+        const panel = () => window.document.querySelector('section[aria-label="Practice interview"]');
+        const buttonNamed = text => [...panel().querySelectorAll('button')].find(item => item.textContent.trim() === text);
+        // None kept yet: Start starts a new interview at once, with the steering.
+        await click(buttonNamed('Start practice call'));
+        assert.equal(started.length, 1);
+        assert.equal(started[0].steering, 'Go easy on me');
+        assert.equal('repeatInterviewId' in started[0], false);
+        // One kept: Start asks first.
+        saved = [SAVED];
+        await click(buttonNamed('Start practice call'));
+        assert.equal(started.length, 1, 'nothing starts before the choice');
+        const chooser = panel().querySelector('[aria-label="Choose an interview"]');
+        assert.ok(chooser, 'the choice is shown');
+        assert.ok(chooser.textContent.includes('Nora Lead (Hiring Manager) + 1 colleague · 6 questions · 1 problem · ~27 min'), chooser.textContent);
+        assert.ok(chooser.textContent.includes('held 2 times') && chooser.textContent.includes('Steered: Final round'));
+        await click(chooser.querySelector('button[aria-label="Repeat the interview with Nora Lead"]'));
+        assert.equal(started.length, 2);
+        assert.equal(started[1].repeatInterviewId, SAVED.id, 'the earlier interview is held again');
+        assert.equal('steering' in started[1], false, 'a repeat keeps the steering it was planned with');
+        assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null, 'the choice closes once started');
+        // Start again: a new one, with the box's steering.
+        await click(buttonNamed('Start practice call'));
+        await click(buttonNamed('Generate a new interview'));
+        assert.equal(started.length, 3);
+        assert.equal(started[2].steering, 'Go easy on me');
+        assert.equal('repeatInterviewId' in started[2], false);
+        // Cancel closes it; forgetting the last one closes it too.
+        await click(buttonNamed('Start practice call'));
+        await click(buttonNamed('Cancel'));
+        assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null);
+        assert.equal(started.length, 3);
+        await click(buttonNamed('Start practice call'));
+        await click(panel().querySelector('button[aria-label="Forget the interview with Nora Lead"]'));
+        await settle();
+        assert.deepEqual(removed, [{ nodeId: 'helper-1', id: SAVED.id }]);
+        assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null, 'nothing left to choose');
+        await bundle.module.act(async () => { root.unmount(); });
+      } finally { controller.abort(); await bundle?.dispose(); await fs.promises.rm(directory, { recursive: true, force: true }); }
+    });
+  } },
   { name: 'practice codes: one-shot, well formed and stored only as a hash', async run() {
     const code = newPracticeCode();
     assert.match(code, PRACTICE_CODE_RE);

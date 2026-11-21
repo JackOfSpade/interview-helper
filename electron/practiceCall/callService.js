@@ -8,10 +8,11 @@ import { PRACTICE_AUDIO_MESSAGES } from '../interviewPracticeAudio.js';
 import { logNote, logWarn } from './logNote.js';
 import { createCallDebugLog } from './callDebugLog.js';
 import { RECORDINGS_KEPT } from './callStore.js';
+import { createSavedInterviewStore, isSavedInterviewId } from './savedInterviews.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../interviewPracticeCallEngine.js';
 
 const execFile = promisify(execFileCb);
-const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list' });
+const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list', listSaved: 'practice-call:list-saved', removeSaved: 'practice-call:remove-saved' });
 const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing', 'replay', 'error']);
 const CLASSIFIER_INSTRUCTIONS = 'You classify one candidate utterance. Reply with exactly one word: acknowledgement if it only acknowledges, agrees or fills a pause, or interruption if it starts a new thought, question or correction. No punctuation, no explanation. Every later message is one utterance to classify. Reply only READY now.';
 const USAGE_LIMIT_MESSAGE = 'Claude usage is limited right now; analysis may wait until the limit resets.';
@@ -353,6 +354,8 @@ export function createPracticeCallService(deps = {}) {
   // The track writer and the mixdown use synchronous file calls, which the promise API lacks.
   const audioFs = deps.fs ?? nodeFs;
   const store = deps.store;
+  // Interviews kept for holding again (savedInterviews.js): plain files, so the real store is the default.
+  const savedInterviews = deps.savedInterviews ?? createSavedInterviewStore({ rootDir: path.join(userDataPath, 'practice-interviews'), fs });
   let state = freshState();
   let call = null;
   let starting = false;
@@ -405,6 +408,7 @@ export function createPracticeCallService(deps = {}) {
   const onScreenMs = self => Math.max(0, Math.round(clock.now() - self.startedAt) - pausedTotalMs(self));
   function setPausedState(self, paused) {
     if (!self) return;
+    const wasPaused = !!self.pausedSince;
     if (paused && !self.pausedSince) {
       self.pausedSince = clock.now();
       // The span sits on the recording's clock like the transcript (the lead is trimmed off at finish).
@@ -417,6 +421,9 @@ export function createPracticeCallService(deps = {}) {
       self.pausedSince = 0;
     }
     state.paused = !!paused;
+    // A late colleague's wait runs on the call clock: a pause holds it, and the resume picks it up where it stopped.
+    if (paused && !wasPaused) clearLateJoins(self);
+    else if (!paused && wasPaused) armJoinTimers(self);
   }
   function startElapsedTimer() {
     stopElapsedTimer();
@@ -428,6 +435,10 @@ export function createPracticeCallService(deps = {}) {
       elapsedTimer = clock.setTimeout(tick, 1000);
     };
     elapsedTimer = clock.setTimeout(tick, 1000);
+  }
+  function clearLateJoins(self) {
+    for (const handle of self?.joinTimers || []) { try { clock.clearTimeout(handle); } catch { /* already fired */ } }
+    if (self) self.joinTimers = [];
   }
   function clearJoinTimers(self) {
     for (const handle of [...(self?.joinTimers || []), ...(self?.leaveTimers || [])]) { try { clock.clearTimeout(handle); } catch { /* already fired */ } }
@@ -539,8 +550,24 @@ export function createPracticeCallService(deps = {}) {
       ...(visual.kind === 'picture' ? { image: { label: 'Picture on the shared screen', mimeType: visual.mime, data: Buffer.from(visual.data).toString('base64') } } : {}),
     };
   }
+  /**
+   * Where each sent message stands with the candidate's voice: 'waiting' (queued, not heard yet), 'playing' (its line
+   * has started) or 'failed' (never spoken). A message on a call without a voice has no `voice` at all. The window's
+   * wand keeps spinning while its message waits.
+   */
+  function settleVoice(chatIds, voice) {
+    const ids = new Set(Array.isArray(chatIds) ? chatIds : []);
+    if (!ids.size) return;
+    state.chat = state.chat.map(entry => (entry.from === 'candidate' && ids.has(entry.id) && entry.voice === 'waiting' ? { ...entry, voice } : entry));
+  }
+  /** Nothing more will be spoken: every message still waiting on the voice is let go. */
+  function releaseWaitingVoices() {
+    if (!state.chat.some(entry => entry.voice === 'waiting')) return;
+    state.chat = state.chat.map(entry => (entry.voice === 'waiting' ? { ...entry, voice: 'failed' } : entry));
+  }
   function joinColleague(self, entry) {
-    if (call !== self || self.finished || self.interviewerEnded || self.interviewerLeft || entry.joined) return;
+    // Nobody joins a paused call: the resume re-arms the wait for what is left of it.
+    if (call !== self || self.finished || self.interviewerEnded || self.interviewerLeft || entry.joined || self.pausedSince) return;
     entry.joined = true;
     entry.joinedAtMs = Math.max(0, Math.round(clock.now() - self.startedAt));
     // A session restarted later reads the panel from self.panel, so it sees this colleague as on the call.
@@ -549,12 +576,17 @@ export function createPracticeCallService(deps = {}) {
     emitEvent({ type: 'participant-joined', id: entry.id, name: entry.name });
     try { self.engine?.participantJoined?.(entry.id); } catch { /* the engine may be stopping */ }
   }
+  /**
+   * Each late colleague joins joinDelayMs into the call as the window's clock counts it, without paused time: none is
+   * armed while paused, and re-arming (on resume) waits only for what is left of each delay.
+   */
   function armJoinTimers(self) {
-    clearJoinTimers(self);
-    self.joinTimers = [];
+    clearLateJoins(self);
+    if (call !== self || self.finished || !self.inCall || self.interviewerEnded || self.interviewerLeft || self.pausedSince) return;
+    const elapsed = onScreenMs(self);
     for (const entry of self.panel || []) {
       if (entry.joins !== 'late' || entry.joined) continue;
-      self.joinTimers.push(clock.setTimeout(() => joinColleague(self, entry), entry.joinDelayMs));
+      self.joinTimers.push(clock.setTimeout(() => joinColleague(self, entry), Math.max(0, entry.joinDelayMs - elapsed)));
     }
   }
   const fail = (code, cause, detail = cause) => {
@@ -1216,7 +1248,7 @@ export function createPracticeCallService(deps = {}) {
    * and the prepared problems. Returns null after failing the call when the plan names a voice that
    * was not drawn.
    */
-  async function settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament }) {
+  async function settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament, joinDraws = null }) {
     const { plan } = planned;
     try {
       const { VOICE_STABILITY } = await resolve('dialogueVoice');
@@ -1244,9 +1276,11 @@ export function createPracticeCallService(deps = {}) {
       const panel = (Array.isArray(plan.panel) ? plan.panel : []).slice(0, COLLEAGUE_IDS.length).map((member, at) => {
         const voice = byKey.get(member.voice);
         if (!voice) throw new Error(`the plan names a voice that was not drawn: ${member.voice}`);
-        // Each colleague joins late with the same chance as before, drawn in plan order.
-        const joins = random() < LATE_JOIN_CHANCE ? 'late' : 'start';
-        const joinDelayMs = Math.round(LATE_JOIN_MIN_MS + random() * (LATE_JOIN_MAX_MS - LATE_JOIN_MIN_MS));
+        // Each colleague joins late with the same chance as before, drawn in plan order. A held-again
+        // interview brings its own draws, so everyone joins as they did the first time.
+        const saved = joinDraws?.[at];
+        const joins = saved ? (saved.joins === 'late' ? 'late' : 'start') : random() < LATE_JOIN_CHANCE ? 'late' : 'start';
+        const joinDelayMs = saved && Number.isFinite(saved.joinDelayMs) ? Math.round(saved.joinDelayMs) : Math.round(LATE_JOIN_MIN_MS + random() * (LATE_JOIN_MAX_MS - LATE_JOIN_MIN_MS));
         const roomAmount = Number.isFinite(member.room) ? member.room : null;
         tools.setAmount(voice.voiceId, roomAmount);
         const stability = stabilityOr(member.stability);
@@ -1263,6 +1297,7 @@ export function createPracticeCallService(deps = {}) {
       return {
         persona, factory, panel,
         picked: (plan.questions || []).map(question => question.number).filter(number => number >= 1),
+        joinDraws: panel.map(entry => ({ joins: entry.joins, joinDelayMs: entry.joinDelayMs })),
         prepared: Object.fromEntries((plan.problems || []).map(problem => [problem.ref, { parts: problem.parts.map(part => ({ title: part.title, content: part.content })) }])),
         setup: {
           plan,
@@ -1329,6 +1364,94 @@ export function createPracticeCallService(deps = {}) {
       } catch (error) { warn(`[PracticeCall] visual not saved for the replay: ${error?.code || error?.message || error}`); }
     }
     mark(self, 'screens', { visuals: made.size });
+  }
+
+  /**
+   * A saved interview's setup for this call. The plan's question numbers are positions in the pool of the call it was
+   * made for; today's pool may be ordered or counted differently, so each question is found again by its id and
+   * wording. One no longer in the pool as it was (a removed card, or one edited since, whose probes and screens were
+   * written for the old wording) joins this call's pool as it was, answer included.
+   */
+  function heldSetup(self) {
+    const entry = self.repeat;
+    const plan = JSON.parse(JSON.stringify(entry.planned.plan));
+    const savedByNumber = new Map((entry.questions || []).map(question => [question.number, question]));
+    const numberOf = new Map([[0, 0]]);
+    const renumber = number => {
+      if (!Number.isInteger(number) || number < 0) return number;
+      if (numberOf.has(number)) return numberOf.get(number);
+      const saved = savedByNumber.get(number);
+      let at = saved ? self.plan.findIndex(item => item.id === saved.id && item.question === saved.question) : -1;
+      if (at < 0 && saved) {
+        self.plan.push({ id: saved.id, question: String(saved.question ?? ''), answer: String(saved.answer ?? ''), timesAsked: 0, scope: saved.scope === 'foundation' ? 'foundation' : 'company', ...(saved.topic ? { topic: true } : {}) });
+        at = self.plan.length - 1;
+      }
+      const next = at < 0 ? number : at + 1;
+      numberOf.set(number, next);
+      return next;
+    };
+    for (const question of plan.questions || []) question.number = renumber(question.number);
+    for (const problem of plan.problems || []) problem.question = renumber(problem.question);
+    return {
+      drawnVoices: entry.drawnVoices,
+      candidateVoiceIds: entry.candidateVoiceIds ?? null,
+      targetMinutes: Array.isArray(entry.targetMinutes) ? entry.targetMinutes : deps.targetMinutes ?? [25, 30],
+      planned: { plan, attempts: [], ms: 0 },
+      joinDraws: Array.isArray(entry.joinDraws) ? entry.joinDraws : null,
+    };
+  }
+
+  /** A saved interview's pictures and diagrams, as prepareVisuals makes them. */
+  function heldVisuals(entry) {
+    const made = new Map();
+    for (const { id, file: _file, data, ...visual } of entry.visuals || []) {
+      if (typeof id === 'string' && data?.length && (visual.kind === 'picture' || visual.kind === 'diagram')) made.set(id, { ...visual, data });
+    }
+    return made;
+  }
+
+  /** Whether a saved interview can be held for this call: one for this job and company, with a lead the plan names among its voices. */
+  function usableSaved(entry, countsKey) {
+    const plan = entry?.planned?.plan;
+    if (!entry || entry.key !== countsKey || !plan || typeof plan !== 'object' || !Array.isArray(entry.drawnVoices)) return false;
+    const keys = new Set(entry.drawnVoices.filter(voice => voice && typeof voice.voiceId === 'string' && voice.voiceId && voice.persona).map(voice => voice.key));
+    return keys.has(plan.lead?.voice) && (Array.isArray(plan.panel) ? plan.panel : []).every(member => keys.has(member?.voice));
+  }
+
+  /**
+   * The call was answered: the interview it was made from is kept so it can be held again (savedInterviews.js),
+   * or, when it was one held again, it moves to the front of the queue. Best effort; never holds up the call.
+   */
+  function keepInterview(self) {
+    if (self.repeat) {
+      savedInterviews.touch(self.repeat.id).catch(error => warn(`[PracticeCall] saved interview not updated: ${error?.code || error?.message || error}`));
+      return;
+    }
+    if (!self.settledPlan || !Array.isArray(self.drawnVoices) || !self.countsKey) return;
+    const plan = self.settledPlan;
+    const numbers = new Set([...(plan.questions || []).map(question => question.number), ...(plan.problems || []).map(problem => problem.question)].filter(number => Number.isInteger(number) && number >= 1));
+    const questions = [...numbers].map(number => {
+      const item = self.plan?.[number - 1];
+      return item ? { number, id: item.id, question: item.question, answer: item.answer, scope: item.scope, ...(item.topic ? { topic: true } : {}) } : null;
+    }).filter(Boolean);
+    const visuals = [...(self.visuals || new Map())].filter(([, visual]) => visual?.file && visual.data?.length).map(([id, visual]) => ({
+      id, file: visual.file, data: visual.data, kind: visual.kind, mime: visual.mime, description: visual.description || '',
+      ...(visual.credit ? { credit: visual.credit } : {}), ...(visual.source ? { source: visual.source } : {}), ...(visual.lead ? { lead: visual.lead } : {}),
+      ...(typeof visual.svg === 'string' ? { svg: visual.svg } : {}),
+      ...(Number.isFinite(visual.width) ? { width: visual.width } : {}), ...(Number.isFinite(visual.height) ? { height: visual.height } : {}),
+    }));
+    const entry = {
+      key: self.countsKey, nodeId: self.args?.nodeId ?? null,
+      company: String(self.brief?.role?.company || ''), role: String(self.brief?.role?.title || ''),
+      steering: self.steering || '', targetMinutes: self.targetMinutes,
+      planned: { plan, ms: self.plannedMs ?? null },
+      drawnVoices: self.drawnVoices, joinDraws: self.joinDraws ?? [], candidateVoiceIds: self.candidateVoiceIds ?? null,
+      questions, fromCallId: self.callId,
+    };
+    savedInterviews.save(entry, visuals).then(
+      id => { self.savedInterviewId = id; dbg('interview-saved', { savedInterviewId: id, visuals: visuals.length }); },
+      error => warn(`[PracticeCall] interview not saved for holding again: ${error?.code || error?.message || error}`),
+    );
   }
 
   /** A visual as a screen carries it: what it is, what it shows and its credit; the picture itself is read separately. */
@@ -1431,74 +1554,97 @@ export function createPracticeCallService(deps = {}) {
         room: tools.roomOf(chosen?.voiceId),
       };
     };
-    // The interviewer voice comes only from the shared library: the account's own voices
-    // are never candidates and nothing here falls back to them. ElevenLabs' built-in default
-    // voices are skipped as well, including the copies of them published in the library. If the
-    // list of them cannot be read the draw still goes ahead (they are about one row in a thousand).
-    let builtIn = { voiceIds: [], names: [] };
-    try {
-      if (typeof pool?.library?.listBuiltInVoices === 'function') {
-        const listed = await pool.library.listBuiltInVoices({ fetch: fetchImpl, key });
-        builtIn = { voiceIds: Array.isArray(listed?.voiceIds) ? listed.voiceIds : [], names: Array.isArray(listed?.names) ? listed.names : [] };
+    let drawnVoices; let planned; let targetMinutes; let joinDraws = null;
+    if (self.repeat) {
+      // The same interview again: the voices, plan, join draws and screens it was made from, so nothing is drawn or planned.
+      const held = heldSetup(self);
+      drawnVoices = held.drawnVoices;
+      self.candidateVoiceIds = deps.candidateVoices === true ? held.candidateVoiceIds : null;
+      mark(self, 'voices', { drawn: drawnVoices.length, repeated: true });
+      note(`voices kept ${JSON.stringify(drawnVoices.map(voiceView))}`);
+      self.promptBrief = promptBrief(self.brief);
+      targetMinutes = held.targetMinutes;
+      setSetupStep('plan');
+      planned = held.planned;
+      joinDraws = held.joinDraws;
+      dbg('plan-repeated', { savedInterviewId: self.repeat.id, questions: (planned.plan.questions || []).map(question => question.number) });
+      note(`plan repeated ${JSON.stringify({ kind: planned.plan.interviewKind, questions: (planned.plan.questions || []).length, problems: (planned.plan.problems || []).map(problem => problem.ref) })}`);
+      mark(self, 'plan', { planMs: 0, attempts: 0, repeated: true });
+    } else {
+      // The interviewer voice comes only from the shared library: the account's own voices
+      // are never candidates and nothing here falls back to them. ElevenLabs' built-in default
+      // voices are skipped as well, including the copies of them published in the library. If the
+      // list of them cannot be read the draw still goes ahead (they are about one row in a thousand).
+      let builtIn = { voiceIds: [], names: [] };
+      try {
+        if (typeof pool?.library?.listBuiltInVoices === 'function') {
+          const listed = await pool.library.listBuiltInVoices({ fetch: fetchImpl, key });
+          builtIn = { voiceIds: Array.isArray(listed?.voiceIds) ? listed.voiceIds : [], names: Array.isArray(listed?.names) ? listed.names : [] };
+        }
+      } catch (error) {
+        warn(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`);
       }
-    } catch (error) {
-      warn(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`);
-    }
-    if (call !== self || self.finished) return snapshot();
-    let drawn = null;
-    // The draws of one setup share the library pages already read.
-    const pageCache = new Map();
-    try {
-      if (pool?.library && typeof pool.library.drawVoice === 'function') {
-        drawn = await pool.library.drawVoice({
-          fetch: fetchImpl, key, random,
-          excludeVoiceIds: [...(recentVoiceId ? [recentVoiceId] : []), ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache,
+      if (call !== self || self.finished) return snapshot();
+      let drawn = null;
+      // The draws of one setup share the library pages already read.
+      const pageCache = new Map();
+      try {
+        if (pool?.library && typeof pool.library.drawVoice === 'function') {
+          drawn = await pool.library.drawVoice({
+            fetch: fetchImpl, key, random,
+            excludeVoiceIds: [...(recentVoiceId ? [recentVoiceId] : []), ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache,
+          });
+        }
+      } catch { drawn = null; }
+      let chosen = null;
+      if (drawn?.voice) {
+        try { chosen = catalog.pickPersonaVoice({ voices: [drawn.voice], random, temperament }); } catch { chosen = null; }
+        // A drawn voice with no usable id cannot speak, and there is no second choice.
+        if (!chosen?.voiceId) chosen = null;
+      }
+      if (call !== self || self.finished) return snapshot();
+      if (!chosen) {
+        return fail('voice-library-unavailable', {
+          userMessage: 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.',
         });
       }
-    } catch { drawn = null; }
-    let chosen = null;
-    if (drawn?.voice) {
-      try { chosen = catalog.pickPersonaVoice({ voices: [drawn.voice], random, temperament }); } catch { chosen = null; }
-      // A drawn voice with no usable id cannot speak, and there is no second choice.
-      if (!chosen?.voiceId) chosen = null;
+      const leadBase = personaOf(chosen, 'library');
+      // Up to four more voices for the planner to choose among; the planner makes do with these.
+      const extras = pool?.library && typeof pool.library.drawVoice === 'function'
+        ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn, pageCache })
+        : [];
+      if (call !== self || self.finished) return snapshot();
+      // The candidate's own voices: one female and one male, drawn the same way and never one an interviewer may use.
+      self.candidateVoiceIds = deps.candidateVoices === true && pool?.library && typeof pool.library.drawVoice === 'function'
+        ? await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken: [recentVoiceId, leadBase.voiceId, ...extras.map(item => item.persona.voiceId)] })
+        : null;
+      if (call !== self || self.finished) return snapshot();
+      drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
+        key: `V${at + 1}`, name: item.persona.name, voiceId: item.persona.voiceId, persona: item.persona,
+        gender: String(item.chosen?.gender ?? ''), age: String(item.chosen?.age ?? ''), accent: String(item.chosen?.accent ?? ''),
+        description: describeVoice(item.chosen, item.raw),
+      }));
+      mark(self, 'voices', { drawn: drawnVoices.length });
+      note(`voices drawn ${JSON.stringify(drawnVoices.map(voiceView))}`);
+      self.promptBrief = promptBrief(self.brief);
+      targetMinutes = deps.targetMinutes ?? [25, 30];
+      // The plan decides the cast, the questions and the problems before any interviewer session exists.
+      planned = await planInterview(self, { drawnVoices, targetMinutes });
+      if (!planned) return snapshot();
+      mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
     }
-    if (call !== self || self.finished) return snapshot();
-    if (!chosen) {
-      return fail('voice-library-unavailable', {
-        userMessage: 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.',
-      });
-    }
-    const leadBase = personaOf(chosen, 'library');
-    // Up to four more voices for the planner to choose among; the planner makes do with these.
-    const extras = pool?.library && typeof pool.library.drawVoice === 'function'
-      ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn, pageCache })
-      : [];
-    if (call !== self || self.finished) return snapshot();
-    // The candidate's own voices: one female and one male, drawn the same way and never one an interviewer may use.
-    self.candidateVoiceIds = deps.candidateVoices === true && pool?.library && typeof pool.library.drawVoice === 'function'
-      ? await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken: [recentVoiceId, leadBase.voiceId, ...extras.map(item => item.persona.voiceId)] })
-      : null;
-    if (call !== self || self.finished) return snapshot();
-    const drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
-      key: `V${at + 1}`, name: item.persona.name, voiceId: item.persona.voiceId, persona: item.persona,
-      gender: String(item.chosen?.gender ?? ''), age: String(item.chosen?.age ?? ''), accent: String(item.chosen?.accent ?? ''),
-      description: describeVoice(item.chosen, item.raw),
-    }));
-    mark(self, 'voices', { drawn: drawnVoices.length });
-    note(`voices drawn ${JSON.stringify(drawnVoices.map(voiceView))}`);
-    self.promptBrief = promptBrief(self.brief);
-    const targetMinutes = deps.targetMinutes ?? [25, 30];
-    // The plan decides the cast, the questions and the problems before any interviewer session exists.
-    const planned = await planInterview(self, { drawnVoices, targetMinutes });
-    if (!planned) return snapshot();
-    mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
     setSetupStep('voice');
-    const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament });
+    const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament, joinDraws });
     if (!settled) return snapshot();
     mark(self, 'cast');
+    // Kept so the interview can be saved for holding again once it is answered.
+    self.drawnVoices = drawnVoices;
+    self.joinDraws = settled.joinDraws;
+    self.plannedMs = planned.ms;
     // Pictures and diagrams for the prepared screens are made while the rest of setup runs; the
     // interviewer sessions start only once they are settled, so every screen is ready before the ring.
-    self.visualsTask = prepareVisuals(self);
+    // An interview held again brings the ones it had.
+    self.visualsTask = self.repeat ? Promise.resolve(heldVisuals(self.repeat)) : prepareVisuals(self);
     const { persona, factory } = settled;
     // Warm the unsaved library voice up before the call can ring, so its first real line is not
     // the slow one. A voice that does not answer is a failed call, not a second pick. Only the
@@ -1797,6 +1943,11 @@ export function createPracticeCallService(deps = {}) {
       } else publish();
       return;
     }
+    // A candidate-voice line started playing, or was given up on: its messages no longer wait on the voice.
+    if ((event.type === 'candidate-voice' && event.state === 'started') || (event.type === 'error' && event.code === 'candidate-voice-failed')) {
+      settleVoice(event.chatIds, event.type === 'error' ? 'failed' : 'playing');
+      if (event.type === 'candidate-voice') { publish(); emitEvent(event); return; }
+    }
     if (event.type === 'error' && ENGINE_NOTICES[event.code]) {
       state.notice = { code: event.code, message: ENGINE_NOTICES[event.code] };
       publish();
@@ -1918,9 +2069,10 @@ export function createPracticeCallService(deps = {}) {
         const index = state.chat.findIndex(entry => entry.id === item?.chatId && entry.from === 'candidate');
         if (index < 0) continue;
         const heard = String(item.heard ?? '').trim().replace(/[\s,;:.!?…—–-]+$/u, '');
+        const voice = state.chat[index].voice === 'waiting' ? { voice: heard ? 'playing' : 'failed' } : {};
         state.chat[index] = heard
-          ? { ...state.chat[index], text: `${heard} —`, cutOff: true, sent: state.chat[index].sent ?? state.chat[index].text }
-          : { ...state.chat[index], unsaid: true };
+          ? { ...state.chat[index], text: `${heard} —`, cutOff: true, sent: state.chat[index].sent ?? state.chat[index].text, ...voice }
+          : { ...state.chat[index], unsaid: true, ...voice };
       }
       publish();
       emitEvent(event);
@@ -1945,6 +2097,7 @@ export function createPracticeCallService(deps = {}) {
         // The call is over for the interviewers from here: the engine has ended, so no line, silence check or
         // typed message reaches a session. The farewell has finished playing when 'ended' arrives.
         call.interviewerEnded = true;
+        releaseWaitingVoices();
         call.interviewerPlaying = false;
         cancelPendingShare(call);
         setPausedState(call, false);
@@ -2074,6 +2227,8 @@ export function createPracticeCallService(deps = {}) {
       const voice = panelVoiceFactory({ factories: { A: self.voice, ...Object.fromEntries(panel.map(entry => [entry.id, entry.factory])) }, leadId: 'A' });
       const candidateVoice = await makeCandidateVoice(self);
       if (call !== self || self.finished) return snapshot();
+      // With a voice every sent message is spoken, and its chat entry waits until the line starts playing.
+      self.hasCandidateVoice = !!candidateVoice;
       self.engine = engineFactory({
         clock, sessions: self.sessions, restartSession: self.restartSession, audio: self.audioMirror,
         voice, ear: self.ear, onEvent: onEngineEvent, newId,
@@ -2098,6 +2253,7 @@ export function createPracticeCallService(deps = {}) {
       state.elapsedMs = 0;
       self.engine.start();
       self.inCall = true;
+      keepInterview(self);
       armJoinTimers(self);
       setPhase('in-call');
       // R11: the elapsed clock is published once a second while the call runs.
@@ -2219,6 +2375,7 @@ export function createPracticeCallService(deps = {}) {
         pickedQuestions: Array.isArray(self.picked) ? self.picked.slice() : [],
         // What the planning step decided and which drawn voices it used, so a setup that went wrong can be read back.
         ...(self.setup ? { setup: self.setup } : {}),
+        ...(self.repeat ? { repeatOf: self.repeat.id } : {}),
         ...(unprepared ? { unpreparedQuestion: unprepared } : {}),
         askedQuestions: asked, askedQuestionIds: askedIds, answeredQuestions: answered,
         steering: self.steering || null, transcript: onCallClock(stampInjectedLines(engineState.transcript || [], [...(self.injectSpans?.values() ?? [])]
@@ -2527,12 +2684,12 @@ export function createPracticeCallService(deps = {}) {
       state = freshState();
       call = null;
       debug = null;
-      const { steering: rawSteering, ...request } = plainArgs(args);
+      const { steering: rawSteering, repeatInterviewId, ...request } = plainArgs(args);
       const callId = newId();
       // A call with no folder (the store could not make one) has no debug log; the app log still has its warnings.
       const dir = await store.ensure(callId);
       debug = createCallDebugLog({ fs: deps.debugFs ?? fs, dir, now: () => clock.now() });
-      dbg('start', { callId, args: request, steering: typeof rawSteering === 'string' ? rawSteering : '' });
+      dbg('start', { callId, args: request, steering: typeof rawSteering === 'string' ? rawSteering : '', ...(repeatInterviewId ? { repeatInterviewId } : {}) });
       try { await store.pruneDebugLogs?.({ protect: callId }); } catch { /* an old log left for the next call */ }
       const self = { callId, dir, args: { ...request }, steering: '', startedAt: clock.now(), timings: { answers: [], precheckMs: 0 }, toneSamples: [], finished: false, inCall: false, record: null,
         screens: [], padRecord: { lang: '', snapshots: [], lastText: '' }, debug };
@@ -2541,8 +2698,23 @@ export function createPracticeCallService(deps = {}) {
       state.elapsedMs = 0;
       try {
         self.steering = steeringText(rawSteering);
+        if (repeatInterviewId !== undefined && repeatInterviewId !== null && !isSavedInterviewId(repeatInterviewId)) {
+          const error = new TypeError('Practice call repeat must name a saved interview.');
+          error.code = 'practice-call-args';
+          throw error;
+        }
         const loaded = await loadPlan(request);
         if (call !== self) return snapshot();
+        if (repeatInterviewId) {
+          // The same interview again: one kept for this job and company, read before anything is drawn.
+          let saved = null;
+          try { saved = await savedInterviews.read(repeatInterviewId); } catch (error) { warn(`[PracticeCall] saved interview unreadable: ${error?.code || error?.message || error}`); }
+          if (call !== self) return snapshot();
+          if (!usableSaved(saved, loaded.countsKey)) return fail('saved-interview-unavailable', { userMessage: 'That saved interview is no longer available. Start a new one instead.' });
+          self.repeat = saved;
+          // It is the interview it was: the steering it was planned with stands.
+          self.steering = typeof saved.steering === 'string' ? saved.steering : '';
+        }
         self.brief = loaded.brief;
         self.plan = loaded.plan;
         self.countsKey = loaded.countsKey;
@@ -2644,7 +2816,12 @@ export function createPracticeCallService(deps = {}) {
       // While the interviewers are still leaving the line is typed into as in a real call: the message shows
       // in the chat, nobody answers it, and the interviewer sessions are never sent it.
       if (!call?.interviewerEnded) {
-        try { call?.engine?.typed?.(value, { generated, chatId }); } catch { /* engine already ended */ }
+        // Marked before the engine hears of it: a voice that fails at once reports the failure while typed() runs.
+        const entry = state.chat.at(-1);
+        if (call?.hasCandidateVoice) entry.voice = 'waiting';
+        let queued;
+        try { queued = call?.engine?.typed?.(value, { generated, chatId }); } catch { queued = false; /* engine already ended */ }
+        if (queued === false && entry.voice === 'waiting') settleVoice([chatId], 'failed');
         // A typed message carries the pad text along, so it counts as sent.
         if (call && state.pad.open) snapshotPad(call, undefined);
       }
@@ -2761,6 +2938,16 @@ export function createPracticeCallService(deps = {}) {
       return result;
     },
     list: nodeId => store.list(nodeId),
+    /** The interviews kept for this job and company (savedInterviews.js), most recently held first. */
+    listSaved: async nodeId => savedInterviews.list(await postingCountsKey(nodeId)),
+    /** Forgets one kept interview of this job and company; an id of another job is left alone. */
+    removeSaved: async (nodeId, id) => {
+      if (!isSavedInterviewId(id)) return false;
+      const key = await postingCountsKey(nodeId);
+      if (!(await savedInterviews.list(key)).some(item => item.id === id)) return false;
+      await savedInterviews.remove(id);
+      return true;
+    },
     onState(listener) {
       if (typeof listener !== 'function') throw new TypeError('onState expects a function');
       stateListeners.add(listener);

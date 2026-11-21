@@ -21,6 +21,8 @@ const roundClass = tone => `grid h-10 w-10 place-items-center rounded-full trans
 const flatClass = active => `grid h-10 w-10 place-items-center rounded-full transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#8ab4f8] ${active ? 'bg-[#8ab4f8]/20 text-[#8ab4f8]' : 'text-[#e8eaed] hover:bg-white/10'}`;
 
 const TOAST_MS = 4000;
+// The longest the wand waits for its line to start playing (the voice gives up on a line long before this).
+const VOICE_WAIT_MAX_MS = 60000;
 // How long a tile that just left takes to fade out before it is removed (matches .pc-leave).
 const LEAVE_MS = 300;
 
@@ -82,9 +84,13 @@ export default function InCall({ state, api }) {
   // voice at once, without going through the chat box. It is sent marked generated, so it is heard
   // but never counts as practice. While it is written the candidate counts as typing, so the
   // interviewer waits; a reply that is ready while the call is paused is spoken on resume.
+  // The spinner runs until the reply is actually heard: through the writing, a pause that holds it, and the
+  // wait for the candidate's voice to start playing it (its chat entry's `voice` leaves 'waiting').
   const canSuggest = typeof api?.draftAnswer === 'function' && typeof api?.sendChat === 'function';
   const [suggesting, setSuggesting] = useState(false);
   const [suggestError, setSuggestError] = useState('');
+  // The sent reply the wand still waits to hear: null (none), { id: null } (held for a pause or being sent) or { id }.
+  const [voiceWait, setVoiceWait] = useState(null);
   const heldReplyRef = useRef('');
   const apiRef = useRef(api);
   useEffect(() => { apiRef.current = api; });
@@ -101,10 +107,16 @@ export default function InCall({ state, api }) {
     return () => clearTimeout(timer);
   }, [suggestError]);
   const deliverReply = async text => {
+    setVoiceWait({ id: null });
     let result;
     try { result = await apiRef.current.sendChat(text, { generated: true }); } catch { result = null; }
+    if (!mountedRef.current) return;
     // The window hears about a pause a moment after the shortcut: a reply refused for it waits for the resume.
-    if (result?.paused) heldReplyRef.current = text;
+    if (result?.paused) { heldReplyRef.current = text; return; }
+    // The entry this reply made; without a voice (or once it failed) there is nothing to wait for.
+    const chat = Array.isArray(result?.chat) ? result.chat : [];
+    const entry = [...chat].reverse().find(item => item?.from === 'candidate' && typeof item.id === 'string');
+    setVoiceWait(entry && entry.voice === 'waiting' ? { id: entry.id } : null);
   };
   const [cards, setCards] = useState([]);
   const [cameraOn, setCameraOn] = useState(false);
@@ -212,8 +224,21 @@ export default function InCall({ state, api }) {
   const interviewerLeft = !!state?.interviewerLeft;
   // The other side dropped out instead of saying goodbye.
   const connectionLost = interviewerLeft && !!state?.connectionLost;
+  const wandBusy = suggesting || voiceWait !== null;
+  // The wand's line is heard (its line started), was given up on, or nobody is left to hear it: the spinner stops.
+  const waitingId = voiceWait?.id ?? null;
+  const waitingEntry = waitingId ? (Array.isArray(state?.chat) ? state.chat : []).find(item => item?.id === waitingId) : null;
+  const voiceSettled = voiceWait !== null && (interviewerLeft || state?.phase !== 'in-call' || (waitingEntry && waitingEntry.voice !== 'waiting'));
+  // Adjusted while rendering, as the leaving tiles are below: the next render already shows the wand back.
+  if (voiceSettled) setVoiceWait(null);
+  // A safety net: a line that never reports back does not leave the wand spinning (a pause holds the clock).
+  useEffect(() => {
+    if (voiceWait === null || paused) return undefined;
+    const timer = setTimeout(() => setVoiceWait(null), VOICE_WAIT_MAX_MS);
+    return () => clearTimeout(timer);
+  }, [voiceWait, paused]);
   const suggestReply = async () => {
-    if (!canSuggest || suggesting || interviewerLeft) return;
+    if (!canSuggest || wandBusy || interviewerLeft) return;
     setSuggesting(true);
     setSuggestError('');
     let result;
@@ -223,7 +248,7 @@ export default function InCall({ state, api }) {
     setSuggesting(false);
     reportTyping(false);
     if (!text) { setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.'); return; }
-    if (pausedRef.current) { heldReplyRef.current = text; return; }
+    if (pausedRef.current) { heldReplyRef.current = text; setVoiceWait({ id: null }); return; }
     await deliverReply(text);
   };
   const chatOpen = panel === 'chat';
@@ -397,8 +422,8 @@ export default function InCall({ state, api }) {
       </p>
       <div className="flex items-center gap-3">
         <button type="button" className={roundClass(muted ? 'off' : 'idle')} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}</button>
-        {canSuggest && <button type="button" className={`${roundClass(suggesting ? 'active' : 'idle')} disabled:cursor-not-allowed`} aria-label="Suggest a reply" title="Suggest a reply and say it" aria-busy={suggesting}
-          disabled={suggesting || interviewerLeft} onClick={suggestReply}>{suggesting ? <LoaderCircle size={20} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={20} aria-hidden="true" />}</button>}
+        {canSuggest && <button type="button" className={`${roundClass(wandBusy ? 'active' : 'idle')} disabled:cursor-not-allowed`} aria-label="Suggest a reply" title="Suggest a reply and say it" aria-busy={wandBusy}
+          disabled={wandBusy || interviewerLeft} onClick={suggestReply}>{wandBusy ? <LoaderCircle size={20} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={20} aria-hidden="true" />}</button>}
         <button type="button" className={roundClass(cameraOn ? 'idle' : 'off')} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <Video size={20} aria-hidden="true" /> : <VideoOff size={20} aria-hidden="true" />}</button>
         <button type="button" className={roundClass(captionsOn ? 'active' : 'idle')} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}>{captionsOn ? <Captions size={20} aria-hidden="true" /> : <CaptionsOff size={20} aria-hidden="true" />}</button>
         <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" onClick={leave}><PhoneOff size={20} aria-hidden="true" /></button>

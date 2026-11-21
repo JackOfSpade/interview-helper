@@ -79,10 +79,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Practice call
-  startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, steering }) => ipcRenderer.invoke('practice-call:start', {
+  startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, steering, repeatInterviewId }) => ipcRenderer.invoke('practice-call:start', {
     nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest,
     ...(typeof steering === 'string' ? { steering } : {}),
+    ...(typeof repeatInterviewId === 'string' ? { repeatInterviewId } : {}),
   }),
+  listSavedPracticeInterviews: ({ nodeId }) => ipcRenderer.invoke('practice-call:list-saved', { nodeId }),
+  removeSavedPracticeInterview: ({ nodeId, id }) => ipcRenderer.invoke('practice-call:remove-saved', { nodeId, id }),
   openPracticeReplay: ({ nodeId, callId }) => ipcRenderer.invoke('practice-call:open-replay', { nodeId, callId }),
   listPracticeCalls: ({ nodeId }) => ipcRenderer.invoke('practice-call:list', { nodeId }),
 
