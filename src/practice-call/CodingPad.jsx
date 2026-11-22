@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PAD_TEXT_MAX, padKeyInsert } from './screenMarkup.js';
 import { DELETE_DELAY_MS, keyDelayMs, padEdit } from './padTyping.js';
+import { PAD_LANGUAGES } from './padLanguages.js';
 
 // Matches the chat box: the engine lets the typing flag lapse after about 6 s.
 export const PAD_TYPING_REFRESH_MS = 3000;
@@ -17,7 +18,9 @@ const WORD_END = /[\s.,;:()[\]{}]/u;
 // by key through the same edits a person makes, so it is sent and seen exactly as typing is. It resolves true when the
 // pad reads `target`, false when stopped first; while paused() it waits. Once yielding() is true (someone started
 // speaking and the reaction time is over) it stops at the end of the word being typed, as a person gives way.
-export default function CodingPad({ lang = '', initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
+// lang is the language the exercise requires, shown as a label. With none required and onChooseLanguage given, the
+// header has a dropdown instead: `choice` is the candidate's pick, and picking another calls onChooseLanguage(name).
+export default function CodingPad({ lang = '', choice = '', onChooseLanguage, initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
   const [own, setOwn] = useState(() => String(initialText || '').slice(0, PAD_TEXT_MAX));
   const text = readOnly ? String(value || '') : own;
   const textRef = useRef(own);
@@ -136,7 +139,14 @@ export default function CodingPad({ lang = '', initialText = '', value = '', rea
   };
   return <section aria-label="Coding pad" data-coding-pad={readOnly ? 'readonly' : 'live'} className={`flex min-h-0 min-w-0 flex-col overflow-hidden rounded-xl bg-[#1e1f22] text-[#e8eaed] ${className}`}>
     <header className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-2">
-      <h2 className="text-sm font-medium">Coding pad{lang && <span data-pad-lang="true" className="ml-2 rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs font-normal text-[#9aa0a6]">{lang}</span>}</h2>
+      <h2 className="flex items-center text-sm font-medium">Coding pad{lang && <span data-pad-lang="true" className="ml-2 rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs font-normal text-[#9aa0a6]">{lang}</span>}
+        {!lang && !readOnly && typeof onChooseLanguage === 'function' && <select aria-label="Language" data-pad-language-choice="true" value={choice} disabled={disabled}
+          onChange={event => onChooseLanguage(event.target.value)}
+          className="ml-2 rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs font-normal text-[#e8eaed] outline-none focus:ring-1 focus:ring-[#8ab4f8] disabled:opacity-50">
+          {!choice && <option value="" disabled>Language</option>}
+          {PAD_LANGUAGES.map(name => <option key={name} value={name} className="bg-[#1e1f22]">{name}</option>)}
+        </select>}
+      </h2>
       {!readOnly && <div className="flex items-center gap-3">
         {text.length >= NEAR_CAP && <span data-testid="pad-counter" className="text-[11px] tabular-nums text-[#9aa0a6]">{text.length}/{PAD_TEXT_MAX}</span>}
       </div>}

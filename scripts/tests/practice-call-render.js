@@ -326,6 +326,51 @@ export const presentingTests = [
     },
   },
   {
+    name: 'practice call render: a pad with no required language has a language dropdown that starts on Python and sends the pick; a required one is a label',
+    async run() {
+      const { JSDOM } = await import('jsdom');
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true, url: 'http://localhost/' });
+      const saved = {};
+      const realChannel = globalThis.MessageChannel;
+      const channels = [];
+      globalThis.MessageChannel = class { constructor() { const channel = new realChannel(); channels.push(channel); return channel; } };
+      const names = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'KeyboardEvent', 'MouseEvent'];
+      for (const name of names) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true, writable: true }); }
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+      let bundle = null;
+      try {
+        bundle = await loadServerBundle();
+        const { React, createRoot, InCall } = bundle.module;
+        const picks = [];
+        const api = { updatePad: () => {}, setTyping: () => {}, setPadLanguage: async name => { picks.push(name); } };
+        const root = createRoot(dom.window.document.getElementById('root'));
+        const render = state => root.render(React.createElement(InCall, { state, api }));
+        const { act } = React;
+        const select = () => dom.window.document.querySelector('select[aria-label="Language"]');
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: '', text: '' } }));
+        assert(select(), 'the dropdown is beside the title');
+        strict.deepEqual(picks, ['Python'], 'a first pad starts on Python');
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: 'Python', text: '' } }));
+        strict.equal(select().value, 'Python');
+        assert(select().querySelectorAll('option').length >= 20, 'every major language is listed');
+        await act(async () => { select().value = 'Go'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+        strict.deepEqual(picks, ['Python', 'Go'], 'a pick is sent');
+        strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), 'Go', 'and remembered for the next pad');
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: 'SQL', choice: 'Go', text: '' } }));
+        assert(!select(), 'a required language has no dropdown');
+        strict.equal(dom.window.document.querySelector('[data-pad-lang]')?.textContent, 'SQL', 'only its label');
+        await act(async () => root.unmount());
+      } finally {
+        for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
+        delete globalThis.IS_REACT_ACT_ENVIRONMENT;
+        globalThis.MessageChannel = realChannel;
+        for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+        dom.window.close();
+        if (bundle) await bundle.dispose();
+      }
+    },
+  },
+  {
     name: 'practice call render: the replay shows the screen and pad current at the playback time beside the feedback, and nothing without them',
     async run() {
       const bundle = await loadServerBundle();

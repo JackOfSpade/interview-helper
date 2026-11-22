@@ -10,6 +10,7 @@ import { createCallDebugLog } from './callDebugLog.js';
 import { RECORDINGS_KEPT } from './callStore.js';
 import { createSavedInterviewStore, isSavedInterviewId } from './savedInterviews.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../interviewPracticeCallEngine.js';
+import { padLanguageName } from '../../src/practice-call/padLanguages.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list', listSaved: 'practice-call:list-saved', removeSaved: 'practice-call:remove-saved' });
@@ -43,8 +44,14 @@ const CALLBACK_PICKUP_MAX_MS = 5000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
-// An interviewer who stays on after the call is over leaves 2.0 to 4.0 s later, in steps of 0.1 s, each on their own draw.
-const LEAVE_MIN_MS = 2000;
+// An interviewer who stays on after the call is over leaves 1.0 to 3.0 s later, in steps of 0.1 s, each on their own draw.
+const LEAVE_MIN_MS = 1000;
+// One spelling per language for comparing pad labels: lower case, spaces and dots dropped, common short names expanded.
+const LANGUAGE_ALIASES = Object.freeze({ js: 'javascript', ts: 'typescript', py: 'python', python3: 'python', cpp: 'c++', cplusplus: 'c++', golang: 'go', csharp: 'c#', cs: 'c#', rb: 'ruby', kt: 'kotlin', rs: 'rust', sh: 'bash', shell: 'bash', postgresql: 'sql', postgres: 'sql', mysql: 'sql', nodejs: 'javascript', node: 'javascript' });
+const languageKey = value => {
+  const key = String(value ?? '').toLowerCase().replace(/[\s.]+/gu, '');
+  return LANGUAGE_ALIASES[key] ?? key;
+};
 const LEAVE_STEP_MS = 100;
 const LEAVE_STEPS = 21;
 
@@ -319,7 +326,7 @@ function freshState() {
     phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
-    screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
+    screen: null, sharing: null, pad: { open: false, lang: '', text: '', choice: '' },
   };
 }
 const ENGINE_NOTICES = Object.freeze({
@@ -456,7 +463,7 @@ export function createPracticeCallService(deps = {}) {
       id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, status: statusOf(entry.id),
     }))];
   }
-  /** Each interviewer on the call at its end draws their own leaving delay: 2.0 to 4.0 s in steps of 0.1 s. */
+  /** Each interviewer on the call at its end draws their own leaving delay: 1.0 to 3.0 s in steps of 0.1 s. */
   function armDepartures(self) {
     const random = deps.random ?? Math.random;
     const ids = [...(self.persona ? ['A'] : []), ...(self.panel || []).filter(entry => entry.joined).map(entry => entry.id)];
@@ -513,8 +520,24 @@ export function createPracticeCallService(deps = {}) {
     self.padRecord.lastText = value;
     self.padRecord.snapshots.push({ atMs: Math.round(Number.isFinite(atMs) ? atMs : callMs(self)), text: value });
   }
+  /**
+   * The label the pad shows: a language only when the exercise requires one. With prepared problems, an interviewer's
+   * label stands only for a language one of them requires (named any common way: "JS", "cpp", "golang"); it then shows
+   * the problem's own name for it. A label naming no required language shows the one required language when there is
+   * exactly one, else nothing. A call without prepared problems keeps the label as written.
+   */
+  function padLabel(self, lang) {
+    const label = String(lang ?? '').trim();
+    const problems = self?.settledPlan?.problems;
+    if (!label || !Array.isArray(problems) || !problems.length) return label;
+    const required = [...new Set(problems.map(problem => String(problem?.language ?? '').trim()).filter(Boolean))];
+    if (!required.length) return '';
+    const said = languageKey(label);
+    return required.find(name => languageKey(name) === said) ?? (required.length === 1 ? required[0] : '');
+  }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
-  function applyPadEvent(self, event) {
+  function applyPadEvent(self, rawEvent) {
+    const event = rawEvent?.open ? { ...rawEvent, lang: padLabel(self, rawEvent.lang) } : rawEvent;
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
     if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); }
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
@@ -2299,6 +2322,7 @@ export function createPracticeCallService(deps = {}) {
       if (call !== self || self.finished) return snapshot();
       const voice = panelVoiceFactory({ factories: { A: self.voice, ...Object.fromEntries(panel.map(entry => [entry.id, entry.factory])) }, leadId: 'A' });
       const candidateVoice = await makeCandidateVoice(self);
+      self.candidateVoice = candidateVoice;
       if (call !== self || self.finished) return snapshot();
       // With a voice every sent message is spoken, and its chat entry waits until the line starts playing.
       self.hasCandidateVoice = !!candidateVoice;
@@ -2457,7 +2481,7 @@ export function createPracticeCallService(deps = {}) {
           .map(span => (Number.isFinite(span.startMs) && !(span.endMs > span.startMs) && Number.isFinite(endOnTimelineMs) && endOnTimelineMs > span.startMs
             ? { ...span, endMs: endOnTimelineMs, whole: false } : span)))),
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
-        pad: { lang: self.padRecord?.lang || '', snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
+        pad: { lang: self.padRecord?.lang || '', ...(self.padRecord?.chosen && !self.padRecord?.lang ? { chosen: self.padRecord.chosen } : {}), snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
         toneSamples: onCallClock(self.toneSamples.slice().sort((left, right) => (left.atMs ?? 0) - (right.atMs ?? 0))), candidateProsody: onCallClock(candidateProsody), voiceBaseline, ...(voicedBaseline ? { voicedBaseline } : {}), recordingLeadMs: leadMs - trimmedMs, thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...(deps.thresholds || {}) }, reason,
         ...(self.missedCall ? { returnedCall: self.missedCall.how } : {}),
@@ -2915,6 +2939,18 @@ export function createPracticeCallService(deps = {}) {
     // The window owns the pad text while the candidate types: it is stored and forwarded but never
     // published, so the text is not echoed back on every keystroke and cannot fight the cursor. The
     // stored text reaches a window only through a later state, which a reopened window reads.
+    // The candidate's pick of language for a pad whose exercise leaves the language open (only a listed name). It is
+    // what the wand writes in; the interviewers hear of it only as the candidate says it.
+    setPadLanguage: name => {
+      if (!call || call.finished || !call.inCall || state.interviewerLeft) return snapshot();
+      const choice = padLanguageName(name);
+      if (!choice || choice === state.pad.choice) return snapshot();
+      state.pad = { ...state.pad, choice };
+      if (call.padRecord && !state.pad.lang) call.padRecord.chosen = choice;
+      dbg('pad-language', { choice });
+      publish();
+      return snapshot();
+    },
     updatePad: text => {
       // A pad that has just closed still takes text: the window sends its last keystrokes as it closes.
       // One that was never opened in this call takes nothing.
@@ -2996,6 +3032,8 @@ export function createPracticeCallService(deps = {}) {
           dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0) });
           if (call !== self || self.finished) return { error: 'The call has ended.' };
           if (state.muted) return { muted: true };
+          // The window says the steps one after another: their delivery tags are written now, so no line waits for its own.
+          try { self.candidateVoice?.prepare?.(result.map(step => step.say).filter(Boolean)); } catch { /* tagging ahead is best effort */ }
           return { steps: result.map(step => ({ say: step.say, code: step.code, together: step.together === true })) };
         }
         const text = result;

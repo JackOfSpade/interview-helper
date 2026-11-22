@@ -643,7 +643,7 @@ export function createPracticeCallEngine({
       openerSettled: greeting, noteSettled: true, mainStarted: false, voiceNote: '', ackText: '', openerTimer: null,
       ctl: { opener: new AbortController(), main: new AbortController(), voice: new AbortController() },
       stream: null, sampleRate: null, entry: null, heardText: undefined,
-      wait: null, heldPause: null, textSinceGap: false, unknownScreens: [], heldTurn: false, checkIn: false, padProgress: false, segChars: 0, parserChars: 0, gapParserChars: 0, heldTag: '', openerChars: 0, openerInSegment: false, joinFlushTimer: null, joinFlushAtGate: false, joinPauseMs: 0, overlayCaptions: [], overlaysSent: [], overlayStarts: [], overlaysShown: 0,
+      wait: null, heldPause: null, textSinceGap: false, unknownScreens: [], heldTurn: false, checkIn: false, padProgress: false, segChars: 0, parserChars: 0, parserSeg: 0, namedAt: {}, heldOvers: [], gapParserChars: 0, heldTag: '', openerChars: 0, openerInSegment: false, joinFlushTimer: null, joinFlushAtGate: false, joinPauseMs: 0, overlayCaptions: [], overlaysSent: [], overlayStarts: [], overlaysShown: 0,
       asked: [], writer: null, tagged: null, taggedCutIn: false, partSpeakers: [], speakerStarts: [], shownSpeaker: null,
       positionMs: 0, playbackStarted: false, shownInOrder: null, cancelTimer: null, boundaryAfter: [], cancelWait: null, afterCancel: null,
       used: { acks: 0, interruption: null, notSpoken: false },
@@ -1091,6 +1091,59 @@ export function createPracticeCallEngine({
     else reply.voiceQueue.push({ overlay: request });
   }
 
+  /** Where a colleague's first name is said in a text, as a whole word written as a name (capital first); -1 when it is not. */
+  function nameIndex(text, member) {
+    const first = String(member?.name ?? '').trim().split(/\s+/u)[0];
+    if (!first || typeof text !== 'string') return -1;
+    const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${first.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![\\p{L}\\p{N}])`, 'u'); // case kept: "I will" never names a Will
+    return text.search(pattern);
+  }
+
+  /** Whether the candidate already knows who a colleague is from earlier in the call: an interviewer named them, or they spoke a line of their own. */
+  function introducedEarlier(id) {
+    const member = castMember(id);
+    return transcript.some(entry => entry?.speaker === 'interviewer' && !entry.overlay
+      && (Array.isArray(entry.segments) && entry.segments.length ? entry.segments : [{ speakerId: entry.speakerId, text: entry.text }])
+        .some(segment => segment.speakerId === id || nameIndex(segment.text, member) >= 0));
+  }
+
+  /**
+   * Heard 2026-11-22: a colleague's "Hey Jack." over the lead's opening played before the lead had said who they were,
+   * and the lead covered it with "That's Kofi you just heard". A remark over the speaker by a colleague the candidate
+   * has not yet been told about waits until this reply names them, and is then heard at the end of the sentence that
+   * does; one never named in the reply is not heard at all. Returns true when the remark was taken here.
+   */
+  function holdUntilIntroduced(reply, over) {
+    const id = over?.speakerId;
+    const member = castMember(id);
+    if (!member || !member.present || id === leadId || id === writerNow(reply) || absentAt(reply)) return false; // addOverlay drops those
+    // `introduced` on a speaker: the host says the candidate already knows who they are.
+    if (member.introduced === true || introducedEarlier(id)) return false;
+    const named = reply.namedAt[id];
+    if (named) {
+      if (named.seg !== reply.parserSeg || !Number.isFinite(over.afterChars) || over.afterChars >= named.startChars) return false;
+      addOverlay(reply, { ...over, afterChars: named.endChars });
+      return true;
+    }
+    reply.heldOvers.push(over);
+    return true;
+  }
+
+  /** Notes the colleagues a sentence of this reply names, and lets a remark held for that introduction be heard after it. */
+  function noteNames(reply, sentence, beforeChars) {
+    if (!speakers) return;
+    for (const member of speakers) {
+      if (member.id === leadId || reply.namedAt[member.id]) continue;
+      const at = nameIndex(sentence, member);
+      if (at < 0) continue;
+      reply.namedAt[member.id] = { seg: reply.parserSeg, startChars: beforeChars + nonSpace(sentence.slice(0, at)), endChars: reply.parserChars };
+      const waiting = reply.heldOvers.filter(over => over.speakerId === member.id);
+      if (!waiting.length) continue;
+      reply.heldOvers = reply.heldOvers.filter(over => over.speakerId !== member.id);
+      for (const over of waiting) addOverlay(reply, { ...over, afterChars: reply.parserChars });
+    }
+  }
+
   /** Emit the overlays whose audio has started by the playback position (every one when it is Infinity). */
   function showOverlays(reply, positionMs) {
     if (!reply.entry && !reply.committed) return;
@@ -1381,7 +1434,8 @@ export function createPracticeCallEngine({
   /**
    * The opener model copies and recombines the same few phrases however it is told not to (found live on 2026-11-21:
    * "I hear you, thank you" three times, "Ah, lovely" twice). A reaction that thanks or says "lovely" right after one
-   * that did, or that begins with the same two words as one of the last few, is dropped: the main reply follows alone.
+   * that did, that begins with the same two words as one of the last few, or that reuses a longer word of theirs, is
+   * dropped: the main reply follows alone.
    */
   function repeatsRecentReaction(written) {
     const count = Math.max(0, Math.floor(Number(th.reactionGuard) || 0));
@@ -1391,7 +1445,13 @@ export function createPracticeCallEngine({
     const warm = line => /\b(thank you|thanks|lovely)\b/iu.test(line);
     if (warm(written) && recent.some(item => warm(item.text))) return true;
     const head = words(written).slice(0, 2).join(' ');
-    return head !== '' && recent.some(item => words(item.text).slice(0, 2).join(' ') === head);
+    if (head !== '' && recent.some(item => words(item.text).slice(0, 2).join(' ') === head)) return true;
+    // Heard 2026-11-22: "all followed", "I followed all of that", "I followed that" in three reactions running, and
+    // "Sure, happy to" twice. A reaction that reuses a word of five or more letters (in any ending) from one of the
+    // last few is dropped too; the short sounds every reaction is made of ("okay", "yeah", "sure", "mm-hm") stay free.
+    const stems = line => words(line).map(word => word.replace(/'/gu, '').replace(/(?:ing|ed|es|s)$/u, '')).filter(stem => stem.length >= 5);
+    const used = new Set(recent.flatMap(item => stems(item.text)));
+    return stems(written).some(stem => used.has(stem));
   }
 
   async function runOpener(reply) {
@@ -1484,11 +1544,11 @@ export function createPracticeCallEngine({
           else if (item.pause !== undefined) {
             if (!absentAt(reply) && Number.isFinite(item.pause) && reply.textSinceGap && reply.heldPause === null) reply.heldPause = Math.round(clamp(item.pause * 1000, PAUSE_MIN_MS, PAUSE_MAX_MS));
           }
-          else if (item.over) addOverlay(reply, item.over);
+          else if (item.over) { if (!holdUntilIntroduced(reply, item.over)) addOverlay(reply, item.over); }
           else if (item.chat !== undefined) addChat(reply, String(item.chat));
           else if (item.speaker) {
             reply.tagged = item.speaker; reply.taggedCutIn = item.cutIn === true;
-            reply.parserChars = 0; reply.gapParserChars = 0; // the parser restarts its count at every speaker tag
+            reply.parserChars = 0; reply.gapParserChars = 0; reply.parserSeg += 1; // the parser restarts its count at every speaker tag
           }
           else if (item.screen) {
             if (!absentAt(reply)) {
@@ -1511,7 +1571,12 @@ export function createPracticeCallEngine({
           }
           else if (item.screenStop) { if (!absentAt(reply)) { reply.shownInOrder = false; addControl(reply, { kind: 'screen-stop' }); } }
           else if (item.pad) { if (!absentAt(reply)) addControl(reply, { kind: 'pad', open: item.pad.open === true, lang: String(item.pad.lang ?? '').slice(0, 40) }); }
-          else { reply.parserChars += nonSpace(item.sentence); forwardMain(reply, item.sentence); }
+          else {
+            const before = reply.parserChars;
+            reply.parserChars += nonSpace(item.sentence);
+            forwardMain(reply, item.sentence);
+            if (!reply.dropping) noteNames(reply, item.sentence, before);
+          }
         }
       };
       try {

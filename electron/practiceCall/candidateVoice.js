@@ -151,15 +151,33 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
     return other ? { factory: factories[other], gender: other } : null;
   };
   if (!pick()) return null;
+  // Heard 2026-11-22: tagging a line takes about 2 s and only began when the line opened, so the steps of a worked
+  // exercise had a 2.4 s silence between them. Lines known ahead are tagged ahead (`prepare`), and `open` takes the
+  // result for the same words; a line nobody prepared is tagged as before.
+  const prepared = new Map();
+  const keyOf = value => String(value ?? '').replace(/\s+/gu, ' ').trim();
   return Object.freeze({
+    prepare(texts = []) {
+      for (const value of Array.isArray(texts) ? texts : [texts]) {
+        const key = keyOf(value);
+        if (!key || prepared.has(key)) continue;
+        const { transcript, brief } = attemptValue(context) || {};
+        const promise = tagCandidateLine({ tagText, text: key, transcript, brief, clock }).catch(() => ({ text: key, tagged: false }));
+        prepared.set(key, promise);
+        while (prepared.size > PREPARED_MAX) prepared.delete(prepared.keys().next().value);
+      }
+    },
     open({ utteranceId, text, signal } = {}) {
       const chosen = pick();
       if (!chosen) throw new Error('No candidate voice is available.');
       const stream = chosen.factory.open({ utteranceId, signal });
       const started = typeof clock.now === 'function' ? clock.now() : Date.now();
+      const key = keyOf(text);
+      const ready = prepared.get(key);
+      if (ready) prepared.delete(key);
       const done = (async () => {
         const { transcript, brief } = attemptValue(context) || {};
-        const tagged = await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
+        const tagged = ready ? await ready : await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
         attemptValue(() => onEvent({ type: 'candidate-voice', gender: chosen.gender, tagged: tagged.tagged, tagMs: Math.round((typeof clock.now === 'function' ? clock.now() : Date.now()) - started), chars: tagged.text.length }));
         if (signal?.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
         stream.sendText(tagged.text);
@@ -178,6 +196,9 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
     },
   });
 }
+
+/** Lines tagged ahead and not yet spoken that are kept; the oldest go first. */
+const PREPARED_MAX = 20;
 
 function attemptValue(fn) {
   try { return typeof fn === 'function' ? fn() : fn; } catch { return undefined; }

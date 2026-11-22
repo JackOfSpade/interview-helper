@@ -145,9 +145,21 @@ test('work: the prompt asks for intent before each piece, never code read aloud,
   assert(prompt.includes('<coding-pad-now lang="python">\ndef emittance(x, xp):'), 'the pad as it is now');
   assert(prompt.includes('Rebuilt the billing service in Go.') && prompt.includes('Write it.'), 'the same sources as a spoken reply');
   assert(!prompt.includes('<shared-pad>'), 'the pad goes in once');
-  assert.deepEqual(DRAFT_WORK_SCHEMA.required, ['steps']);
+  assert.deepEqual(DRAFT_WORK_SCHEMA.required, ['waitForReply', 'steps']);
+  assert(prompt.includes('set waitForReply true') && prompt.includes('wait for them') && prompt.includes('they will tell you when to go on'), 'a question mid-exercise is answered, then the candidate waits');
   assert.deepEqual(DRAFT_WORK_SCHEMA.properties.steps.items.required, ['say', 'code', 'typeWhileSpeaking']);
   assert(prompt.includes('type while you talk (typeWhileSpeaking true)') && prompt.includes('neither is the rule'), 'the model chooses per step');
+});
+
+test('work: a language the candidate picked is the only one written, and said once; a required one is simply used', () => {
+  const picked = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: '', choice: 'Go', text: '' } });
+  assert(picked.includes('you are writing in Go') && picked.includes('Every piece of code you write is Go'), 'the pick is the language');
+  assert(picked.includes('Say which language you are using once'), 'said once, in passing');
+  assert(picked.includes('<coding-pad-now lang="Go">'));
+  const required = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'SQL', choice: 'Go', text: '' } });
+  assert(required.includes('The exercise asks for SQL') && !required.includes('writing in Go'), 'a required language wins over a pick');
+  const none = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: '', choice: '', text: '' } });
+  assert(!none.includes('left the language to you') && !none.includes('The exercise asks for'));
 });
 
 test('work: steps are cleaned, empty ones dropped, JSON text parsed, and nothing usable throws', async () => {
@@ -156,6 +168,9 @@ test('work: steps are cleaned, empty ones dropped, JSON text parsed, and nothing
   assert.deepEqual(cleanWork('```json\n{"steps":[{"say":"Hi.","code":null}]}\n```'), [{ say: 'Hi.', code: null, together: false }]);
   assert.throws(() => cleanWork({ steps: [] }));
   assert.throws(() => cleanWork('not json'));
+  assert.deepEqual(cleanWork({ waitForReply: true, steps: [{ say: 'Positivity keeps the sum monotonic.', code: 'def f():\n', typeWhileSpeaking: true }, { say: 'Now the loop.', code: 'def f():\n    pass\n', typeWhileSpeaking: false }] }),
+    [{ say: 'Positivity keeps the sum monotonic.', code: null, together: false }], 'an answer to a question is said hands off the keyboard, and nothing follows it');
+  assert.equal(cleanWork({ waitForReply: false, steps: [{ say: 'Fixed.', code: 'a', typeWhileSpeaking: false }, { say: 'Next.', code: 'ab', typeWhileSpeaking: false }] }).length, 2, 'otherwise the work carries on');
   const asked = [];
   const steps = await draftCandidateWork({ ...CONTEXT, pad: { open: true, text: '' }, callText: async request => { asked.push(request); return { steps: [{ say: 'Go.', code: 'x = 1\n' }] }; } });
   assert.deepEqual(steps, [{ say: 'Go.', code: 'x = 1\n', together: false }]);

@@ -230,6 +230,9 @@ function formatMetrics(metrics) {
 
 const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
+  // Two of six reviews up to 2026-11-22 were rejected for a 610-character "covered" and cost a minute's retry: the
+  // schema's maxLength is not enforced on the model's side, so the limits are stated here.
+  '- Length limits are hard, and a reply over any of them is rejected whole: overall.summary and delivery.summary at most 1500 characters; each planned question\'s covered, adapted, improve and extension, and each moment\'s note, at most 600 characters (about 90 words, so aim for 400 to 500); chapter titles at most 120 and moment labels at most 200; every other text field at most 300 characters. Pick the points that matter most rather than listing everything.',
   'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',

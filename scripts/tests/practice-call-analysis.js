@@ -248,6 +248,7 @@ export default [
     assert.match(prompt, /never against an easier bar because of the candidate's background/u, 'the review holds the role\'s real bar');
     assert.match(prompt, /Never fault the interviewer for asking about something the candidate has not done/u);
     assert.match(prompt, /\(no prepared answers were part of this call\)/u);
+    assert.match(prompt, /covered, adapted, improve and extension, and each moment's note, at most 600 characters/u, 'the limits the validator enforces are stated');
     assert.doesNotMatch(prompt, /TONE NOTES|tone notes/u, 'the always-empty live tone notes section is gone');
     assert.match(prompt, /\(no tone samples\)/u);
     assert.match(prompt, /scribe verbatim: um/u, 'words reach the prompt per answer');

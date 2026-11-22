@@ -563,6 +563,19 @@ test('an opener that thanks right after one that did, or starts like a recent on
   assert.equal(rig.sessions.opener.calls.length, 6, 'no re-roll');
 });
 
+test('an opener that reuses a longer word of a recent reaction, in any ending, is dropped; short sounds stay free', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await answerTurn(rig, 'Go on.', 'Okay, all followed.');
+  await answerTurn(rig, 'Go on.', 'Right, I follow you.'); // follow / followed
+  await answerTurn(rig, 'Go on.', 'Mm-hm, okay.'); // okay is a short sound
+  await answerTurn(rig, 'Go on.', 'Sure, happy to.');
+  await answerTurn(rig, 'Go on.', 'Glad, happy to.');
+  assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text]), [
+    ['spoken', 'Okay, all followed.'], ['dropped', 'Right, I follow you.'], ['spoken', 'Mm-hm, okay.'], ['spoken', 'Sure, happy to.'], ['dropped', 'Glad, happy to.'],
+  ]);
+});
+
 test('listen from main after a finished line: the opener reaction is not spoken, nothing plays, the line stays unconsumed', async () => {
   const rig = makeRig({ thresholds: { voiceGateMs: 600 } }); // gate open at speculation
   await greet(rig);
@@ -2511,8 +2524,10 @@ test('voice gate: typed, silence and greeting turns send immediately', async () 
 });
 
 // ---- panel calls --------------------------------------------------------------
+// John is marked as already known to the candidate, so remarks by him are heard where they are written; the
+// "overlay: a colleague nobody has named yet" tests below use a panel without that mark.
 const PANEL = () => ({ leadId: 'A', speakers: [
-  { id: 'A', name: 'Priya', present: true }, { id: 'B', name: 'John', present: true }, { id: 'C', name: 'Mei', present: false },
+  { id: 'A', name: 'Priya', present: true }, { id: 'B', name: 'John', present: true, introduced: true }, { id: 'C', name: 'Mei', present: false },
 ] });
 const panelRig = options => makeRig({ panel: PANEL(), speakerVoice: true, ...options });
 const spoken = (id, base, ...list) => list.map((word, index) => ({ word, speakerId: id, startMs: base + index * 300, endMs: base + index * 300 + 280 }));
@@ -4987,6 +5002,39 @@ test('overlay: several colleagues speak over the lead at once, each captioned wi
   await flush();
   assert.deepEqual(rig.of('overlay').map(event => [event.speakerId, event.text]), [['B', 'Hi Jack.'], ['C', 'Hello!']]);
   assert.deepEqual(rig.engine.state().transcript.filter(item => item.overlay).map(item => [item.speakerId, item.text]), [['B', 'Hi Jack.'], ['C', 'Hello!']]);
+});
+
+const UNMET = () => ({ leadId: 'A', speakers: [{ id: 'A', name: 'Priya', present: true }, { id: 'B', name: 'Kofi Okafor', present: true }] });
+const nonBlank = text => text.replace(/\s/g, '').length;
+
+test('overlay: a colleague nobody has named yet is heard only once the lead names them, at the end of that sentence', async () => {
+  // The real parser, which reports the remark after the sentences around it and splits the text into sentences.
+  const rig = makeRig({ panel: UNMET(), speakerVoice: true });
+  await overGreeting(rig, 'Hi Jack, I am Priya, the manager here.<over id="B">Hey Jack.</over> With me is Kofi, one of our engineers. Today is a short coding exercise.');
+  const stream = rig.streams[0];
+  assert.deepEqual(stream.overlays, [{ speakerId: 'B', text: 'Hey Jack.', afterChars: nonBlank('Hi Jack, I am Priya, the manager here.With me is Kofi, one of our engineers.') }], 'held until the sentence that names him has been said');
+  assert.deepEqual(stream.texts, ['Hi Jack, I am Priya, the manager here.', 'With me is Kofi, one of our engineers.', 'Today is a short coding exercise.']);
+});
+
+test('overlay: a hello written before the name inside the naming sentence moves to its end; one written after the name stays', async () => {
+  const early = makeRig({ panel: UNMET(), speakerVoice: true, createParser: tagParser });
+  await overGreeting(early, 'Hi Jack.<over id="B">Hey!</over> That is Kofi, our engineer.');
+  // The tag sits at the start of the sentence that names Kofi: the parser reports it after that sentence, before the name.
+  assert.deepEqual(early.streams[0].overlays.map(item => item.afterChars), [nonBlank('Hi Jack.That is Kofi, our engineer.')]);
+  const late = makeRig({ panel: UNMET(), speakerVoice: true, createParser: tagParser });
+  await overGreeting(late, 'Hi Jack, with me is Kofi,<over id="B">Hey Jack.</over> our engineer.');
+  assert.deepEqual(late.streams[0].overlays.map(item => item.afterChars), [nonBlank('Hi Jack, with me is Kofi,')], 'once named, the remark is heard where it was written');
+});
+
+test('overlay: a colleague never named in the reply says nothing over it, and a known one is heard where written', async () => {
+  const rig = makeRig({ panel: UNMET(), speakerVoice: true, createParser: tagParser });
+  await overGreeting(rig, 'Hi Jack, I am Priya.<over id="B">Hey Jack.</over> How is your day going?');
+  assert.deepEqual(rig.streams[0].overlays, [], 'nobody has said who he is');
+  await playOut(rig);
+  assert(!rig.engine.state().transcript.some(item => item.overlay));
+  const known = makeRig({ panel: { leadId: 'A', speakers: [{ id: 'A', name: 'Priya', present: true }, { id: 'B', name: 'Kofi', present: true, introduced: true }] }, speakerVoice: true, createParser: tagParser });
+  await overGreeting(known, 'Hi Jack, I am Priya.<over id="B">Hey Jack.</over> How is your day going?');
+  assert.equal(known.streams[0].overlays.length, 1);
 });
 
 test('overlay: a voice without overlay support speaks the main text untouched and emits nothing', async () => {

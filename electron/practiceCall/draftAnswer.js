@@ -154,8 +154,9 @@ const WORK_PAD_MAX = 20000;
 
 /** The JSON schema the work reply must follow. */
 export const DRAFT_WORK_SCHEMA = Object.freeze({
-  type: 'object', additionalProperties: false, required: ['steps'],
+  type: 'object', additionalProperties: false, required: ['waitForReply', 'steps'],
   properties: {
+    waitForReply: { type: 'boolean', description: 'true when an interviewer has just asked you a question that only needs answering (not an instruction to change or carry on with the code) and has not yet said to carry on: your one step answers it and you then wait for them.' },
     steps: {
       type: 'array', minItems: 1, maxItems: DRAFT_WORK_MAX_STEPS,
       items: {
@@ -176,14 +177,20 @@ export function draftWorkPrompt(context = {}) {
   const sources = sourceSections({ ...context, pad: { open: false } });
   const name = String(context.candidateName || '').trim();
   const brief = context.brief || {};
-  const lang = String(context.pad?.lang || '').trim();
+  const required = String(context.pad?.lang || '').trim();
+  // The exercise leaves the language open: the candidate picked one in the pad, and that is the only one written.
+  const chosen = required ? '' : String(context.pad?.choice || '').trim();
+  const lang = required || chosen;
   const padText = typeof context.pad?.text === 'string' ? context.pad.text.slice(0, WORK_PAD_MAX) : '';
+  const languageRule = chosen
+    ? [`- The interviewers left the language to you, and you are writing in ${chosen}. Every piece of code you write is ${chosen}, whatever the screen's examples look like or any earlier step used. Say which language you are using once, in passing and in your own words, the first time you start writing code, unless you already said so in the conversation below. If the pad already holds code in another language, you switched: say so briefly and rewrite it in ${chosen}.`]
+    : required ? [`- The exercise asks for ${required}: write the code in ${required}.`] : [];
   return [
     `You are ${name || 'the candidate'}, a strong candidate in a live video interview for ${brief.role || 'the role'}${brief.company ? ` at ${brief.company}` : ''}. The interviewers have shared an exercise and opened a coding pad${lang ? ` (${lang})` : ''} that you write in while they watch.`,
     'Show what an excellent answer to this exercise looks like, done live. Write it as a short sequence of steps. Each step is a line you say out loud, then the whole coding pad as it should read after you have typed that step (or null when that step changes nothing in the pad). Your words are spoken on the call in your voice and the code is typed into the pad at a person\'s pace after each line, so the interviewers hear you and watch you write.',
     '',
     'How a strong candidate works through it:',
-    '- Start where things stand now: read the conversation and the pad below. If an interviewer has just asked you something (a question, a hint, a bug they spotted), the first step answers that briefly and naturally, then you carry on from the code already in the pad (fix it, or continue it), never starting over without a reason. If the code is finished and you already said so, answer what was asked in one step with code null.',
+    '- Start where things stand now: read the conversation and the pad below. If an interviewer has just put a question to you (why an approach works, its cost, what would change if, how you would test it), answer it briefly and naturally in a single step with code null, and set waitForReply true. Then stop: take your hands off the keyboard and wait for them, as a candidate does when someone cuts in mid-exercise, since they may want to follow up, push back or move on. Do not say what you will code next or announce that you are carrying on; they will tell you when to go on. If they have pointed out a bug, given a hint or asked you to change something, the first step acknowledges it briefly and then you carry on from the code already in the pad (fix it, or continue it), never starting over without a reason. If they have just confirmed your answer or told you to go ahead, pick up where you left off without re-answering. If the code is finished and you already said so, answer what was asked in one step with code null.',
     '- Starting fresh: the first step restates the task in a sentence in your own words, states any assumption you are making (as a statement, never a question you would wait on: "I\'ll assume the arrays are the same length"), and gives the approach in plain English with its cost when that matters. Its code may be just the function signature, or null.',
     '- For each step choose how the line and the typing go together, the way a person does at that moment: say it first and then type (typeWhileSpeaking false), usually for a new idea or a choice worth explaining before you commit to it; or type while you talk (typeWhileSpeaking true), usually for straightforward code you are describing as your hands write it. Mix them as a real candidate would; neither is the rule.',
     '- Then write the code in a few small, logical pieces, one per step (usually two to four). Before each piece, say in plain English what it will do and why, at the level of intent: "First I\'ll centre the coordinates by taking off the mean, so the second moments are about the centre." Never read the code aloud or spell out syntax, symbols, brackets, variable assignments or operators ("x equals x minus mean of x", "for i in range", "open bracket"). One or two sentences per step.',
@@ -191,9 +198,10 @@ export function draftWorkPrompt(context = {}) {
     '- Then test it out loud: walk the given example through by hand with its actual numbers, said the way people say numbers, and give the result with its units. If the exercise asks for a hand calculation or a value, this is where you give it, worked briefly. Mention an edge case your code handles or that you would check, in a sentence. A step that only talks has code null.',
     '- Finish by saying plainly, in your own words, that you are done and inviting their questions ("I think that\'s it. Happy to go through any part of it."). This is how the interviewers know your answer is final, so say it only in the last step.',
     '- Keep every line short and spoken: no lists, headings or markdown in what you say, no paragraph breaks, and never more than about forty words in a line. Numbers and units are said as words where it reads oddly otherwise.',
+    ...languageRule,
     '- Answer every bullet the exercise asks, in order, and nothing it does not ask.',
     '- Stay in character: never mention documents, notes, a prompt or being an AI.',
-    '- Reply with JSON only, matching the schema: {"steps":[{"say":"...","code":"..." or null,"typeWhileSpeaking":true or false}]}.',
+    '- Reply with JSON only, matching the schema: {"waitForReply":true or false,"steps":[{"say":"...","code":"..." or null,"typeWhileSpeaking":true or false}]}.',
     ...sources,
     `\n<coding-pad-now${lang ? ` lang="${lang}"` : ''}>\n${padText || '(empty)'}\n</coding-pad-now>\n`,
     'Your steps:',
@@ -213,6 +221,12 @@ export function cleanWork(raw) {
     return { say, code, together: step?.typeWhileSpeaking === true && !!say && code !== null };
   }).filter(step => step.say || step.code !== null);
   if (!steps.length) throw new Error('The drafted work had no steps.');
+  // An answer to an interviewer's question mid-exercise is said with the hands off the keyboard, and then the candidate
+  // waits for the interviewer's reply: only the first line is kept, and it types nothing.
+  if (value?.waitForReply === true) {
+    const answer = steps.find(step => step.say);
+    if (answer) return [{ say: answer.say, code: null, together: false }];
+  }
   return steps;
 }
 

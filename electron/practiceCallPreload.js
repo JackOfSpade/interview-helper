@@ -44,6 +44,8 @@ const practiceCallAPI = Object.freeze({
   setTyping: typing => invoke('set-typing', booleanArg(typing, 'setTyping')),
   setPaused: paused => invoke('set-paused', booleanArg(paused, 'setPaused')),
   updatePad: text => invoke('update-pad', padText(text)),
+  // The language the candidate picked for the pad when the exercise leaves it open; the main process checks the name.
+  setPadLanguage: name => invoke('set-pad-language', typeof name === 'string' ? name.slice(0, 40) : ''),
   draftAnswer: () => invoke('draft-answer'),
   getPreparedCards: () => invoke('get-prepared-cards'),
   getReplay: () => invoke('get-replay'),

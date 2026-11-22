@@ -452,7 +452,7 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
             <div className="min-w-0"><PartFeedback chapter={chapter} hasFeedback={hasFeedback} /></div>
             {(showScreen || showPad) && <div data-replay-share="true" className="min-w-0 space-y-3">
               {showScreen && <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-72" onEnlarge={() => setScreenEnlarged(true)} />}
-              {showPad && <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-60" />}
+              {showPad && <CodingPad readOnly lang={replay?.pad?.lang || replay?.pad?.chosen || ''} value={shownPad.text} className="h-60" />}
             </div>}
           </div>
         </article>}

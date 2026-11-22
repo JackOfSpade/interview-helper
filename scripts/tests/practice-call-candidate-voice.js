@@ -414,6 +414,22 @@ test('the voice speaks the setting\'s gender, falls back to the other one, and s
   assert.equal(DEFAULT_CANDIDATE_VOICE_GENDER, 'male');
 });
 
+test('lines prepared ahead are tagged at once and spoken with those tags; an unprepared line is tagged when it opens', async () => {
+  const sent = [];
+  const factory = { open: () => ({ sampleRate: 24000, onAudio() {}, onWords() {}, cancel() {}, sendText: text => sent.push(text), finish: async () => 'done' }) };
+  const asked = [];
+  const voice = createCandidateVoice({ factories: { male: factory }, gender: () => 'male', tagText: async ({ prompt }) => { asked.push(prompt); return '1: [thoughtful]'; } });
+  voice.prepare(['First I set up  the window.', 'Then I shrink it.', '']);
+  voice.prepare('Then I shrink it.'); // already prepared: no second call
+  await flush();
+  assert.equal(asked.length, 2, 'both lines were tagged before either was spoken');
+  await voice.open({ utteranceId: 'u1', text: 'First I set up the window.' }).done;
+  assert.equal(asked.length, 2, 'the prepared tags were used');
+  await voice.open({ utteranceId: 'u2', text: 'Something else.' }).done;
+  assert.equal(asked.length, 3, 'a line nobody prepared is tagged as before');
+  assert.deepEqual(sent, ['[thoughtful] First I set up the window.', '[thoughtful] Something else.']);
+});
+
 test('a voice draw can ask for one gender', async () => {
   const rows = [
     { voice_id: 'm1', public_owner_id: 'o', name: 'Max', gender: 'male', use_case: 'conversational', language: 'en', category: 'high_quality' },

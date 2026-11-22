@@ -1006,7 +1006,7 @@ export default [
       const section = text.slice(text.indexOf('\nPREPARED PROBLEMS'), text.indexOf('\nPANEL\n'));
       const data = JSON.parse(section.slice(section.indexOf('[\n'), section.lastIndexOf(']') + 1));
       assert.deepEqual(data, [{
-        ref: 'p1', planQuestion: 1, language: 'python',
+        ref: 'p1', planQuestion: 1, requiredLanguage: 'python',
         screens: [{ ref: 'p1.1', title: 'Part one', content: 'Write f.' }, { ref: 'p1.2', title: 'Part two', content: 'Make it faster.' }],
         referenceSolution: 'def f(): return 1', edgeCasesWorthProbing: ['empty input'], hintsGentleToDirect: ['think about the loop', 'use a map'],
       }]);
@@ -1016,6 +1016,11 @@ export default [
       assert(text.includes('<screen ref="p1.2" delay="6"/>') && text.includes('<screen ref="p1"/> alone shows part 1') && text.includes('<screen title="...">...</screen>, still works'));
       assert(text.indexOf('<screen ref="p1.2"') > text.indexOf('\nSHARED SCREEN AND CODING PAD\n'));
       assert.equal(buildInterviewerInstructions({ persona, brief, plan, callPlan: soloPlan }).includes('<screen ref='), false, 'no problems, no reference rule');
+      const open = buildInterviewerInstructions({ persona, brief, plan, callPlan: { ...callPlan, problems: callPlan.problems.map(item => ({ ...item, language: '' })) } });
+      const openData = JSON.parse(open.slice(open.indexOf('\nPREPARED PROBLEMS'), open.indexOf('\nPANEL\n')).replace(/^[\s\S]*?(?=\[\n)/u, '').replace(/\][^\]]*$/u, ']'));
+      assert.equal(openData[0].language, 'any: the candidate chooses', 'a problem with no required language leaves the choice to the candidate');
+      assert.equal('requiredLanguage' in openData[0], false);
+      assert(text.includes('The programming language is the candidate\'s choice unless the exercise really tests one language'), 'the interviewer names no language unless one is required');
     },
   },
   {

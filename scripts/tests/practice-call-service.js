@@ -2078,12 +2078,12 @@ test('chat is accepted without an answer while the interviewer is leaving, and i
   assert.equal(new Set(flags.map(flag => flag.chatId)).size, 2);
   typed.splice(1);
   engine.listener({ type: 'ended', reason: 'interviewer' });
-  // They are still on the line for 2 s: a real call lets you type, and nobody answers.
+  // They are still on the line for 1 s: a real call lets you type, and nobody answers.
   let state = service.sendChat('during');
   assert.deepEqual(state.chat.map(item => item.text), ['before', 'suggested', 'during']);
   assert.deepEqual(typed, ['before'], 'the interviewer sessions never get it');
-  const [leave] = clock.pending().filter(timer => timer.ms === 2000);
-  clock.setNow(clock.now() + 2000);
+  const [leave] = clock.pending().filter(timer => timer.ms === 1000 && timer.fn?.name !== 'tick');
+  clock.setNow(clock.now() + 1000);
   clock.fire(leave);
   state = service.sendChat('after');
   assert.deepEqual(state.chat.map(item => item.text), ['before', 'suggested', 'during']);
@@ -2298,6 +2298,9 @@ const PANEL_VOICES = Object.freeze({
   'lib-1': 'Nora Lead', 'lib-2': 'Ben Specialist', 'lib-3': 'Cara Second', 'lib-4': 'Dana Third', 'lib-5': 'Eli Fourth',
 });
 const panelVoice = voiceId => ({ ...DRAWN_LIBRARY_VOICE, voiceId, voiceName: PANEL_VOICES[voiceId] });
+
+/** A pending interviewer departure (1.0 to 3.0 s), told apart from the call's 1 s elapsed tick. */
+const isDeparture = timer => timer.ms >= 1000 && timer.ms <= 3000 && timer.fn?.name !== 'tick';
 
 /** A clock whose timers only run when a test fires them. */
 function manualClock() {
@@ -2863,8 +2866,8 @@ test('panel: a late timer that fires after the interviewers left does not add an
   setup.clock.fire(timer);
   assert.deepEqual(setup.engineCalls.filter(call => call.startsWith('joined')), []);
   assert.deepEqual(built.service.getState().participants.map(item => [item.id, item.status]), [['A', 'joined']], 'the lead is still leaving');
-  const leaving = setup.clock.pending().find(item => item.ms >= 2000 && item.ms <= 4000);
-  setup.clock.setNow(setup.clock.now() + 4000);
+  const leaving = setup.clock.pending().find(isDeparture);
+  setup.clock.setNow(setup.clock.now() + 3000);
   setup.clock.fire(leaving);
   assert.deepEqual(built.service.getState().participants.map(item => [item.id, item.status]), [['A', 'left']]);
 });
@@ -2884,7 +2887,7 @@ test('panel: speaker events set speakingId, which clears when the interviewer st
   engine({ type: 'speaker', speakerId: 'B' });
   engine({ type: 'ended', reason: 'interviewer' });
   assert.equal(built.service.getState().speakingId, null);
-  for (const timer of setup.clock.pending().filter(item => item.ms >= 2000 && item.ms <= 4000)) setup.clock.fire(timer);
+  for (const timer of setup.clock.pending().filter(isDeparture)) setup.clock.fire(timer);
   assert.equal(built.service.getState().participants.every(item => item.status === 'left'), true, 'every participant leaves after the interviewers');
 });
 
@@ -3330,6 +3333,44 @@ test('role: the settled role, picked questions and plan reach restart prompts, t
   assert.equal(opener.options.callPlan.people[1].name, 'Ben Specialist');
 });
 
+test('pad: the pad names a language only when a prepared problem requires it', async () => {
+  const labelFor = async (language, written) => {
+    const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
+      problems: [{ ref: 'p1', question: 1, language, parts: [{ title: 'Task', content: 'Reverse a list.' }], solution: 'Reverse it.', edgeCases: [], hints: [] }],
+    }) });
+    setup.overrides.loadCards = async () => PLAN_CARDS;
+    const { service } = await panelStart(setup);
+    await service.answer();
+    setup.engineOptions[0].onEvent({ type: 'pad', open: true, lang: written, atMs: 100 });
+    const lang = service.getState().pad.lang;
+    await service.hangUp();
+    return lang;
+  };
+  assert.equal(await labelFor('', 'python'), '', 'any language is fine, so the pad names none');
+  assert.equal(await labelFor('javascript', 'JavaScript'), 'javascript', 'a required language is shown');
+  assert.equal(await labelFor('javascript', 'python'), 'javascript', 'a label naming another language shows the one the problem requires');
+  assert.equal(await labelFor('JavaScript', 'JS'), 'JavaScript', 'a short name stands for the required language, shown by its own name');
+  assert.equal(await labelFor('C++', 'cpp'), 'C++');
+  assert.equal(await labelFor('', 'Java'), '');
+  assert.equal(await labelFor('', ''), '');
+});
+
+test('pad: the candidate picks a listed language, which is published and kept in the record when none is required', async () => {
+  const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Task', content: 'Reverse a list.' }], solution: 'Reverse it.', edgeCases: [], hints: [] }],
+  }) });
+  setup.overrides.loadCards = async () => PLAN_CARDS;
+  const { service, deps } = await panelStart(setup);
+  await service.answer();
+  setup.engineOptions[0].onEvent({ type: 'pad', open: true, lang: '', atMs: 100 });
+  assert.equal(service.setPadLanguage('Brainfuck').pad.choice, '', 'only a listed language');
+  assert.equal(service.setPadLanguage('go').pad.choice, 'Go', 'by its listed name');
+  await service.hangUp();
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.pad.chosen, 'Go');
+  assert.equal(record.pad.lang, '');
+});
+
 test('history: timesAsked reaches the prompt options and a failing read never stops the call', async () => {
   const history = memoryHistory({ 'node-1': { q1: 2, q3: 1 } });
   const harness = recordingPrompts();
@@ -3431,14 +3472,14 @@ test('the shared screen and the pad appear in the published state with the prese
   await service.answer();
   const first = service.getState();
   assert.equal(first.screen, null);
-  assert.deepEqual(first.pad, { open: false, lang: '', text: '' });
+  assert.deepEqual(first.pad, { open: false, lang: '', text: '', choice: '' });
   box.emit({ type: 'screen', title: 'Two sum', content: 'Find a pair.', speakerId: 'A', atMs: 1000 });
   const shown = service.getState().screen;
   assert.deepEqual({ title: shown.title, content: shown.content, speakerId: shown.speakerId }, { title: 'Two sum', content: 'Find a pair.', speakerId: 'A' });
   assert.equal(typeof shown.presenterName, 'string');
   assert.ok(shown.presenterName.length > 0, 'the lead is named');
   box.emit({ type: 'pad', open: true, lang: 'python', atMs: 1100 });
-  assert.deepEqual(service.getState().pad, { open: true, lang: 'python', text: '' });
+  assert.deepEqual(service.getState().pad, { open: true, lang: 'python', text: '', choice: '' });
   box.emit({ type: 'screen-stop', atMs: 2000 });
   assert.equal(service.getState().screen, null);
   box.emit({ type: 'pad', open: false, atMs: 2100 });
@@ -4574,45 +4615,45 @@ async function threeInterviewers({ draws = [], deps = {} } = {}) {
   const built = await panelStart(setup);
   await built.service.answer();
   queue.push(...draws);
-  const departures = () => setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000);
+  const departures = () => setup.clock.pending().filter(isDeparture);
   return { setup, built, service: built.service, typed, queue, departures, ended: reason => setup.engineOptions[0].onEvent({ type: 'ended', reason }) };
 }
 const statuses = service => service.getState().participants.map(item => `${item.id}:${item.status}`);
 
-test('departures: each interviewer leaves on their own random delay of 2.0 to 4.0 s after the farewell, the notice only after the last', async () => {
+test('departures: each interviewer leaves on their own random delay of 1.0 to 3.0 s after the farewell, the notice only after the last', async () => {
   const call = await threeInterviewers({ draws: [0.5, 0, 0.99] });
   const { setup, service } = call;
   const start = setup.clock.now();
   const events = [];
   service.onEvent?.(event => events.push(event));
   call.ended('interviewer');
-  assert.deepEqual(call.departures().map(timer => timer.ms), [3000, 2000, 4000], 'A, B and C each drew their own delay, in steps of 0.1 s');
+  assert.deepEqual(call.departures().map(timer => timer.ms), [2000, 1000, 3000], 'A, B and C each drew their own delay, in steps of 0.1 s');
   assert.deepEqual(statuses(service), ['A:joined', 'B:joined', 'C:joined']);
   assert.equal(service.getState().interviewerLeft, false);
   const [a, b, c] = call.departures();
-  setup.clock.setNow(start + 2000);
+  setup.clock.setNow(start + 1000);
   setup.clock.fire(b);
   assert.deepEqual(statuses(service), ['A:joined', 'B:left', 'C:joined'], 'the shortest delay leaves first');
   assert.equal(service.getState().interviewerLeft, false);
-  setup.clock.setNow(start + 3000);
+  setup.clock.setNow(start + 2000);
   setup.clock.fire(a);
   assert.deepEqual(statuses(service), ['A:left', 'B:left', 'C:joined']);
   assert.equal(service.getState().interviewerLeft, false, 'no notice while someone is still on the call');
-  setup.clock.setNow(start + 4000);
+  setup.clock.setNow(start + 3000);
   setup.clock.fire(c);
   assert.deepEqual(statuses(service), ['A:left', 'B:left', 'C:left']);
   assert.equal(service.getState().interviewerLeft, true, 'the notice follows the last departure');
   assert.equal(service.getState().connectionLost, false);
-  assert.deepEqual(events.filter(event => event.type === 'participant-left').map(event => [event.id, event.atMs]), [['B', 2000], ['A', 3000], ['C', 4000]]);
+  assert.deepEqual(events.filter(event => event.type === 'participant-left').map(event => [event.id, event.atMs]), [['B', 1000], ['A', 2000], ['C', 3000]]);
   assert.equal((await service.hangUp()).phase, 'replay');
   const record = await call.built.deps.store.readRecord('call-1');
   assert.equal(record.reason, 'interviewer');
-  assert.equal(record.persona.leftAtMs, 3000);
-  assert.deepEqual(record.panel.map(entry => [entry.id, entry.leftAtMs]), [['B', 2000], ['C', 4000]]);
-  assert.equal(record.interviewerLeftAtMs, 4000, 'the last departure');
+  assert.equal(record.persona.leftAtMs, 2000);
+  assert.deepEqual(record.panel.map(entry => [entry.id, entry.leftAtMs]), [['B', 1000], ['C', 3000]]);
+  assert.equal(record.interviewerLeftAtMs, 3000, 'the last departure');
 });
 
-test('departures: the delay is 2.0 to 4.0 s in steps of 0.1 s whatever the draw', async () => {
+test('departures: the delay is 1.0 to 3.0 s in steps of 0.1 s whatever the draw', async () => {
   const delays = [];
   for (const value of [0, 0.049, 0.05, 0.5, 0.95, 0.9999, 1, Number.NaN]) {
     let draw = 0.9;
@@ -4621,10 +4662,10 @@ test('departures: the delay is 2.0 to 4.0 s in steps of 0.1 s whatever the draw'
     await built.service.answer();
     draw = value;
     setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' });
-    delays.push(setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000).map(timer => timer.ms)[0]);
+    delays.push(setup.clock.pending().filter(isDeparture).map(timer => timer.ms)[0]);
     await built.service.hangUp();
   }
-  assert.deepEqual(delays, [2000, 2100, 2100, 3000, 3900, 4000, 4000, 2000]);
+  assert.deepEqual(delays, [1000, 1100, 1100, 2000, 2900, 3000, 3000, 1000]);
 });
 
 test('departures: while they leave nothing reaches a session, the chat takes a line without an answer, and the pad and pause are closed', async () => {
@@ -4645,7 +4686,7 @@ test('departures: a hang-up during the stagger finishes the call normally and ca
   const start = call.setup.clock.now();
   call.ended('interviewer');
   const [a] = call.departures();
-  call.setup.clock.setNow(start + 2000);
+  call.setup.clock.setNow(start + 1000);
   call.setup.clock.fire(a);
   assert.equal(call.service.getState().interviewerLeft, false);
   const pending = call.departures();
@@ -4659,7 +4700,7 @@ test('departures: a hang-up during the stagger finishes the call normally and ca
   assert.equal(call.service.getState().interviewerLeft, false);
   const record = await call.built.deps.store.readRecord('call-1');
   assert.equal(record.reason, 'interviewer', 'the interviewer ended it, so the candidate is not faulted');
-  assert.equal(record.persona.leftAtMs, 2000);
+  assert.equal(record.persona.leftAtMs, 1000);
   assert.equal(record.panel.every(entry => entry.leftAtMs === undefined), true, 'those still on the call have no departure');
   assert.equal(record.interviewerLeftAtMs, undefined);
 });
@@ -4695,7 +4736,7 @@ test('departures: a colleague who had not joined yet is not on the call to leave
   const built = await panelStart(setup);
   await built.service.answer();
   setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' });
-  assert.equal(setup.clock.pending().filter(timer => timer.ms >= 2000 && timer.ms <= 4000).length, 1, 'only the lead');
+  assert.equal(setup.clock.pending().filter(isDeparture).length, 1, 'only the lead');
   await built.service.hangUp();
 });
 
