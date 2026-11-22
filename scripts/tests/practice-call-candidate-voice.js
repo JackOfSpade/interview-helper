@@ -491,7 +491,13 @@ async function injectLine(rig, line, started = true) {
 /** The microphone hears the injected line: the helper's vad and transcript events, like real speech. */
 function micHears(rig, text, segmentId = 's1') {
   rig.h.vad(true);
+  (rig.micStarts ||= {})[segmentId] = rig.clock.now();
   rig.h.transcript(text, segmentId, rig.clock.now(), false, rig.clock.now() + 300);
+}
+/** The recogniser settles what it heard (the final for that segment, same start), as it does a moment after the speech ends. */
+function micSettles(rig, text, segmentId = 's1') {
+  const start = rig.micStarts?.[segmentId] ?? rig.clock.now();
+  rig.h.transcript(text, segmentId, start, true, start + 300);
 }
 
 /** The candidate answers by microphone and the interviewer's reply is on air (playing, not finished). */
@@ -553,6 +559,7 @@ test('injected: the turn ends by vad and speculation like speech, with the micro
   rig.h.vad(false);
   await rig.clock.advance(600);
   assert.equal(rig.sessions.main.calls.length, before, 'a pause while the line is still playing starts nothing');
+  micSettles(rig, 'I rebuilt the billing service in Go.');
   rig.h.inject(line.utteranceId, 'finished', 3000);
   await flush();
   await rig.clock.advance(10);
@@ -570,6 +577,40 @@ test('injected: the turn ends by vad and speculation like speech, with the micro
   assert.equal(ear.calls.prepared.length + ear.calls.noted.length, 0, 'the ear measures candidate.wav, not the AI voice');
 });
 
+test('injected: after a line heard whole the first look waits for the recogniser\'s final on its last words, a little while at most', async () => {
+  // As in call-mwqscir3-3yraup: the look began on the cut-short text and was thrown away when the final came.
+  const { rig, voice } = await injectRig();
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await flush();
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(600);
+  assert.equal(rig.sessions.opener.calls.length, 0, 'no look on the cut-short words');
+  micSettles(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(100);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the look starts once the final is in');
+  assert(lastOpener(rig).includes('I rebuilt the billing service in Go.'), lastOpener(rig));
+  // Without a final the wait ends on its own.
+  const other = await injectRig();
+  other.rig.engine.typed('Short answer.', { chatId: 'm1' });
+  await flush();
+  await injectLine(other.rig, other.voice.lines[0]);
+  micHears(other.rig, 'Short');
+  await other.rig.clock.advance(300);
+  other.rig.h.vad(false);
+  await flush();
+  other.rig.h.inject(other.voice.lines[0].utteranceId, 'finished', 3000);
+  await flush();
+  await other.rig.clock.advance(1300);
+  assert.equal(other.rig.sessions.opener.calls.length, 1, 'the wait is bounded');
+});
+
 test('injected: the end of the AI voice line is a sure finish, however the turn model scores it', async () => {
   const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
   const { rig, voice } = await injectRig({ ear });
@@ -582,6 +623,7 @@ test('injected: the end of the AI voice line is a sure finish, however the turn 
   await rig.clock.advance(300);
   rig.h.vad(false);
   await flush();
+  micSettles(rig, 'I rebuilt the billing service in Go.');
   rig.h.inject(line.utteranceId, 'finished', 3000);
   await flush();
   await rig.clock.advance(600);
@@ -603,6 +645,7 @@ test('injected: the turn model is not even asked about a vad end that belongs to
   await rig.clock.advance(300);
   rig.h.vad(false); // the line is still playing when the vad end arrives
   await flush();
+  micSettles(rig, 'I rebuilt the billing service in Go.');
   rig.h.inject(line.utteranceId, 'finished', 3000);
   await flush();
   await rig.clock.advance(600);
@@ -866,6 +909,198 @@ test('injected: pausing cuts the line and everything queued behind it, where the
   rig.engine.setPaused(false);
   await flush();
   assert.equal(voice.lines.length, 1, 'the queued message was dropped, not spoken later');
+});
+
+test('injected: a generated line sent during a pause is made and held, reported ready, and played whole on the resume', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.setPaused(true);
+  await flush();
+  assert.equal(rig.engine.canHoldVoice(), true);
+  assert.equal(rig.engine.typed('Typed by hand.', { chatId: 'm0' }), false, 'a typed message is still refused while paused');
+  assert.equal(rig.engine.typed(LONG, { generated: true, chatId: 'm1' }), true, 'the wand\'s line is accepted and made now');
+  await flush();
+  const line = voice.lines[0];
+  line.audioCb(Buffer.alloc(4800));
+  await flush();
+  const ready = rig.of('candidate-voice').find(item => item.state === 'ready');
+  assert.deepEqual({ held: ready.held, chatIds: ready.chatIds }, { held: true, chatIds: ['m1'] }, 'ready while still paused');
+  line.audioCb(Buffer.alloc(4800));
+  line.wordsCb(timed(line.text));
+  line.finish();
+  await flush();
+  assert.deepEqual(injectOps(rig, line.utteranceId), [], 'nothing reaches the microphone during the pause');
+  rig.engine.setPaused(false);
+  await flush();
+  assert.deepEqual(injectOps(rig, line.utteranceId), ['inject', 'injectAudio', 'injectAudio', 'injectEnd'], 'played from its start on the resume');
+});
+
+test('injected: a line not heard yet when the pause starts is held for the resume, not dropped', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.typed(LONG, { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  rig.engine.setPaused(true);
+  await flush();
+  line.audioCb(Buffer.alloc(4800));
+  line.finish();
+  await flush();
+  assert.deepEqual(injectOps(rig, line.utteranceId), []);
+  assert.equal(rig.of('candidate-voice').some(item => item.state === 'cut'), false);
+  rig.engine.setPaused(false);
+  await flush();
+  assert.deepEqual(injectOps(rig, line.utteranceId), ['inject', 'injectAudio', 'injectEnd']);
+});
+
+test('injected: a sentence-end cut-in on the voice line waits for the sentence to end as heard on the microphone, exactly as for live speech', async () => {
+  // Nothing about the voice line's own words or timings is used: only what the microphone path hears, as for a real voice.
+  const candidateVoice = fakeCandidateVoice();
+  const watchParse = text => {
+    const found = /^cut:(\w):([\w-]+)(?::([\w-]+))?$/u.exec(String(text ?? '').trim());
+    return found ? { decision: 'cut-in', who: found[1], reason: found[2], when: found[3] === 'sentence-end' ? 'sentence-end' : 'now' } : { decision: 'listen', who: null, reason: null };
+  };
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: watchParse,
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 50, cutInYieldMs: 2500 } });
+  await greet(rig);
+  const text = 'We moved every job onto one queue and then we sharded it by region. After that the retries became cheap.';
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  line.audioCb(Buffer.alloc(48000 * 12));
+  line.wordsCb(timed(text));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  micHears(rig, 'We moved every job onto one queue and then');
+  await rig.clock.advance(3100);
+  const watch = rig.sessions.watcher.calls.at(-1);
+  watch.settled = true;
+  watch.resolve({ text: 'cut:A:probe:sentence-end' });
+  await flush();
+  rig.h.inject(line.utteranceId, 'position', 2700);
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  const held = rig.of('cut-in').find(event => event.state === 'held');
+  assert.equal(held.until, 'sentence-end');
+  assert.equal(held.waitMs, undefined, 'no wait worked out from the line itself');
+  rig.h.vad(false); // a clause gap in the voice line, which goes straight on
+  await flush();
+  assert(!rig.opsOf('play').some(item => item.id === id), 'a clause gap does not release it');
+  await rig.clock.advance(200);
+  rig.h.vad(true);
+  await flush();
+  await rig.clock.advance(1200);
+  assert(!rig.opsOf('play').some(item => item.id === id), 'still mid-sentence');
+  // The recogniser settles the sentence: that is the end of it, for this voice as for any.
+  rig.h.transcript('We moved every job onto one queue and then we sharded it by region.', 's1', rig.micStarts.s1, true, rig.clock.now());
+  await flush();
+  assert(rig.opsOf('play').some(item => item.id === id), 'it lands at the full stop');
+  assert(rig.of('cut-in').some(event => event.state === 'committed'));
+});
+
+test('injected: a now cut-in on the voice line comes in at the next breath, exactly as on live speech', async () => {
+  // As in call-mwqscir3-3yraup: the voice line's clause gaps read as breaths, so the cut landed mid-clause.
+  const candidateVoice = fakeCandidateVoice();
+  const watchParse = text => {
+    const found = /^cut:(\w):([\w-]+)(?::([\w-]+))?$/u.exec(String(text ?? '').trim());
+    return found ? { decision: 'cut-in', who: found[1], reason: found[2], when: found[3] === 'sentence-end' ? 'sentence-end' : 'now' } : { decision: 'listen', who: null, reason: null };
+  };
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: watchParse,
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 50, cutInYieldMs: 2500 } });
+  await greet(rig);
+  const text = 'We moved every job onto one queue and then we sharded it by region. After that the retries became cheap.';
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  line.audioCb(Buffer.alloc(48000 * 12));
+  line.wordsCb(timed(text));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  micHears(rig, 'We moved every job onto one queue and then');
+  await rig.clock.advance(3100);
+  const watch = rig.sessions.watcher.calls.at(-1);
+  watch.settled = true;
+  watch.resolve({ text: 'cut:A:probe' });
+  await flush();
+  rig.h.inject(line.utteranceId, 'position', 2700);
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  assert(!rig.of('cut-in').some(event => event.until === 'sentence-end'), 'no sentence hold');
+  rig.h.vad(false); // a clause gap in the voice line: the breath
+  await flush();
+  assert(rig.opsOf('play').some(item => item.id === id), 'it comes in at the breath, mid-sentence');
+});
+
+test('injected: a cut-in already stale when it is ready is dropped, never held to the sentence end', async () => {
+  const candidateVoice = fakeCandidateVoice();
+  const watchParse = text => {
+    const found = /^cut:(\w):([\w-]+)(?::([\w-]+))?$/u.exec(String(text ?? '').trim());
+    return found ? { decision: 'cut-in', who: found[1], reason: found[2], when: found[3] === 'sentence-end' ? 'sentence-end' : 'now' } : { decision: 'listen', who: null, reason: null };
+  };
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: watchParse,
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInYieldMs: 2500 } });
+  await greet(rig);
+  const text = 'We moved every job onto one queue and then we sharded it by region. After that the retries became cheap.';
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  line.audioCb(Buffer.alloc(48000 * 12));
+  line.wordsCb(timed(text));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  micHears(rig, 'We moved every job');
+  await rig.clock.advance(3100);
+  const watch = rig.sessions.watcher.calls.at(-1);
+  watch.settled = true;
+  watch.resolve({ text: 'cut:A:probe:sentence-end' });
+  await flush();
+  micHears(rig, 'We moved every job onto one queue and then we sharded it', 's2'); // many words since the look
+  rig.h.inject(line.utteranceId, 'position', 3300);
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  assert(!rig.of('cut-in').some(event => event.until === 'sentence-end'), 'not held to the sentence end');
+});
+
+test('injected: a wand line sent while the playing line is still being cut for the pause is made, held and played on the resume', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.typed(LONG, { chatId: 'm1' });
+  await flush();
+  const first = voice.lines[0];
+  await injectLine(rig, first);
+  rig.h.inject(first.utteranceId, 'position', 900);
+  rig.engine.setPaused(true); // the line is playing: it is cut, and the helper has not said so yet
+  await flush();
+  assert.equal(rig.engine.typed('Picking up from there.', { generated: true, chatId: 'm2' }), true);
+  await flush();
+  assert.equal(voice.lines.length, 1, 'nothing new while the old line is still ending');
+  rig.h.inject(first.utteranceId, 'cancelled', 940);
+  await flush();
+  assert.equal(voice.lines.length, 2, 'made once the old line is over, still paused');
+  const second = voice.lines[1];
+  second.audioCb(Buffer.alloc(4800));
+  second.finish();
+  await flush();
+  assert.deepEqual(injectOps(rig, second.utteranceId), [], 'held through the pause');
+  rig.engine.setPaused(false);
+  await flush();
+  assert.deepEqual(injectOps(rig, second.utteranceId), ['inject', 'injectAudio', 'injectEnd'], 'played on the resume');
+});
+
+test('an interviewer starting to speak is announced with the reaction time the candidate gives way after, the same one the voice line uses', async () => {
+  const { rig } = await injectRig({ random: () => 0.5 });
+  await interviewerSpeaking(rig);
+  const floor = rig.of('floor').at(-1);
+  assert.equal(floor.yieldMs, 600, 'halfway between 300 and 900 ms');
+  assert.equal(floor.speakerId, null, 'a call with one interviewer names no speaker');
 });
 
 test('injected: hanging up cancels the injection and ignores what the helper reports after', async () => {

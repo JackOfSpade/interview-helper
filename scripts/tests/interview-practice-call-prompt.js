@@ -657,17 +657,25 @@ const pacingTests = [
     run() {
       const reply = 'Hello. This is Jack<over id="b">Hi.</over>, our engineer. <speaker id="B"/>Nice to meet you. Right <over id="A">Yes.</over>now.';
       const overs = overItems([reply]);
-      assert.deepEqual(overs, [{ speakerId: 'B', text: 'Hi.', spoken: 'Hi.', afterChars: 'Hello.ThisisJack'.length }]);
+      assert.deepEqual(overs, [
+        { speakerId: 'B', text: 'Hi.', spoken: 'Hi.', afterChars: 'Hello.ThisisJack'.length },
+        { speakerId: 'A', text: 'Yes.', spoken: 'Yes.', afterChars: 'Nicetomeetyou.Right'.length },
+      ]);
       const second = overItems(['<speaker id="B"/>Nice to meet you. Right <over id="A">Yes.</over>now.']);
       assert.deepEqual(second, [{ speakerId: 'A', text: 'Yes.', spoken: 'Yes.', afterChars: 'Nicetomeetyou.Right'.length }]);
     },
   },
   {
-    name: 'over tag: limits drop the tag silently (too many words, a second one, the speaker itself, no id, empty)',
+    name: 'over tag: any length and any number are kept; the speaker itself, no id and empty drop the tag silently',
     run() {
-      assert.deepEqual(spoken(['Fine <over id="B">one two three four</over>and so.']), ['Fine and so.']);
-      assert.deepEqual(overItems(['Fine <over id="B">one two three</over>and so.']).length, 1);
-      assert.deepEqual(overItems(['A <over id="B">Hi.</over>b <over id="C">Yes.</over>c.']), [{ speakerId: 'B', text: 'Hi.', spoken: 'Hi.', afterChars: 1 }]);
+      assert.deepEqual(spoken(['Fine <over id="B">nice to meet you all</over>and so.']), ['Fine and so.']);
+      assert.deepEqual(overItems(['Fine <over id="B">nice to meet you all</over>and so.']).length, 1);
+      assert.deepEqual(overItems(['A <over id="B">Hi.</over>b <over id="C">Yes.</over>c.']), [
+        { speakerId: 'B', text: 'Hi.', spoken: 'Hi.', afterChars: 1 },
+        { speakerId: 'C', text: 'Yes.', spoken: 'Yes.', afterChars: 2 },
+      ]);
+      // Two colleagues at the same point: both kept, at the same place.
+      assert.deepEqual(overItems(['Meet Ana,<over id="B">Hi.</over><over id="C">Hello.</over> our lead.']).map(item => [item.speakerId, item.afterChars]), [['B', 8], ['C', 8]]);
       assert.deepEqual(spoken(['A <over id="B">Hi.</over>b <over id="C">Yes.</over>c.']), ['A b c.']);
       assert.deepEqual(overItems(['<speaker id="B"/>Hello <over id="B">Hi.</over>there.']), []);
       assert.deepEqual(spoken(['<speaker id="B"/>Hello <over id="B">Hi.</over>there.']), ['Hello there.']);
@@ -711,14 +719,14 @@ const pacingTests = [
     },
   },
   {
-    name: 'over tag: a leading delivery tag is kept in text, dropped from spoken, and not counted as words',
+    name: 'over tag: a leading delivery tag is kept in text and dropped from spoken; a tag alone is nothing to say',
     run() {
       const reply = 'Welcome, <over id="B">[warmly] Hi Jack.</over>everyone.';
       everySplit(reply, (chunks, at) => {
         assert.deepEqual(allItems(chunks).filter(item => item.over).map(item => item.over), [{ speakerId: 'B', text: '[warmly] Hi Jack.', spoken: 'Hi Jack.', afterChars: 'Welcome,'.length }], `split ${at}`);
       });
       assert.equal(overItems(['A <over id="B">[softly] one two three</over>b.']).length, 1);
-      assert.equal(overItems(['A <over id="B">[softly] one two three four</over>b.']).length, 0);
+      assert.equal(overItems(['A <over id="B">[softly] one two three four</over>b.']).length, 1);
       assert.equal(overItems(['A <over id="B">[softly]</over>b.']).length, 0);
     },
   },
@@ -795,10 +803,16 @@ const pacingTests = [
         assert.doesNotMatch(prompt, /about 20 seconds|about 50 seconds|about 95 seconds/u);
       }
       for (const prompt of [buildInterviewerInstructions({ persona, brief, plan, callPlan }), buildInterviewerInstructions({ persona, brief, plan, callPlan, history: 'Interviewer: hi' })]) {
-        assert.match(prompt, /<over id="B">Hi Jack\.<\/over>/u);
-        assert.match(prompt, /at most 3 words/u);
+        assert.match(prompt, /<over id="X">Hi Jack\.<\/over>, where X is the id of whichever colleague speaks over/u);
+        // How colleagues come in at the opening is the model's choice, not a fixed pattern.
+        assert.match(prompt, /how that goes is not fixed/u);
+        assert.match(prompt, /no default order and no default pattern/u);
+        assert.match(prompt, /A reply may have any number of them/u);
+        assert.match(prompt, /two or more people speak over the speaker at once/u);
+        assert.doesNotMatch(prompt, /at most 3 words|once or twice in a whole call|at most two|at most one per reply|sparingly/u);
+        assert.doesNotMatch(prompt, /introduced by you in the opening/u);
         assert.match(prompt, /overlap for an instant/u);
-        assert.match(prompt, /Anything longer than three words/u);
+        assert.match(prompt, /If the line needs the floor, write it as a cut-in instead/u);
         assert.match(prompt, /ending in a dash/u);
       }
       assert.doesNotMatch(solo, /<over id=/u);
@@ -1021,8 +1035,8 @@ export default [
       assert(section.includes('[You gave the floor to <name>, who has not joined the call yet.') && section.includes('Recover in your own words'));
       assert(!section.includes('running a few minutes late') && !section.includes('Never speak as them or to them until'));
       assert(section.includes('has joined the call and is listening') && section.includes('never cutting the candidate off') && section.includes('catch them up'));
-      assert(section.includes('do not repeat questions already asked') && section.includes('first name') && section.includes('never talk over each other'));
-      assert(section.includes('at most two') && section.includes('farewell is said by you'));
+      assert(section.includes('do not repeat questions already asked') && section.includes('first name') && section.includes('talk over each other the way real colleagues do'));
+      assert(section.includes('How many interviewers speak in a reply is your call') && section.includes('farewell is said by you'));
       assert(text.endsWith('Reply only READY now.'));
       const opener = buildOpenerInstructions({ persona, brief, plan, panel: callPlan.people.slice(1) });
       assert(!opener.includes('\nPANEL\n') && opener.includes('Never write a speaker tag.') && opener.includes('listening sounds of an interviewer'));
@@ -1367,6 +1381,8 @@ export default [
       const lead = formatTurnMessage({ elapsedMs: 1000, candidateText: 'x', stillSpeaking: true, cutInBy: { id: 'A', reason: 'long' } });
       assert.match(lead, /id A\) would cut in|interviewer with id A would cut in now, because the answer is running long/u);
       assert(!lead.includes('<speaker'), 'the lead needs no tag');
+      const patient = formatTurnMessage({ elapsedMs: 1000, candidateText: 'x', stillSpeaking: true, cutInBy: { id: 'B', name: 'John Reyes', reason: 'probe', when: 'sentence-end' } });
+      assert.match(patient, /John Reyes \(id B\) would cut in as soon as the candidate finishes the sentence they are saying, because/u);
       const plain = formatTurnMessage({ elapsedMs: 1000, candidateText: 'x', mostRecent: 'ignored', cutInBy: { id: 'B', reason: 'long' } });
       assert(!plain.includes('Most recent') && !plain.includes('would cut in'), 'nothing extra outside a look');
     },
@@ -1388,9 +1404,9 @@ export default [
     name: 'interview practice prompt: parseWatchDecision reads a cut-in, a listen, a panel cut-in and anything unreadable as listen',
     run() {
       assert.deepEqual(parseWatchDecision('<listen/>'), { decision: 'listen', who: null, reason: null });
-      assert.deepEqual(parseWatchDecision('<cut-in who="B" reason="probe"/>'), { decision: 'cut-in', who: 'B', reason: 'probe' });
-      assert.deepEqual(parseWatchDecision('  <cut-in reason="long" who=\'a\' />\n'), { decision: 'cut-in', who: 'A', reason: 'long' });
-      assert.deepEqual(parseWatchDecision('<cut-in reason="enough"/>'), { decision: 'cut-in', who: null, reason: 'enough' });
+      assert.deepEqual(parseWatchDecision('<cut-in who="B" reason="probe"/>'), { decision: 'cut-in', who: 'B', reason: 'probe', when: 'now' }, 'no timing: now');
+      assert.deepEqual(parseWatchDecision('  <cut-in reason="long" who=\'a\' when="SENTENCE-END" />\n'), { decision: 'cut-in', who: 'A', reason: 'long', when: 'sentence-end' });
+      assert.deepEqual(parseWatchDecision('<cut-in reason="enough" when="later"/>'), { decision: 'cut-in', who: null, reason: 'enough', when: 'now' }, 'an unreadable timing is now');
       for (const reason of ['long', 'off-topic', 'probe', 'enough', 'misunderstood', 'composure']) assert.equal(parseWatchDecision(`<cut-in who="A" reason="${reason}"/>`).reason, reason);
       for (const bad of ['', undefined, null, 42, 'cut in now', '<cut-in/>', '<cut-in who="B"/>', '<cut-in who="B" reason="bored"/>', '<maybe/>', '<cut-in who="B" reason="probe"']) {
         assert.deepEqual(parseWatchDecision(bad), { decision: 'listen', who: null, reason: null }, String(bad));
@@ -1415,7 +1431,8 @@ export default [
       assert.match(text, /who is the person who asked the question \(the asker named in the message\) unless a colleague is clearly the one whose area the answer is in, and then less often than the asker would/u);
       assert.match(text, /past about twice it, almost anyone would step in/u);
       assert.match(text, /Never cut in on the candidate's own questions to the interviewers \(near the end of the call\)/u);
-      assert.match(text, /<listen\/>[^\n]*<cut-in who="B" reason="probe"\/>/u);
+      assert.match(text, /<listen\/>[^\n]*<cut-in who="B" reason="probe" when="now"\/>/u);
+      assert(text.includes('when is now or sentence-end') && text.includes('read from their "How they interrupt"') && text.includes('no default and no quota'));
       assert.match(text, /long, off-topic, probe, enough, misunderstood, composure/u);
       assert.match(text, /CONVERSATION SO FAR[^\n]*\nCandidate: hi\n\nReply only READY now\.$/u, 'history goes before the READY line, which ends it');
       assert(text.endsWith('Reply only READY now.'));

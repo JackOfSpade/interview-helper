@@ -317,6 +317,11 @@ if (!app.requestSingleInstanceLock()) {
         signal, task: 'practice-draft-answer', claudeStage: 'practice-call-draft-answer',
         ...(Array.isArray(pageImages) && pageImages.length ? { pageImages } : {}),
       });
+      // Testing aid: the wand working a coding-pad exercise, as steps of a spoken line and the pad after it (JSON).
+      const practiceDraftWorkText = ({ prompt, schema, signal, pageImages } = {}) => reviewTransport.callText(prompt, {
+        signal, task: 'practice-draft-work', claudeStage: 'practice-call-draft-work', responseSchema: schema,
+        ...(Array.isArray(pageImages) && pageImages.length ? { pageImages } : {}),
+      });
       // Shared-screen visuals, made during setup: choosing a Commons picture (it reads the candidates) and drawing a diagram.
       const practiceVisualPickText = ({ prompt, schema, signal, pageImages } = {}) => reviewTransport.callText(prompt, {
         signal, task: 'practice-visual-pick', claudeStage: 'practice-call-visual-pick', responseSchema: schema, pageImages,
@@ -351,6 +356,7 @@ if (!app.requestSingleInstanceLock()) {
         serviceOptions: {
           planText: practicePlanText,
           draftText: practiceDraftText,
+          draftWorkText: practiceDraftWorkText,
           // Sent chat messages are spoken in the candidate's own voice (off in the unit suites).
           candidateVoices: true,
           // A warm cut-in watcher session that decides, from the last seconds of an answer, whether the interviewer would cut in (off in the unit suites).

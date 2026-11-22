@@ -553,8 +553,152 @@ export const overlayTests = [
       c.sendText('Hello there.');
       assert.equal(c.overlay({ speakerId: 'B', text: '', afterChars: 3 }), false, 'empty text');
       assert.equal(c.overlay({ speakerId: 'B', text: 'Hi.', afterChars: 3 }), true);
-      assert.equal(c.overlay({ speakerId: 'C', text: 'Hey.', afterChars: 4 }), false, 'one remark per utterance');
+      assert.equal(c.overlay({ speakerId: 'C', text: 'Hey.', afterChars: 4 }), true, 'any number of remarks per utterance');
+      assert.equal(two.made.at(-1).utteranceId, 'o12-o2', 'each remark has its own stream');
       c.cancel();
+      assert.equal(two.made.at(-1).cancelCalls, 1, 'cancel closes every remark stream');
+    },
+  },
+  {
+    name: 'panel voice overlay: several remarks mix in at their own points and overlap each other',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'm1' });
+      const log = collect(stream);
+      stream.sendText('Meet Ana and Ben today.');
+      assert.equal(stream.overlay({ speakerId: 'B', text: 'Hi.', afterChars: 4 }), true);
+      assert.equal(stream.overlay({ speakerId: 'C', text: 'Hello.', afterChars: 7 }), true);
+      const b = made.find(x => x.id === 'B'); const c = made.find(x => x.id === 'C');
+      assert.equal(b.utteranceId, 'm1-o');
+      assert.equal(c.utteranceId, 'm1-o2');
+      b.push(flat(30, 1000)); b.end();
+      c.push(flat(30, 2000)); c.end();
+      made[0].say([{ word: 'Meet', startMs: 0, endMs: 10 }, { word: 'Ana', startMs: 20, endMs: 30 }, { word: 'and', startMs: 40, endMs: 45 }, { word: 'Ben', startMs: 50, endMs: 60 }]);
+      made[0].push(flat(200, 10)); made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out.length, 200);
+      assert.equal(out[19], 10, 'nothing before the first point');
+      assert.equal(out[20], 10 + 850, 'B from its point');
+      assert.equal(out[39], 10 + 850);
+      assert.equal(out[40], 10 + 850 + 1700, 'B and C overlap each other and the speaker');
+      assert.equal(out[49], 10 + 850 + 1700);
+      assert.equal(out[50], 10 + 1700, 'B has ended, C goes on');
+      assert.equal(out[69], 10 + 1700);
+      assert.equal(out[70], 10);
+      assert.deepEqual(log.overlays, [{ speakerId: 'B', text: 'Hi.', offsetMs: 20 }, { speakerId: 'C', text: 'Hello.', offsetMs: 40 }]);
+    },
+  },
+  {
+    name: 'panel voice overlay: several remarks at the same point both play, and both outlast the speaker whole',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'm2' });
+      const log = collect(stream);
+      stream.sendText('Welcome.');
+      stream.overlay({ speakerId: 'B', text: 'Hi.', afterChars: 8 });
+      stream.overlay({ speakerId: 'C', text: 'Hey there.', afterChars: 8 });
+      const b = made.find(x => x.id === 'B'); const c = made.find(x => x.id === 'C');
+      b.push(flat(40, 100)); b.end();
+      c.push(flat(80, 200)); c.end();
+      made[0].say([{ word: 'Welcome.', startMs: 0, endMs: 90 }]);
+      made[0].push(flat(100, 1)); made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out.length, 180, 'the main speech plus the longer remark');
+      assert.equal(out[99], 1);
+      assert.equal(out[100], 85 + 170, 'both start where the host ends');
+      assert.equal(out[139], 85 + 170);
+      assert.equal(out[140], 170, 'the longer one plays on alone');
+      assert.equal(out[179], 170);
+      assert.deepEqual(log.overlays.map(e => [e.speakerId, e.offsetMs]), [['B', 100], ['C', 100]]);
+    },
+  },
+  {
+    name: 'panel voice overlay: one remark ending does not free the speech while another at the same point is only partly in',
+    async run() {
+      const clock = fakeClock();
+      const { panel, made } = setup({ clock });
+      const stream = panel.open({ utteranceId: 'm4' });
+      const log = collect(stream);
+      stream.sendText('Welcome both.');
+      stream.overlay({ speakerId: 'B', text: 'Hi.', afterChars: 7 });
+      stream.overlay({ speakerId: 'C', text: 'Hello there.', afterChars: 7 });
+      const b = made.find(x => x.id === 'B'); const c = made.find(x => x.id === 'C');
+      made[0].say([{ word: 'Welcome', startMs: 0, endMs: 40 }, { word: 'both.', startMs: 50, endMs: 90 }]);
+      made[0].push(flat(200, 1));
+      assert.equal(log.all.length, 100, 'held at the shared point');
+      c.push(flat(10, 1000)); // only the first part of C
+      b.push(flat(10, 100)); b.end();
+      await flush();
+      assert.equal(log.all.length, 100, 'B being whole does not release the speech while C is still coming');
+      assert.equal(clock.timers.size, 1, 'one wait, not a fresh one per remark');
+      c.push(flat(10, 1000)); c.end();
+      await flush();
+      assert.equal(clock.timers.size, 0);
+      assert.equal(log.all.length, 400);
+      made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out[49], 1);
+      assert.equal(out[50], 1 + 85 + 850, 'both from the point');
+      assert.equal(out[59], 1 + 85 + 850);
+      assert.equal(out[60], 1 + 850, 'C whole, in one piece');
+      assert.equal(out[69], 851);
+      assert.equal(out[70], 1);
+    },
+  },
+  {
+    name: 'panel voice overlay: when the wait runs out the speech goes on, and a remark partly in plays what it has from there, as one remark does',
+    async run() {
+      const clock = fakeClock();
+      const { panel, made } = setup({ clock });
+      const stream = panel.open({ utteranceId: 'm5' });
+      const log = collect(stream);
+      stream.sendText('Welcome both.');
+      stream.overlay({ speakerId: 'B', text: 'Hi.', afterChars: 7 });
+      const b = made.find(x => x.id === 'B');
+      made[0].say([{ word: 'Welcome', startMs: 0, endMs: 40 }, { word: 'both.', startMs: 50, endMs: 90 }]);
+      made[0].push(flat(200, 1));
+      b.push(flat(10, 100));
+      assert.equal(log.all.length, 100);
+      clock.fire();
+      assert.equal(log.all.length, 400, 'the speech goes on');
+      b.push(flat(10, 100)); b.end();
+      made[0].push(flat(100, 1)); made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out[50], 1 + 85, 'what had arrived mixes in once the speech goes on');
+      assert.equal(log.overlays.length, 1);
+    },
+  },
+  {
+    name: 'panel voice overlay: the speech waits for a late second remark at its own point, not the first one',
+    async run() {
+      const clock = fakeClock();
+      const { panel, made } = setup({ clock });
+      const stream = panel.open({ utteranceId: 'm3' });
+      const log = collect(stream);
+      stream.sendText('One two three four.');
+      stream.overlay({ speakerId: 'B', text: 'Right.', afterChars: 3 });
+      stream.overlay({ speakerId: 'C', text: 'Yes.', afterChars: 11 });
+      const b = made.find(x => x.id === 'B'); const c = made.find(x => x.id === 'C');
+      b.push(flat(10, 100)); b.end();
+      await flush();
+      made[0].say([{ word: 'One', startMs: 0, endMs: 10 }, { word: 'two', startMs: 20, endMs: 30 }, { word: 'three', startMs: 40, endMs: 50 }, { word: 'four.', startMs: 60, endMs: 70 }]);
+      made[0].push(flat(200, 1));
+      assert.equal(log.all.length, 120, 'B mixed in at 20; the speech holds at C\'s point, 60');
+      assert.equal(clock.timers.size, 1);
+      c.push(flat(10, 1000)); c.end();
+      await flush();
+      assert.equal(clock.timers.size, 0);
+      assert.equal(log.all.length, 400);
+      made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out[20], 86); assert.equal(out[29], 86); assert.equal(out[30], 1);
+      assert.equal(out[59], 1); assert.equal(out[60], 851); assert.equal(out[69], 851); assert.equal(out[70], 1);
+      assert.deepEqual(log.overlays.map(e => [e.speakerId, e.offsetMs]), [['B', 20], ['C', 60]]);
     },
   },
   {

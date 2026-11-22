@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { build } from 'esbuild';
 import { assert } from './testHelpers.js';
+import strict from 'node:assert/strict';
 
 const ROOT = path.resolve('.');
 const PRACTICE = path.join(ROOT, 'src/practice-call');
@@ -1283,6 +1284,194 @@ export default [
             await act(() => pushState?.({ ...current(), interviewerLeft: true }));
             await settle();
             assert(!byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]'), 'nobody is left to hear it');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'practice call render: a wand line accepted during a pause stops spinning once its voice is ready, before it plays',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          let release;
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Why us?', atMs: 1000 }];
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, paused: true });
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            // The voice can hold a line: it is accepted while paused (the state still says paused).
+            sendChat: async (text, options) => { sent.push({ text, options }); chat = [...chat, { id: 'm1', from: 'candidate', text, atMs: 2000, voice: 'waiting' }]; return current(); },
+            setTyping: async () => {},
+            draftAnswer: () => new Promise(resolve => { release = () => resolve({ text: 'Held line.' }); }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = () => act(() => new Promise(resolve => setTimeout(resolve, 5)));
+          const spinning = () => !!byLabel('Suggest a reply').querySelector('[data-testid="suggest-loading"]');
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Suggest a reply').click());
+            await act(() => release());
+            await settle();
+            strict.equal(sent.length, 1, 'sent at once, though paused');
+            assert(spinning(), 'its voice is still being made');
+            chat = chat.map(item => (item.id === 'm1' ? { ...item, voice: 'ready' } : item));
+            await act(() => pushState?.(current()));
+            await settle();
+            assert(!spinning(), 'ready while paused: the spinner stops, so the person knows to resume');
+            await act(() => pushState?.({ ...current(), paused: false }));
+            await settle();
+            strict.equal(sent.length, 1, 'never sent a second time on the resume');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'practice call render: with the pad open the wand says each step, types its code after the line is heard, gives way mid-piece when an interviewer speaks, and starts afresh when pressed again',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          const padUpdates = [];
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
+          let floor = null;
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor, paused: false, pad: { open: true, lang: 'python', text: '' } });
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            // As the service does, the new state is also published, a moment after the send returns.
+            sendChat: async (text, options) => { sent.push({ text, options }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 2000, voice: 'waiting' }]; setTimeout(() => pushState?.(current()), 0); return current(); },
+            updatePad: async text => { padUpdates.push(text); return current(); },
+            setTyping: async () => {},
+            draftAnswer: async () => ({ steps: [
+              { say: 'I will start with the signature.', code: 'def f():\n' },
+              { say: 'Then return one.', code: 'def f():\n    return 1\n' },
+              { say: 'I think that is it.', code: null },
+            ] }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
+          const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
+          const heard = async id => { chat = chat.map(item => (item.id === id ? { ...item, voice: 'heard' } : item)); await act(() => pushState?.(current())); };
+          const until = async (check, label) => { for (let i = 0; i < 400; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} sent=${sent.length} pad=${JSON.stringify(pad())} chat=${JSON.stringify(chat.map(c => c.voice))}`); };
+          const wand = () => byLabel('Suggest a reply');
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Suggest a reply').click());
+            await until(() => sent.length === 1, 'first line sent');
+            strict.equal(sent[0].text, 'I will start with the signature.');
+            strict.equal(sent[0].options.generated, true);
+            await settle(300);
+            strict.equal(pad(), '', 'nothing is typed before the line has been heard');
+            await heard('m1');
+            await until(() => pad().length > 0, 'typing starts');
+            assert(wand() && wand().disabled === false && !wand().querySelector('[data-testid="suggest-loading"]'), 'while it types the wand is still the wand, ready to press');
+            await until(() => pad() === 'def f():\n', 'first piece typed');
+            await until(() => sent.length === 2, 'second line after the typing');
+            await heard('m2');
+            await until(() => pad() === 'def f():\n    return 1\n', 'second piece typed key by key onto the first');
+            await until(() => padUpdates.at(-1) === 'def f():\n    return 1\n', 'the typing reaches the call as pad edits');
+            await until(() => sent.length === 3, 'the closing line');
+            await heard('m3');
+            await settle(50);
+            // An interviewer who starts speaking while it types: after the reaction time it finishes the word it is on
+            // and stops there, mid-piece. What it typed stays.
+            const base = 'def f():\n    return 1\n';
+            const long = `${base}\n# ${'word '.repeat(60)}\n`;
+            window.practiceCallAPI.draftAnswer = async () => ({ steps: [{ say: 'A long comment.', code: long }, { say: 'Done.', code: null }] });
+            await act(() => wand().click());
+            await until(() => sent.length === 4, 'line sent');
+            await heard('m4');
+            await until(() => pad().length > base.length + 20, 'typing the comment');
+            floor = { n: 1, yieldMs: 150, speakerId: 'A' };
+            await act(() => pushState?.(current()));
+            await settle(600);
+            const gaveWayAt = pad();
+            await settle(300);
+            strict.equal(pad(), gaveWayAt, 'nothing more is typed once it has given way');
+            assert(gaveWayAt.length < long.length, 'stopped part-way through the piece');
+            assert(/(?:word|[\s.,;:()[\]{}#])$/u.test(gaveWayAt), `stopped at the end of a word, never inside one: ${JSON.stringify(gaveWayAt.slice(-12))}`);
+            strict.equal(sent.length, 4, 'and says nothing more');
+            // Pressed again while it works: that run ends and a fresh draft starts from the pad as it stands.
+            let drafts = 0;
+            window.practiceCallAPI.draftAnswer = async () => { drafts += 1; return { steps: [{ say: `Another go ${drafts}.`, code: `${gaveWayAt}${'z'.repeat(150)}\n` }] }; };
+            await act(() => wand().click());
+            await until(() => sent.length === 5, 'a fresh line');
+            await heard('m5');
+            await until(() => pad().length > gaveWayAt.length + 5, 'typing again');
+            await act(() => wand().click());
+            await until(() => drafts === 2, 'pressed mid-work: a fresh draft');
+            const cutAt = pad();
+            await settle(300);
+            assert(pad() === cutAt || sent.length === 6, 'the earlier run stopped typing');
+            assert(cutAt.startsWith(gaveWayAt), 'the code typed so far stays in the pad');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'practice call render: a step marked together types while its line is being said, and an interviewer starting to speak stops the talking and the typing together',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
+          let floor = null;
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor, paused: false, pad: { open: true, lang: 'python', text: '' } });
+          const code = `def f(x):\n    # ${'step '.repeat(60)}\n    return x\n`;
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            sendChat: async (text, options) => { sent.push({ text, options }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 2000, voice: 'waiting' }]; setTimeout(() => pushState?.(current()), 0); return current(); },
+            updatePad: async () => current(),
+            setTyping: async () => {},
+            draftAnswer: async () => ({ steps: [{ say: 'I will walk the input as I write it.', code, together: true }, { say: 'Done.', code: null, together: false }] }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
+          const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
+          const voice = async (id, value, extra = {}) => { chat = chat.map(item => (item.id === id ? { ...item, voice: value, ...extra } : item)); await act(() => pushState?.(current())); };
+          const until = async (check, label) => { for (let i = 0; i < 400; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} pad=${JSON.stringify(pad())}`); };
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Suggest a reply').click());
+            await until(() => sent.length === 1, 'line sent');
+            await settle(200);
+            strict.equal(pad(), '', 'nothing typed before the voice starts');
+            await voice('m1', 'playing');
+            await until(() => pad().length > 15, 'typing while the line is still being said');
+            strict.notEqual(chat.find(item => item.id === 'm1').voice, 'heard', 'the line is still playing');
+            // An interviewer starts speaking: the engine cuts the line (after the reaction time) and the hands stop with it.
+            floor = { n: 1, yieldMs: 120, speakerId: 'A' };
+            await act(() => pushState?.(current()));
+            await settle(450);
+            await voice('m1', 'playing', { cutOff: true, text: 'I will walk the —' });
+            const stoppedAt = pad();
+            await settle(300);
+            strict.equal(pad(), stoppedAt, 'the typing stopped with the voice');
+            assert(stoppedAt.length < code.length, 'part-way');
+            strict.equal(sent.length, 1, 'nothing more is said');
           } finally { await act(() => root.unmount()); }
         } finally { await bundle.dispose(); }
       });

@@ -5,7 +5,7 @@ import Avatar from './Avatar.jsx';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
 import { clampScreen } from './screenMarkup.js';
-import { firstNameOf, participantsOf, roleLine } from './persona.js';
+import { firstNameOf, participantsOf } from './persona.js';
 import { playJoinChime, playLeaveChime } from './ringtone.js';
 import { formatTime } from './replayModel.js';
 import { selfPulse } from './callModel.js';
@@ -23,6 +23,9 @@ const flatClass = active => `grid h-10 w-10 place-items-center rounded-full tran
 const TOAST_MS = 4000;
 // The longest the wand waits for its line to start playing (the voice gives up on a line long before this).
 const VOICE_WAIT_MAX_MS = 60000;
+// The wand working an exercise: how often it looks at the call, and the longest it waits on one line (paused time not counted).
+const WORK_POLL_MS = 150;
+const WORK_STEP_MAX_MS = 120000;
 // How long a tile that just left takes to fade out before it is removed (matches .pc-leave).
 const LEAVE_MS = 300;
 
@@ -84,14 +87,18 @@ export default function InCall({ state, api }) {
   // voice at once, without going through the chat box. It is sent marked generated, so it is heard
   // but never counts as practice. While it is written the candidate counts as typing, so the
   // interviewer waits; a reply that is ready while the call is paused is spoken on resume.
-  // The spinner runs until the reply is actually heard: through the writing, a pause that holds it, and the
-  // wait for the candidate's voice to start playing it (its chat entry's `voice` leaves 'waiting').
+  // The spinner runs until the reply is ready to be heard: through the writing and the making of its voice (its chat
+  // entry's `voice` leaves 'waiting' once the voice has it). During a pause the line is made and held, so the spinner
+  // stops while still paused and the line plays the moment the call resumes.
   const canSuggest = typeof api?.draftAnswer === 'function' && typeof api?.sendChat === 'function';
   const [suggesting, setSuggesting] = useState(false);
   const [suggestError, setSuggestError] = useState('');
   // The sent reply the wand still waits to hear: null (none), { id: null } (held for a pause or being sent) or { id }.
   const [voiceWait, setVoiceWait] = useState(null);
   const heldReplyRef = useRef('');
+  // The chat as last seen, so a reply can tell its own new entry from those already there.
+  const chatRef = useRef(state?.chat);
+  useEffect(() => { chatRef.current = state?.chat; });
   const apiRef = useRef(api);
   useEffect(() => { apiRef.current = api; });
   const reportTyping = value => { try { apiRef.current?.setTyping?.(!!value); } catch { /* bridge gone */ } };
@@ -108,16 +115,103 @@ export default function InCall({ state, api }) {
   }, [suggestError]);
   const deliverReply = async text => {
     setVoiceWait({ id: null });
+    const known = new Set((Array.isArray(chatRef.current) ? chatRef.current : []).map(item => item?.id).filter(Boolean));
     let result;
     try { result = await apiRef.current.sendChat(text, { generated: true }); } catch { result = null; }
     if (!mountedRef.current) return;
-    // The window hears about a pause a moment after the shortcut: a reply refused for it waits for the resume.
-    if (result?.paused) { heldReplyRef.current = text; return; }
-    // The entry this reply made; without a voice (or once it failed) there is nothing to wait for.
+    // The entry this reply made (a new one); without a voice (or once it failed) there is nothing to wait for.
     const chat = Array.isArray(result?.chat) ? result.chat : [];
-    const entry = [...chat].reverse().find(item => item?.from === 'candidate' && typeof item.id === 'string');
+    const entry = [...chat].reverse().find(item => item?.from === 'candidate' && typeof item.id === 'string' && !known.has(item.id));
+    // Refused for a pause (a call whose voice cannot hold a line): the reply waits for the resume.
+    if (result?.paused && !entry) { heldReplyRef.current = text; return null; }
     setVoiceWait(entry && entry.voice === 'waiting' ? { id: entry.id } : null);
+    return entry ? entry.id : null;
   };
+  // The wand working an exercise in the pad: each step's line is said and its code typed into the pad at a person's
+  // pace, through the pad's own edits, so the interviewers see it exactly as typing: after the line, or while it is
+  // being said when the step chose to (`together`). When an
+  // interviewer starts speaking it gives way exactly as a spoken answer does: a voice line is cut by the engine, and
+  // typing stops after the same reaction time (the service's `floor`, from the engine), at the end of the word being
+  // typed. Whatever is in the pad stays; the wand pressed again answers and carries on from there. Pressing it while it
+  // works ends this run and starts a fresh one from where things stand.
+  const typerRef = useRef(null);
+  const workRef = useRef(null);
+  const [working, setWorking] = useState(false);
+  const liveRef = useRef(state);
+  useEffect(() => { liveRef.current = state; });
+  const floorCount = () => Number(liveRef.current?.floor?.n) || 0;
+  // An interviewer started speaking since this run began: noted once, with the moment the candidate gives way.
+  const floorTaken = run => {
+    if (run.yieldAt === null && floorCount() > run.floorN) run.yieldAt = Date.now() + (Number(liveRef.current?.floor?.yieldMs) || 600);
+    return run.yieldAt !== null;
+  };
+  const gaveWay = run => floorTaken(run) && Date.now() >= run.yieldAt;
+  const waitUntil = (check, run, limitMs = WORK_STEP_MAX_MS) => new Promise(resolve => {
+    let waited = 0;
+    const tick = () => {
+      if (!mountedRef.current || run.stop || gaveWay(run)) { resolve(false); return; }
+      if (check()) { resolve(true); return; }
+      if (!liveRef.current?.paused) waited += WORK_POLL_MS; // a pause holds the clock
+      if (waited >= limitMs) { resolve(false); return; }
+      setTimeout(tick, WORK_POLL_MS);
+    };
+    tick();
+  });
+  const runWork = async steps => {
+    const run = { stop: false, floorN: floorCount(), yieldAt: null };
+    let finished;
+    run.done = new Promise(resolve => { finished = resolve; });
+    workRef.current = run;
+    setWorking(true);
+    const entryOf = id => (liveRef.current?.chat || []).find(item => item?.id === id);
+    const typeStep = (code, cutLine = () => false) => {
+      if (!liveRef.current?.pad?.open || !typerRef.current) return Promise.resolve(false);
+      // An interviewer who starts speaking is given way to mid-piece, at the end of the word being typed; a line cut
+      // off under it stops the hands with it (talking and typing give way together).
+      return typerRef.current.typeTo(code, {
+        stopped: () => run.stop || !mountedRef.current || !liveRef.current?.pad?.open || cutLine(),
+        paused: () => !!liveRef.current?.paused,
+        yielding: () => gaveWay(run),
+      });
+    };
+    try {
+      for (const step of steps) {
+        if (run.stop || !mountedRef.current || floorTaken(run)) break;
+        const hasCode = step.code !== null && step.code !== undefined;
+        let typing = null;
+        if (step.say) {
+          // A person lets the interviewer finish before going on (one already speaking as the run began).
+          await waitUntil(() => liveRef.current?.speaking !== 'interviewer', run, 30000);
+          if (run.stop || floorTaken(run)) break;
+          const id = await deliverReply(step.say);
+          if (!id) break;
+          const cutLine = () => { const entry = entryOf(id); return !!entry && (entry.cutOff || entry.unsaid || entry.voice === 'failed'); };
+          if (hasCode && step.together) {
+            // Typing while talking: the hands start once the voice does (or at once, on a call without a voice).
+            const started = await waitUntil(() => { const entry = entryOf(id); return !!entry && (!entry.voice || ['playing', 'heard'].includes(entry.voice) || cutLine()); }, run);
+            if (!started || cutLine()) break;
+            typing = typeStep(step.code, cutLine);
+          }
+          const heard = await waitUntil(() => { const entry = entryOf(id); return !!entry && (!entry.voice || entry.voice === 'heard' || cutLine()); }, run);
+          const entry = entryOf(id);
+          // Cut off or lost: the interviewer has the floor. A call without a voice has the line as typed, at once.
+          const lineOk = heard && entry && !cutLine() && (!entry.voice || entry.voice === 'heard');
+          if (typing) { if (!(await typing)) break; }
+          if (!lineOk) break;
+        }
+        if (hasCode && !typing) {
+          if (gaveWay(run)) break;
+          if (!(await typeStep(step.code))) break;
+        }
+      }
+    } finally {
+      if (workRef.current === run) workRef.current = null;
+      if (mountedRef.current) setWorking(false);
+      finished();
+    }
+  };
+  const stopWork = () => { if (workRef.current) workRef.current.stop = true; };
+  useEffect(() => () => stopWork(), []);
   const [cards, setCards] = useState([]);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState(null);
@@ -224,8 +318,11 @@ export default function InCall({ state, api }) {
   const interviewerLeft = !!state?.interviewerLeft;
   // The other side dropped out instead of saying goodbye.
   const connectionLost = interviewerLeft && !!state?.connectionLost;
-  const wandBusy = suggesting || voiceWait !== null;
-  // The wand's line is heard (its line started), was given up on, or nobody is left to hear it: the spinner stops.
+  const wandBusy = suggesting || voiceWait !== null || working;
+  // The spinner shows only while something is being made (the answer, or a line's voice); while the wand types or
+  // waits for a line to finish it is the wand, lit, and pressing it starts afresh from where things stand.
+  const spinning = suggesting || voiceWait !== null;
+  // The wand's line is ready (its voice is made), was given up on, or nobody is left to hear it: the spinner stops.
   const waitingId = voiceWait?.id ?? null;
   const waitingEntry = waitingId ? (Array.isArray(state?.chat) ? state.chat : []).find(item => item?.id === waitingId) : null;
   const voiceSettled = voiceWait !== null && (interviewerLeft || state?.phase !== 'in-call' || (waitingEntry && waitingEntry.voice !== 'waiting'));
@@ -238,7 +335,11 @@ export default function InCall({ state, api }) {
     return () => clearTimeout(timer);
   }, [voiceWait, paused]);
   const suggestReply = async () => {
-    if (!canSuggest || wandBusy || interviewerLeft) return;
+    if (!canSuggest || spinning || interviewerLeft) return;
+    // Pressed while it works: this run ends where it is (the pad keeps what was typed) and a fresh one starts from there.
+    const previous = workRef.current;
+    if (previous) { previous.stop = true; await previous.done; }
+    if (!mountedRef.current) return;
     setSuggesting(true);
     setSuggestError('');
     let result;
@@ -247,8 +348,11 @@ export default function InCall({ state, api }) {
     if (!mountedRef.current) return;
     setSuggesting(false);
     reportTyping(false);
+    const steps = Array.isArray(result?.steps) ? result.steps.filter(step => step && (typeof step.say === 'string' || typeof step.code === 'string')) : [];
+    if (steps.length) { await runWork(steps.map(step => ({ say: String(step.say || '').trim().slice(0, CHAT_MAX_LENGTH), code: typeof step.code === 'string' ? step.code : null, together: step.together === true }))); return; }
     if (!text) { setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.'); return; }
-    if (pausedRef.current) { heldReplyRef.current = text; setVoiceWait({ id: null }); return; }
+    // Sent even while paused: the voice makes the line now and holds it for the resume (a call that cannot hold it
+    // refuses, and the window keeps the text until the resume instead).
     await deliverReply(text);
   };
   const chatOpen = panel === 'chat';
@@ -358,7 +462,7 @@ export default function InCall({ state, api }) {
               </div>
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
                 {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} visual={screen.visual} className="min-h-0 min-w-0 flex-1 basis-0" />}
-                {padOpen && <CodingPad key="pad" lang={pad.lang || ''} initialText={pad.text || ''} disabled={interviewerLeft}
+                {padOpen && <CodingPad key="pad" lang={pad.lang || ''} initialText={pad.text || ''} disabled={interviewerLeft} typerRef={typerRef}
                   onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}
               </div>
             </div>
@@ -418,12 +522,12 @@ export default function InCall({ state, api }) {
       <p className="flex min-w-0 items-center gap-3 text-sm font-medium text-[#e8eaed]">
         <span role="timer" aria-label="Call timer" className="tabular-nums">{formatTime(state?.elapsedMs)}</span>
         <span aria-hidden="true" className="h-4 w-px bg-white/40" />
-        <span className="truncate">{roleLine(state?.persona) || state?.persona?.name || 'Interview'}</span>
+        <span className="truncate">{state?.meetingTitle || 'Interview'}</span>
       </p>
       <div className="flex items-center gap-3">
         <button type="button" className={roundClass(muted ? 'off' : 'idle')} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}</button>
-        {canSuggest && <button type="button" className={`${roundClass(wandBusy ? 'active' : 'idle')} disabled:cursor-not-allowed`} aria-label="Suggest a reply" title="Suggest a reply and say it" aria-busy={wandBusy}
-          disabled={wandBusy || interviewerLeft} onClick={suggestReply}>{wandBusy ? <LoaderCircle size={20} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={20} aria-hidden="true" />}</button>}
+        {canSuggest && <button type="button" className={`${roundClass(wandBusy ? 'active' : 'idle')} disabled:cursor-not-allowed`} aria-label="Suggest a reply" title="Suggest a reply and say it" aria-busy={spinning}
+          disabled={spinning || interviewerLeft} onClick={suggestReply}>{spinning ? <LoaderCircle size={20} className="animate-spin" aria-hidden="true" data-testid="suggest-loading" /> : <WandSparkles size={20} aria-hidden="true" />}</button>}
         <button type="button" className={roundClass(cameraOn ? 'idle' : 'off')} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <Video size={20} aria-hidden="true" /> : <VideoOff size={20} aria-hidden="true" />}</button>
         <button type="button" className={roundClass(captionsOn ? 'active' : 'idle')} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}>{captionsOn ? <Captions size={20} aria-hidden="true" /> : <CaptionsOff size={20} aria-hidden="true" />}</button>
         <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" onClick={leave}><PhoneOff size={20} aria-hidden="true" /></button>

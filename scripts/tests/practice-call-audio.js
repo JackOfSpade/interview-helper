@@ -166,6 +166,21 @@ export default [
     },
   },
   {
+    name: 'practice call audio: a long answer with only breaths between phrases is not "more long pauses", however long it runs',
+    run() {
+      // As in call-mwqscir3-3yraup: a baseline of short greeting fragments with no pauses, then a 100 s answer with
+      // six 320 to 400 ms breaths. Counted raw, that was seven times the baseline and every long answer got the note.
+      const baseline = createVoiceBaseline({ minSpeechMs: 2000 });
+      for (let i = 0; i < 4; i += 1) baseline.add({ speechMs: 950, wordsPerMinute: 160, pauseCount: 0, pauses: [], longestPauseMs: 0, pitchRangeSt: 6, loudnessDb: -20 });
+      const breaths = Array.from({ length: 6 }, (_, i) => ({ startMs: i * 15000, endMs: i * 15000 + 320 + i * 15 }));
+      const answer = baseline.relative({ speechMs: 100000, wordsPerMinute: 160, pauseCount: 6, pauses: breaths, pitchRangeSt: 6, loudnessDb: -20 });
+      assert.equal(answer.pauseRatio, 1);
+      // Real hesitation does show: five 1.5 s gaps in a minute of speech.
+      const halting = Array.from({ length: 5 }, (_, i) => ({ startMs: i * 10000, endMs: i * 10000 + 1500 }));
+      assert(baseline.relative({ speechMs: 60000, wordsPerMinute: 120, pauses: halting, pauseCount: 5 }).pauseRatio >= 1.6);
+    },
+  },
+  {
     name: 'practice call audio: baseline stays null until enough speech then reports medians and relative deltas',
     run() {
       const baseline = createVoiceBaseline({ minSpeechMs: 2000 });
@@ -182,12 +197,14 @@ export default [
       assert.equal(snapshot.wordsPerMinute, 120);
       assert.equal(snapshot.loudnessDb, -20);
       assert.equal(snapshot.arousal, 0.5);
+      // 15 s of speech with two long (>= 700 ms) pauses is 8 per minute. The baseline turns give only a count (one
+      // pause in a second of speech, counted over the 15 s floor: 4 per minute): (1 + 8) / (1 + 4).
       const relative = baseline.relative(
-        { wordsPerMinute: 150, pauseCount: 2, pitchRangeSt: 6, loudnessDb: -18, restarts: 1 },
+        { speechMs: 15000, wordsPerMinute: 150, pauseCount: 3, pauses: [{ startMs: 0, endMs: 800 }, { startMs: 2000, endMs: 2400 }, { startMs: 5000, endMs: 6000 }], pitchRangeSt: 6, loudnessDb: -18, restarts: 1 },
         { arousal: 0.6, dominance: 0.4, valence: 0.5 },
       );
       assert.equal(relative.rateRatio, 1.25);
-      assert.equal(relative.pauseRatio, 1.5);
+      assert.equal(relative.pauseRatio, 1.8);
       assert.equal(relative.pitchRangeDeltaSt, -2);
       assert.equal(relative.loudnessDeltaDb, 2);
       assert.equal(relative.arousalDelta, 0.1);

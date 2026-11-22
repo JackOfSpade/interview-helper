@@ -2638,6 +2638,74 @@ test('with a candidate voice each sent message waits on it until its line starts
   assert.equal(built.service.getState().chat.at(-1).voice, 'failed');
 });
 
+test('the candidate\'s own voice is warmed during setup, so its first line is not the slow one', async () => {
+  const setup = panelHarness({ random: () => 0.1, voices: ['lib-1', 'lib-2', 'lib-3', 'lib-4', 'lib-5'], deps: {
+    candidateVoices: true, candidateVoiceGender: () => 'female',
+    candidateVoice: () => ({ open() { throw new Error('not opened here'); } }),
+  } });
+  const started = await panelStart(setup);
+  const beforeAnswer = setup.factoryOptions.map(item => item.voiceId);
+  await started.service.answer();
+  const engine = setup.engineOptions[0];
+  assert(engine.candidateVoice, 'the call has a candidate voice');
+  // The voices made for the candidate on answering are the candidate's own; each was already opened during setup.
+  const madeOnAnswer = setup.factoryOptions.slice(beforeAnswer.length).map(item => item.voiceId);
+  assert(madeOnAnswer.length >= 1, 'the candidate voice is made on answering');
+  assert(madeOnAnswer.some(id => beforeAnswer.includes(id)), `the candidate voice was warmed before the call: setup ${JSON.stringify(beforeAnswer)}, answer ${JSON.stringify(madeOnAnswer)}`);
+});
+
+test('a wand line sent during a pause is made and held when the voice can hold it, and stops waiting once ready', async () => {
+  const typed = [];
+  let holds = true;
+  const setup = panelHarness({ random: () => 0.1, deps: {
+    candidateVoices: true,
+    candidateVoice: () => ({ open() { throw new Error('not opened here'); } }),
+  } });
+  setup.overrides.engineFactory = options => {
+    setup.engineOptions.push(options);
+    return { start() {}, hangUp() {}, helperEvent() {}, setPaused() {}, canHoldVoice: () => holds, typed: (text, flags) => { typed.push({ text, ...flags }); return true; }, participantJoined() {}, state: () => ({ transcript: [], elapsedMs: 0 }) };
+  };
+  const built = await panelStart(setup);
+  await built.service.answer();
+  const engine = setup.engineOptions[0].onEvent;
+  built.service.setPaused(true);
+  engine({ type: 'paused', paused: true });
+  let state = built.service.sendChat('Typed by hand.');
+  assert.equal(state.chat.length, 0, 'a typed message is still refused while paused');
+  state = built.service.sendChat('From the wand.', { generated: true });
+  assert.equal(state.chat.at(-1).voice, 'waiting');
+  assert.deepEqual(typed.map(item => item.text), ['From the wand.']);
+  engine({ type: 'candidate-voice', state: 'ready', injected: true, held: true, chatIds: [typed[0].chatId] });
+  assert.equal(built.service.getState().chat.at(-1).voice, 'ready', 'ready while paused: the wand stops spinning');
+  engine({ type: 'candidate-voice', state: 'started', injected: true, chatIds: [typed[0].chatId] });
+  assert.equal(built.service.getState().chat.at(-1).voice, 'playing');
+  // A voice that cannot hold a line refuses it during a pause; the window keeps it for the resume.
+  holds = false;
+  state = built.service.sendChat('Another.', { generated: true });
+  assert.equal(state.chat.length, 1);
+  assert.equal(state.paused, true);
+});
+
+test('the call is named after the position, as a meeting invite is, never after an interviewer\'s job title', async () => {
+  const setup = panelHarness({ random: () => 0.1 });
+  const built = await panelStart(setup);
+  const state = built.service.getState();
+  assert.equal(state.meetingTitle, 'Interview: Engineer · Acme');
+  assert.notEqual(state.meetingTitle, state.persona.role);
+});
+
+test('each time an interviewer starts speaking the window is told, with the reaction time to give way after', async () => {
+  const setup = panelHarness({ random: () => 0.1 });
+  const built = await panelStart(setup);
+  await built.service.answer();
+  const engine = setup.engineOptions[0].onEvent;
+  assert.equal(built.service.getState().floor, null);
+  engine({ type: 'floor', speakerId: 'A', yieldMs: 420 });
+  assert.deepEqual(built.service.getState().floor, { n: 1, yieldMs: 420, speakerId: 'A' });
+  engine({ type: 'floor', speakerId: 'B', yieldMs: 800 });
+  assert.deepEqual(built.service.getState().floor, { n: 2, yieldMs: 800, speakerId: 'B' }, 'a count, so a second start right after is seen');
+});
+
 test('without a candidate voice a sent message never waits on one', async () => {
   const setup = panelHarness({ random: () => 0.1 });
   const built = await panelStart(setup);
@@ -4073,6 +4141,26 @@ test('visuals: the diagram for a screen part is drawn during setup, saved for th
   assert.equal(started.service.getState().screen.visual, undefined, 'an unknown visual is never shown');
 });
 
+test('visuals: a setup\'s diagram is drawn once and stays on screen for every part that shares it, with the setup text above each question', async () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200"><rect x="10" y="10" width="300" height="40" fill="#cde"/></svg>';
+  const asked = [];
+  const setup = panelHarness({ cast: [], plan: drawn => soloPlan(drawn, {
+    // As the planner hands it on (validatePlan): the setup written into each part, its visual made on part 1.
+    problems: [{ ref: 'p1', question: 1, language: '', parts: [
+      { title: 'Matrix', content: 'A FODO cell, L = 2 m.\n\nGive the cell matrix.', visual: { kind: 'diagram', shows: 'the cell layout' } },
+      { title: 'Stability', content: 'A FODO cell, L = 2 m.\n\nFor which f is it stable?', visualFrom: 1 },
+    ], solution: 'cos mu = 1 - L^2/(8 f^2).', edgeCases: [], hints: [] }],
+  }), deps: { diagramText: async request => { asked.push(request); return { svg, description: 'A FODO cell.' }; } } });
+  const started = await panelStart(setup);
+  assert.equal(asked.length, 1, 'drawn once for both parts');
+  const main = setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(main.options.callPlan.problems[0].parts.map(part => part.visual?.description), ['A FODO cell.', 'A FODO cell.'], 'the interviewer knows the diagram stays up');
+  await started.service.answer();
+  const engine = setup.engineOptions[0];
+  assert.deepEqual(engine.prepared.p1.parts.map(part => part.visual), [{ id: 'p1.1', kind: 'diagram' }, { id: 'p1.1', kind: 'diagram' }]);
+  assert.deepEqual(engine.prepared.p1.parts.map(part => part.content), ['A FODO cell, L = 2 m.\n\nGive the cell matrix.', 'A FODO cell, L = 2 m.\n\nFor which f is it stable?']);
+});
+
 test('visuals: a chosen picture\'s lead sentence goes above its screen text, so the question reads as written around it', async () => {
   const fetch = async url => (url.includes('api.php')
     ? { ok: true, json: async () => ({ query: { pages: [{ index: 1, title: 'File:Moon.jpg', imageinfo: [{ thumburl: 'https://upload.example/moon.jpg', thumbwidth: 1024, thumbheight: 683, descriptionurl: 'https://commons.example/File:Moon.jpg', extmetadata: { LicenseShortName: { value: 'Public domain' }, Artist: { value: 'NASA' } } }] }] } }) }
@@ -4713,6 +4801,26 @@ test('draftAnswer: off without draftText, refused before the call is answered, a
   assert.equal(service.getState().chat.length, 0, 'nothing is sent to the chat');
   await service.hangUp({ feedback: false });
   assert.deepEqual(await service.draftAnswer(), { error: 'No one is waiting for an answer.' });
+});
+
+test('draftAnswer: with the coding pad open the wand works the exercise as steps, when the app passes that call in', async () => {
+  let emit;
+  const engineFactory = options => { emit = options.onEvent; return { start() {}, hangUp() {}, typed() {}, setPadText() {}, state: () => ({ transcript: [{ speaker: 'interviewer', text: 'Write it in the pad.' }], elapsedMs: 0 }) }; };
+  const seen = [];
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => 'unused', draftWorkText: async () => 'unused',
+    loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    draftAnswer: async () => 'Just talking.',
+    draftWork: async request => { seen.push(request); return [{ say: 'First the signature.', code: 'def f():\n', together: true }, { say: 'Done.', code: null, together: false }]; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.deepEqual(await service.draftAnswer(), { text: 'Just talking.' }, 'no pad: a spoken reply');
+  emit({ type: 'pad', open: true, lang: 'python', atMs: 1000 });
+  assert.deepEqual(await service.draftAnswer(), { steps: [{ say: 'First the signature.', code: 'def f():\n', together: true }, { say: 'Done.', code: null, together: false }] });
+  assert.equal(seen[0].pad.open, true);
+  assert.equal(typeof seen[0].callText, 'function');
+  await service.hangUp({ feedback: false });
 });
 
 test('draftAnswer: pausing neither refuses a suggestion nor stops one being written', async () => {

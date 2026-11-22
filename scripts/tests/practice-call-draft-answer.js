@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cleanDraft, draftAnswerPrompt, draftCandidateAnswer, transcriptLines, DRAFT_ANSWER_MAX_CHARS, DRAFT_ANSWER_STAGE } from '../../electron/practiceCall/draftAnswer.js';
+import { cleanDraft, cleanWork, draftAnswerPrompt, draftCandidateAnswer, draftCandidateWork, draftWorkPrompt, transcriptLines, DRAFT_ANSWER_MAX_CHARS, DRAFT_ANSWER_STAGE, DRAFT_WORK_SCHEMA, DRAFT_WORK_STAGE } from '../../electron/practiceCall/draftAnswer.js';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 
 const cases = [];
@@ -137,6 +137,39 @@ test('draftCandidateAnswer sends the prompt with the signal and returns the clea
 
 test('the stage runs on Sonnet at low effort', () => {
   assert.deepEqual({ ...careerWritingStageProfile(DRAFT_ANSWER_STAGE) }, { model: 'sonnet', effort: 'low' });
+});
+
+test('work: the prompt asks for intent before each piece, never code read aloud, a test by hand and a clear finish, from where the pad stands', () => {
+  const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: 'def emittance(x, xp):\n' }, screen: { title: 'Emittance', content: 'Write it.' } });
+  for (const rule of ['say in plain English what it will do and why', 'Never read the code aloud', 'walk the given example through by hand', 'that you are done', 'carry on from the code already in the pad', 'the WHOLE pad after that step']) assert(prompt.includes(rule), rule);
+  assert(prompt.includes('<coding-pad-now lang="python">\ndef emittance(x, xp):'), 'the pad as it is now');
+  assert(prompt.includes('Rebuilt the billing service in Go.') && prompt.includes('Write it.'), 'the same sources as a spoken reply');
+  assert(!prompt.includes('<shared-pad>'), 'the pad goes in once');
+  assert.deepEqual(DRAFT_WORK_SCHEMA.required, ['steps']);
+  assert.deepEqual(DRAFT_WORK_SCHEMA.properties.steps.items.required, ['say', 'code', 'typeWhileSpeaking']);
+  assert(prompt.includes('type while you talk (typeWhileSpeaking true)') && prompt.includes('neither is the rule'), 'the model chooses per step');
+});
+
+test('work: steps are cleaned, empty ones dropped, JSON text parsed, and nothing usable throws', async () => {
+  assert.deepEqual(cleanWork({ steps: [{ say: ' First.\n\nThen. ', code: 'a\r\nb', typeWhileSpeaking: true }, { say: '', code: null }, { say: 'Done.', code: null, typeWhileSpeaking: true }] }),
+    [{ say: 'First. Then.', code: 'a\nb', together: true }, { say: 'Done.', code: null, together: false }], 'typing while talking needs both a line and code');
+  assert.deepEqual(cleanWork('```json\n{"steps":[{"say":"Hi.","code":null}]}\n```'), [{ say: 'Hi.', code: null, together: false }]);
+  assert.throws(() => cleanWork({ steps: [] }));
+  assert.throws(() => cleanWork('not json'));
+  const asked = [];
+  const steps = await draftCandidateWork({ ...CONTEXT, pad: { open: true, text: '' }, callText: async request => { asked.push(request); return { steps: [{ say: 'Go.', code: 'x = 1\n' }] }; } });
+  assert.deepEqual(steps, [{ say: 'Go.', code: 'x = 1\n', together: false }]);
+  assert.equal(asked[0].schema, DRAFT_WORK_SCHEMA);
+});
+
+test('work: a technical spoken reply leads with the answer and never reads a matrix out element by element', () => {
+  const prompt = draftAnswerPrompt(CONTEXT);
+  assert(prompt.includes('answer only the part or bullet being asked about now'));
+  assert(prompt.includes('never reading it out element by element'));
+});
+
+test('work: the stage runs on Opus at low effort', () => {
+  assert.deepEqual({ ...careerWritingStageProfile(DRAFT_WORK_STAGE) }, { model: 'opus', effort: 'low' });
 });
 
 export default cases;

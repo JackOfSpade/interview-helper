@@ -206,7 +206,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
-    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, voicedNoteWaitMs: 300,
+    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
     candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
@@ -479,6 +479,22 @@ test('a final replaces a volatile result that runs wider than it, so the sentenc
   await rig.clock.advance(600);
   const message = rig.sessions.opener.calls[0].message;
   assert(message.endsWith("Candidate: 'My day's going well, thanks. And you'"), message);
+});
+
+test('a final replaces a guess of the same words that started well before it and runs past a shorter final', async () => {
+  // Found in call-mwqscir3-3yraup: "My day is going well." was kept beside its final "My day's going well.".
+  const rig = makeRig();
+  await greet(rig);
+  const start = rig.clock.now();
+  rig.h.vad(true);
+  rig.h.transcript('My day is going well', 'v', start + 63000, false, start + 67400);
+  rig.h.transcript("My day's going well.", 'f', start + 66060, true, start + 67320);
+  rig.h.transcript('Thanks for asking.', 'g', start + 67320, true, start + 68200);
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  const message = rig.sessions.opener.calls[0].message;
+  assert(message.endsWith("Candidate: 'My day's going well. Thanks for asking.'"), message);
 });
 
 test('a final keeps a guess for the sentence before it that only touches its start', async () => {
@@ -4947,13 +4963,30 @@ test('overlay: a finished utterance shows an overlay whose position event never 
   assert.equal(rig.of('overlay').length, 1);
 });
 
-test('overlay: an uncast id, the current speaker, a second remark or a missing id produce nothing', async () => {
+test('overlay: an uncast id, the current speaker or a missing id produce nothing, and a reply may carry several remarks', async () => {
   const rig = panelRig({ createParser: tagParser });
   await overGreeting(rig, 'One.<over id="Z">Hi.</over> Two.<over id="A">Self.</over> Three.<over id="B">First.</over><over id="B">Second.</over> Four.');
-  assert.deepEqual(rig.streams[0].overlays.map(item => item.text), ['First.'], 'only the first valid remark, once');
+  assert.deepEqual(rig.streams[0].overlays.map(item => item.text), ['First.', 'Second.'], 'every valid remark, in order');
   const solo = makeRig({ createParser: tagParser });
   await overGreeting(solo, 'Welcome.<over id="B">Hi.</over> Go on.');
   assert.deepEqual(solo.streams[0].texts, ['Welcome.', 'Go on.'], 'a call with no panel ignores the tag, never speaking it');
+});
+
+test('overlay: several colleagues speak over the lead at once, each captioned with its own words and shown in start order', async () => {
+  const panel = { leadId: 'A', speakers: [{ id: 'A', name: 'Priya', present: true }, { id: 'B', name: 'John', present: true }, { id: 'C', name: 'Mei', present: true }] };
+  const rig = makeRig({ panel, speakerVoice: true, createParser: tagParser });
+  await overGreeting(rig, 'With me are John and Mei,<over id="B">[warmly] Hi Jack.</over><over id="C">Hello!</over> who lead the team.');
+  const stream = rig.streams[0];
+  assert.deepEqual(stream.overlays.map(item => [item.speakerId, item.text]), [['B', '[warmly] Hi Jack.'], ['C', 'Hello!']], 'both go to the voice at the same point');
+  assert.equal(stream.overlays[0].afterChars, stream.overlays[1].afterChars);
+  // The voice may report them out of order; captions come from each remark's own words.
+  stream.overlayCb({ speakerId: 'C', text: 'Hello!', offsetMs: 950 });
+  stream.overlayCb({ speakerId: 'B', text: '[warmly] Hi Jack.', offsetMs: 900 });
+  rig.h.playback('utt1', 'started');
+  rig.h.playback('utt1', 'position', 1000);
+  await flush();
+  assert.deepEqual(rig.of('overlay').map(event => [event.speakerId, event.text]), [['B', 'Hi Jack.'], ['C', 'Hello!']]);
+  assert.deepEqual(rig.engine.state().transcript.filter(item => item.overlay).map(item => [item.speakerId, item.text]), [['B', 'Hi Jack.'], ['C', 'Hello!']]);
 });
 
 test('overlay: a voice without overlay support speaks the main text untouched and emits nothing', async () => {
@@ -6366,8 +6399,8 @@ const WATCH = { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cut
 // The prompt module's own formatting and parsing are tested there: the engine is given plain seams that show what it passed.
 const watchFormat = options => JSON.stringify(options);
 const watchParse = text => {
-  const found = /^cut:(\w):(\w+)$/u.exec(String(text ?? '').trim());
-  return found ? { decision: 'cut-in', who: found[1], reason: found[2] } : { decision: 'listen', who: null, reason: null };
+  const found = /^cut:(\w):([\w-]+)(?::([\w-]+))?$/u.exec(String(text ?? '').trim());
+  return found ? { decision: 'cut-in', who: found[1], reason: found[2], when: found[3] === 'sentence-end' ? 'sentence-end' : 'now' } : { decision: 'listen', who: null, reason: null };
 };
 const watchRig = (options = {}) => makeRig({ autoOpener: true, watcher: true, formatWatch: watchFormat, parseWatch: watchParse, ...options, thresholds: { ...WATCH, ...options.thresholds } });
 const watchCalls = rig => rig.sessions.watcher.calls;
@@ -6497,7 +6530,7 @@ test('watcher: a yes starts the live look, with the last sentence heard and who 
   assert.equal(look.stillSpeaking, true);
   assert.equal(look.candidateText, 'We began with the queue. Then we moved every job onto it');
   assert.equal(look.mostRecent, 'Then we moved every job onto it');
-  assert.deepEqual(look.cutInBy, { id: 'A', reason: 'probe' });
+  assert.deepEqual(look.cutInBy, { id: 'A', reason: 'probe', when: 'now' });
   assert.equal(rig.sessions.opener.calls.length, 0, 'a look is never acknowledged first');
   assert.deepEqual(rig.of('watch').map(event => [event.decision, event.who, event.reason]), [['cut-in', 'A', 'probe']]);
   const id = await cutInNow(rig);
@@ -6517,7 +6550,7 @@ test('watcher: a yes on a panel names the colleague who cuts in; a colleague who
   await rig.clock.advance(3100);
   assert.equal(watchSent(rig).askedBy, 'B', 'the last speaker of the question asked it');
   await watchSays(rig, 'cut:A:enough');
-  assert.deepEqual(seen.at(-1).cutInBy, { id: 'A', name: 'Priya', reason: 'enough' });
+  assert.deepEqual(seen.at(-1).cutInBy, { id: 'A', name: 'Priya', reason: 'enough', when: 'now' });
   await cutInNow(rig, '<speaker id="A"/>Let me stop you there.');
   const other = panelRig({ autoOpener: true, watcher: true, formatWatch: watchFormat, parseWatch: watchParse, thresholds: WATCH, formatTurn: options => { seen.push(options); return formatTurnMessage(options); } });
   await panelGreeting(other);
@@ -6527,7 +6560,46 @@ test('watcher: a yes on a panel names the colleague who cuts in; a colleague who
   await watchedAnswer(other);
   await other.clock.advance(3100);
   await watchSays(other, 'cut:C:probe'); // Mei has not joined
-  assert.deepEqual(seen.at(-1).cutInBy, { id: 'B', name: 'John', reason: 'probe' });
+  assert.deepEqual(seen.at(-1).cutInBy, { id: 'B', name: 'John', reason: 'probe', when: 'now' });
+});
+
+test('watcher: a sentence-end cut-in on live speech waits through a breath mid-sentence and lands when a final ends the sentence', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 50 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe:sentence-end');
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  assert.deepEqual(rig.of('cut-in').map(event => [event.state, event.until, event.when]), [['held', 'sentence-end', 'sentence-end']]);
+  rig.h.vad(false); // a breath with the sentence still going: "...onto one queue"
+  await flush();
+  assert(!rig.opsOf('play').some(item => item.id === id), 'a mid-sentence breath does not release it');
+  await rig.clock.advance(200);
+  rig.h.vad(true);
+  rig.h.transcript('So the first thing we did was move every job onto one queue and shard it.', 'a', rig.clock.now() - 3500, true, rig.clock.now());
+  await flush();
+  assert(rig.opsOf('play').some(item => item.id === id), 'the sentence ended: it comes in');
+  assert(rig.of('cut-in').some(event => event.state === 'committed'));
+});
+
+test('watcher: a sentence-end cut-in on live speech that hears no sentence end in time comes in at the next breath', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 50, cutInSentenceMaxMs: 2000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe:sentence-end');
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  await rig.clock.advance(2100);
+  assert(!rig.opsOf('play').some(item => item.id === id), 'still talking: it waits for a breath');
+  rig.h.vad(false);
+  await flush();
+  assert(rig.opsOf('play').some(item => item.id === id), 'the next breath');
 });
 
 test('watcher: a cut-in written while the candidate is mid-sentence waits for the next breath', async () => {

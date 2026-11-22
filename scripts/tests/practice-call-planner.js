@@ -138,7 +138,7 @@ const tests = [
       assert.equal(result.plan.problems[0].hints.length, 9);
       assert.equal(result.plan.problems[0].solution.length, 9000);
       assert.equal(result.plan.problems[0].parts.length, 6);
-      assert.deepEqual([...JSON.stringify(PLAN_SCHEMA).matchAll(/"maxLength":(\d+)/gu)].map(match => Number(match[1])), [6000], 'the schema asks for no text length but the screen\'s');
+      assert.deepEqual([...JSON.stringify(PLAN_SCHEMA).matchAll(/"maxLength":(\d+)/gu)].map(match => Number(match[1])), [6000, 6000], 'the schema asks for no text length but the screen\'s (a setup and a part)');
       // The limits that protect something real stay.
       const problemsOf = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };
       assert.match(problemsOf(p => { p.problems[0].parts[0].content = 'c'.repeat(6001); }), /content is 6001 characters long and the limit is 6000/u, 'the shared screen cuts past 6000');
@@ -276,6 +276,33 @@ const tests = [
       assert.match(result.attempts[0].problems[0], /not valid JSON/u);
       assert.ok(prompts[1].includes('not json at all'));
       assert.ok(prompts[0].includes('RESUME-LINE'), 'planCall passes the application through');
+    },
+  },
+  {
+    name: 'practice call planner: a setup stays above every part, and its visual is made once and shared by the parts without their own',
+    async run() {
+      const p = goodPlan();
+      p.problems[0].setup = { content: 'A FODO cell, L = 2 m.', visual: { kind: 'diagram', shows: 'The cell layout.' } };
+      p.problems[0].parts = [
+        { title: 'Matrix', content: 'Give the cell matrix.' },
+        { title: 'Stability', content: 'For which f is it stable?' },
+        { title: 'Photo', content: 'Where is this?', visual: { kind: 'picture', search: 'CERN tunnel', shows: 'The real tunnel.' } },
+      ];
+      const { plan, problems } = check(p);
+      assert.deepEqual(problems, []);
+      const parts = plan.problems[0].parts;
+      assert.deepEqual(parts.map(part => part.content), ['A FODO cell, L = 2 m.\n\nGive the cell matrix.', 'A FODO cell, L = 2 m.\n\nFor which f is it stable?', 'A FODO cell, L = 2 m.\n\nWhere is this?']);
+      assert.deepEqual(parts[0].visual, { kind: 'diagram', shows: 'The cell layout.' }, 'the first part makes the setup visual');
+      assert.equal(parts[1].visual, undefined);
+      assert.equal(parts[1].visualFrom, 1, 'the second part shows the visual made on part 1');
+      assert.equal(parts[2].visual.kind, 'picture', 'a part with its own visual keeps it');
+      assert.equal(parts[2].visualFrom, undefined);
+      assert.ok(PLAN_SCHEMA.properties.problems.items.properties.setup, 'the schema offers a setup');
+      // Setup plus a part must still fit one screen.
+      const long = goodPlan();
+      long.problems[0].setup = { content: 'x'.repeat(5000) };
+      long.problems[0].parts[0].content = 'y'.repeat(1500);
+      assert.ok(check(long).problems.some(problem => problem.includes('with the setup above it')));
     },
   },
   {

@@ -1,16 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { PAD_TEXT_MAX, padKeyInsert } from './screenMarkup.js';
+import { DELETE_DELAY_MS, keyDelayMs, padEdit } from './padTyping.js';
 
 // Matches the chat box: the engine lets the typing flag lapse after about 6 s.
 export const PAD_TYPING_REFRESH_MS = 3000;
 export const PAD_TYPING_IDLE_MS = 4000;
 export const PAD_SEND_DEBOUNCE_MS = 400;
 const NEAR_CAP = 18000;
+// Where a word ends: the wand giving way stops here, never in the middle of a name.
+const WORD_END = /[\s.,;:()[\]{}]/u;
 
 // The candidate's editor. The window owns the text: it is seeded once from
 // initialText when the pad mounts and later state updates never overwrite it.
 // readOnly shows `value` instead (the replay) and sends nothing.
-export default function CodingPad({ lang = '', initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, className = '' }) {
+// typerRef (optional) is given { typeTo(target, { stopped, paused, yielding }) }: the wand types the pad into `target` key
+// by key through the same edits a person makes, so it is sent and seen exactly as typing is. It resolves true when the
+// pad reads `target`, false when stopped first; while paused() it waits. Once yielding() is true (someone started
+// speaking and the reaction time is over) it stops at the end of the word being typed, as a person gives way.
+export default function CodingPad({ lang = '', initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
   const [own, setOwn] = useState(() => String(initialText || '').slice(0, PAD_TEXT_MAX));
   const text = readOnly ? String(value || '') : own;
   const textRef = useRef(own);
@@ -65,6 +72,47 @@ export default function CodingPad({ lang = '', initialText = '', value = '', rea
     sendTimerRef.current = setTimeout(flush, PAD_SEND_DEBOUNCE_MS);
     beat();
   };
+  const editRef = useRef(edit);
+  useEffect(() => { editRef.current = edit; });
+  useEffect(() => {
+    if (!typerRef || readOnly) return undefined;
+    let alive = true;
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    typerRef.current = {
+      async typeTo(target, { stopped = () => false, paused = () => false, yielding = () => false } = {}) {
+        const goal = String(target ?? '').slice(0, PAD_TEXT_MAX);
+        const step = async ms => {
+          await sleep(ms);
+          while (alive && paused() && !stopped()) await sleep(200);
+          return alive && !stopped();
+        };
+        // Worked out again before every key, so an edit by the person in between is respected, not overwritten blindly.
+        let previous = '';
+        for (;;) {
+          const { at, remove, insert } = padEdit(textRef.current, goal);
+          if (!remove && !insert) return true;
+          if (remove) {
+            if (yielding()) return false;
+            if (!(await step(DELETE_DELAY_MS))) return false;
+            const now = textRef.current;
+            const cut = at + remove;
+            cursorRef.current = cut - 1;
+            editRef.current(`${now.slice(0, cut - 1)}${now.slice(cut)}`);
+            continue;
+          }
+          const char = insert[0];
+          // Giving way: the word being typed is finished, then the hands stop.
+          if (yielding() && (!previous || WORD_END.test(previous) || WORD_END.test(char))) return false;
+          if (!(await step(keyDelayMs(char, previous)))) return false;
+          previous = char;
+          const now = textRef.current;
+          cursorRef.current = at + 1;
+          editRef.current(`${now.slice(0, at)}${char}${now.slice(at)}`);
+        }
+      },
+    };
+    return () => { alive = false; if (typerRef.current) typerRef.current = null; };
+  }, [typerRef, readOnly]);
   const onKeyDown = event => {
     if (readOnly) return;
     if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) return;

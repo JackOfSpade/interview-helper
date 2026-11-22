@@ -68,12 +68,13 @@ export function createPanelVoiceFactory({
     let finished = false;
     let firstError = null;
     let finishPromise = null;
-    // Remark spoken over the current speaker (see overlay()); null unless one was asked for.
-    let ov = null;
+    // Remarks spoken over the current speaker (see overlay()), in the order they were asked for. Any number
+    // of them may overlap the main voice and each other: each is summed in from its own anchor.
+    const ovs = [];
     let outBytes = 0; // bytes handed to listeners, the part of the timeline that can no longer change
     let inBytes = 0; // bytes the segments have released, including any held back for a remark
     let carry = null; // odd trailing byte held while a remark may mix so a sample is never split
-    let heldMain = null; // main audio waiting at the remark's start point
+    let heldMain = null; // main audio waiting at a remark's start point
     let holdTimer = null;
     let tailTimer = null; // how long a cut-in may wait for its first audio before the old voice's tail plays alone
     let firstOutAt = null; // when the first audio left, to know how much is still waiting to be played
@@ -103,12 +104,19 @@ export function createPanelVoiceFactory({
       outBytes += buffer.length;
       emit(audioListeners, buffer);
     };
-    const ovLive = () => Boolean(ov && !ov.failed && !cancelled);
-    const maybeReport = at => {
-      if (!ov || ov.reported) return;
-      ov.reported = true;
-      emit(overlayListeners, { speakerId: ov.speakerId, text: ov.text, offsetMs: Math.round(pcmDurationMs(at, ov.rate) * 10) / 10 });
+    const live = o => Boolean(o && !o.failed && !cancelled);
+    const ovLive = () => ovs.some(live);
+    const ovRate = () => ovs[0]?.rate;
+    const maybeReport = (o, at) => {
+      if (!o || o.reported) return;
+      o.reported = true;
+      emit(overlayListeners, { speakerId: o.speakerId, text: o.text, offsetMs: Math.round(pcmDurationMs(at, o.rate) * 10) / 10 });
     };
+    // A remark whose start point has been reached but which is not all here yet and has not begun to play: the main
+    // audio waits for the WHOLE of it (see holdBudgetMs), so it is never split around audio already buffered ahead.
+    const waiting = o => live(o) && o.anchor != null && o.anchor <= outBytes && !o.started && !o.gaveUp && !o.done;
+    // A remark ended or failed: the held speech goes on only once no remark it waits for is still coming.
+    const settleHold = () => { if (heldMain && !ovs.some(waiting)) releaseHold(); };
     const releaseHold = () => {
       if (holdTimer !== null) clock.clearTimeout(holdTimer);
       holdTimer = null;
@@ -124,8 +132,9 @@ export function createPanelVoiceFactory({
     // and the rest of it seconds later, after everything that had been buffered. With nothing
     // buffered ahead (or no clock to tell) the wait is the short fixed one.
     const holdBudgetMs = () => {
-      if (firstOutAt === null || typeof clock.now !== 'function' || !ov?.rate) return OVERLAY_HOLD_MS;
-      const ahead = pcmDurationMs(outBytes, ov.rate) - (clock.now() - firstOutAt);
+      const rate = ovRate();
+      if (firstOutAt === null || typeof clock.now !== 'function' || !rate) return OVERLAY_HOLD_MS;
+      const ahead = pcmDurationMs(outBytes, rate) - (clock.now() - firstOutAt);
       return Math.max(OVERLAY_HOLD_MS, Math.min(ahead - OVERLAY_PLAY_MARGIN_MS, OVERLAY_HOLD_MAX_MS));
     };
     const hold = data => {
@@ -133,13 +142,15 @@ export function createPanelVoiceFactory({
       holdTimer = clock.setTimeout(() => {
         holdTimer = null;
         if (!heldMain) return;
-        ov.gaveUp = true;
+        // Every remark still waiting at this point plays late rather than holding the speech again.
+        for (const o of ovs) if (waiting(o)) o.gaveUp = true;
         releaseHold();
       }, holdBudgetMs());
     };
 
-    // The one place main speech leaves. The remark is a queue (ov.queue) consumed in order and
-    // summed into whatever main samples go out from the anchor on; with no remark this is a pass-through.
+    // The one place main speech leaves. Each remark is a queue (o.queue) consumed in order and
+    // summed into whatever main samples go out from its anchor on; with no remark this is a pass-through.
+    // Main audio is cut at every anchor still ahead, so a remark always starts exactly at its own point.
     function processMain(buffer) {
       if (heldMain) { heldMain.push(buffer); return; }
       let data = carry ? Buffer.concat([carry, buffer]) : buffer;
@@ -151,32 +162,33 @@ export function createPanelVoiceFactory({
         carry = Buffer.from(data.subarray(data.length - 1));
         data = data.subarray(0, data.length - 1);
       }
-      if (!data.length) return;
-      if (ov.anchor == null || outBytes + data.length <= ov.anchor) { writeOut(data); return; }
-      if (outBytes < ov.anchor) {
-        const cut = ov.anchor - outBytes;
-        writeOut(data.subarray(0, cut));
-        data = data.subarray(cut);
-      }
-      const available = ov.queue.length >> 1;
-      if (!available) {
-        if (!ov.started && !ov.gaveUp && !ov.done) {
-          // Wait for the remark's first audio, but never longer than OVERLAY_HOLD_MS.
+      while (data.length) {
+        // Wait for a remark whose point has come but whose first audio has not, never longer than the hold budget.
+        if (ovs.some(waiting)) {
           if (carry) { data = Buffer.concat([data, carry]); carry = null; }
           hold(data);
           return;
         }
-        writeOut(data);
-        return;
+        // The next anchor still ahead bounds this piece; the remarks already under way mix into all of it.
+        let piece = data.length;
+        for (const o of ovs) {
+          if (live(o) && o.anchor != null && o.anchor > outBytes) piece = Math.min(piece, o.anchor - outBytes);
+        }
+        const chunk = data.subarray(0, piece);
+        data = data.subarray(piece);
+        const mixing = ovs.filter(o => live(o) && o.anchor != null && o.anchor <= outBytes && o.queue.length >> 1);
+        if (!mixing.length) { writeOut(chunk); continue; }
+        const mixed = Buffer.from(chunk);
+        for (const o of mixing) {
+          const count = Math.min(o.queue.length >> 1, chunk.length >> 1);
+          mixSamples(mixed, 0, o.queue, 0, count);
+          o.queue = o.queue.subarray(count * 2);
+          o.started = true;
+          maybeReport(o, outBytes);
+          o.mixEnd = outBytes + count * 2;
+        }
+        writeOut(mixed);
       }
-      const count = Math.min(available, data.length >> 1);
-      const mixed = Buffer.from(data);
-      mixSamples(mixed, 0, ov.queue, 0, count);
-      ov.queue = ov.queue.subarray(count * 2);
-      ov.started = true;
-      maybeReport(outBytes);
-      ov.mixEnd = outBytes + count * 2;
-      writeOut(mixed);
     }
 
     // The loudest 20 ms window of a segment's own audio, the reference for "is this still speech".
@@ -319,9 +331,9 @@ export function createPanelVoiceFactory({
         }
       }
     }
-    const anchorAt = bytes => {
-      if (!ov || ov.anchor != null) return;
-      ov.anchor = evenUp(Math.max(bytes, outBytes));
+    const anchorAt = (o, bytes) => {
+      if (!o || o.anchor != null) return;
+      o.anchor = evenUp(Math.max(bytes, outBytes));
     };
     const releaseWords = (segment, words) => {
       const list = [].concat(words ?? []).filter(Boolean);
@@ -336,8 +348,10 @@ export function createPanelVoiceFactory({
       for (const word of mapped) {
         segment.wordLog.push({ before: segment.spoken, startMs: word.startMs });
         segment.spoken += nonSpaceCount(word.word);
-        if (ov && ov.anchor == null && ov.host === segment && segment.spoken - nonSpaceCount(word.word) >= ov.before) {
-          anchorAt(Math.round((word.startMs / 1000) * ov.rate) * 2);
+        for (const o of ovs) {
+          if (o.anchor == null && o.host === segment && segment.spoken - nonSpaceCount(word.word) >= o.before) {
+            anchorAt(o, Math.round((word.startMs / 1000) * o.rate) * 2);
+          }
         }
       }
       emit(wordListeners, mapped);
@@ -436,7 +450,7 @@ export function createPanelVoiceFactory({
         }
         // A remark placed after the last word of a segment starts where that segment ends.
         segment.endBytes = inBytes;
-        if (ov && ov.anchor == null && ov.host === segment) anchorAt(inBytes);
+        for (const o of ovs) if (o.anchor == null && o.host === segment) anchorAt(o, inBytes);
         active += 1;
       }
     };
@@ -550,13 +564,14 @@ export function createPanelVoiceFactory({
     /**
      * A short remark by another interviewer heard over the current speaker, from the point
      * `afterChars` into the current speaker's text. Returns false when it cannot be played.
+     * Any number may be asked for in one utterance; they may overlap each other as well as the speaker.
      */
     function overlay({ speakerId: id, text, afterChars } = {}) {
       const value = String(text ?? '').trim();
-      if (cancelled || finished || ov || !value || !factories[id] || id === current.speakerId) return false;
+      if (cancelled || finished || !value || !factories[id] || id === current.speakerId) return false;
       const reference = current.stream ?? segments[0]?.stream;
       let stream;
-      try { stream = factories[id].open({ utteranceId: `${utteranceId}-o`, signal }); } catch { return false; }
+      try { stream = factories[id].open({ utteranceId: `${utteranceId}-o${ovs.length ? ovs.length + 1 : ''}`, signal }); } catch { return false; }
       const rate = Number(stream?.sampleRate);
       if (!(rate > 0) || rate !== Number(reference?.sampleRate)) {
         try { stream?.cancel(); } catch { /* already gone */ }
@@ -571,13 +586,13 @@ export function createPanelVoiceFactory({
         queue: Buffer.alloc(0), settle: noop, promise: null, before,
       };
       state.promise = new Promise(resolve => { state.settle = resolve; });
-      ov = state;
+      ovs.push(state);
       const lose = () => {
         if (state.failed) return;
         state.failed = true;
         state.queue = Buffer.alloc(0);
         state.settle();
-        if (ov === state) releaseHold();
+        settleHold();
       };
       stream.onAudio?.(buffer => {
         if (cancelled || state.failed || state.done || !buffer?.length) return;
@@ -592,40 +607,46 @@ export function createPanelVoiceFactory({
           // A last half sample is read with a zero high byte so it is mixed where it belongs.
           if (state.queue.length & 1) { state.queue = Buffer.concat([state.queue, Buffer.alloc(1)]); state.pad = 1; }
           state.settle();
-          if (!cancelled && !state.failed) releaseHold();
+          if (!cancelled && !state.failed) settleHold();
         }, lose);
       } catch { lose(); }
       // The point may already have been spoken, or the host may already be over.
       const seen = host.wordLog.find(word => word.before >= state.before);
-      if (seen) anchorAt(Math.round((seen.startMs / 1000) * rate) * 2);
-      else if (host.endBytes != null) anchorAt(host.endBytes);
+      if (seen) anchorAt(state, Math.round((seen.startMs / 1000) * rate) * 2);
+      else if (host.endBytes != null) anchorAt(state, host.endBytes);
       return true;
     }
 
     // When every segment is over: free a held start, then emit the rest of the main speech and
-    // the rest of the remark together, so the total is max(main, remark start + remark length).
+    // the rest of every remark together, so the total is max(main, each remark's start + its length).
     function finalizeOverlay() {
-      if (!ov || cancelled) return;
+      if (!ovs.length || cancelled) return;
       releaseHold();
       const tailCarry = carry;
       carry = null;
-      let left = ovLive() ? ov.queue : Buffer.alloc(0);
-      // A lone half sample that only became whole after its place had passed is dropped, not moved.
-      if (ov.started && left.length === 2 && ov.pad && outBytes > ov.mixEnd) left = Buffer.alloc(0);
-      if (!left.length) {
+      const parts = [];
+      for (const o of ovs) {
+        let left = live(o) ? o.queue : Buffer.alloc(0);
+        // A lone half sample that only became whole after its place had passed is dropped, not moved.
+        if (o.started && left.length === 2 && o.pad && outBytes > o.mixEnd) left = Buffer.alloc(0);
+        if (!left.length) continue;
+        parts.push({ o, left, start: o.started ? outBytes : Math.max(o.anchor ?? outBytes, outBytes) });
+      }
+      if (!parts.length) {
         if (tailCarry) writeOut(tailCarry);
         return;
       }
       const mainEnd = outBytes + (tailCarry ? 1 : 0);
-      const start = ov.started ? outBytes : Math.max(ov.anchor ?? outBytes, outBytes);
-      const end = Math.max(mainEnd, start + left.length - ov.pad);
+      const end = Math.max(mainEnd, ...parts.map(({ o, left, start }) => start + left.length - o.pad));
       const tail = Buffer.alloc(evenUp(end - outBytes));
       if (tailCarry) tailCarry.copy(tail);
-      mixSamples(tail, start - outBytes, left, 0, left.length >> 1);
-      ov.queue = Buffer.alloc(0);
-      ov.started = true;
-      maybeReport(start);
-      emittedMs += pcmDurationMs(Math.max(0, end - mainEnd), ov.rate);
+      for (const { o, left, start } of parts) {
+        mixSamples(tail, start - outBytes, left, 0, left.length >> 1);
+        o.queue = Buffer.alloc(0);
+        o.started = true;
+        maybeReport(o, start);
+      }
+      emittedMs += pcmDurationMs(Math.max(0, end - mainEnd), parts[0].o.rate);
       writeOut(tail.subarray(0, end - outBytes));
     }
 
@@ -645,7 +666,7 @@ export function createPanelVoiceFactory({
         finished = true;
         closeSegment(current);
       }
-      finishPromise = Promise.all([...segments.map(segment => segment.promise), ov?.promise]).then(() => {
+      finishPromise = Promise.all([...segments.map(segment => segment.promise), ...ovs.map(o => o.promise)]).then(() => {
         clearTailTimer();
         try { finalizeOverlay(); } catch { /* a remark must never break the speech */ }
         forget();
@@ -663,11 +684,11 @@ export function createPanelVoiceFactory({
       clearTailTimer();
       heldMain = null;
       carry = null;
-      if (ov) {
-        try { ov.stream.cancel(); } catch { /* already gone */ }
-        ov.failed = true;
-        ov.queue = Buffer.alloc(0);
-        ov.settle();
+      for (const o of ovs) {
+        try { o.stream.cancel(); } catch { /* already gone */ }
+        o.failed = true;
+        o.queue = Buffer.alloc(0);
+        o.settle();
       }
       for (const segment of segments) {
         try { segment.stream?.cancel(); } catch { /* already gone */ }

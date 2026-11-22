@@ -15,6 +15,20 @@ function median(values) {
 
 function finiteOrNull(value) { return Number.isFinite(value) ? value : null; }
 
+// "Long pauses" are gaps a listener notices (a breath between phrases is 300 to 500 ms), counted per minute of speech
+// so a long answer is not "pausing more" just for being long. Short stretches count as this long, so one pause in a
+// few seconds of speech does not read as a high rate.
+export const LONG_PAUSE_MS = 700;
+const PAUSE_RATE_MIN_SPAN_MS = 15000;
+export function longPausesPerMinute(prosody) {
+  const speechMs = finiteOrNull(prosody?.speechMs) ?? 0;
+  const count = Array.isArray(prosody?.pauses)
+    ? prosody.pauses.filter(pause => Number(pause?.endMs) - Number(pause?.startMs) >= LONG_PAUSE_MS).length
+    : finiteOrNull(prosody?.longPauseCount) ?? finiteOrNull(prosody?.pauseCount); // without the pauses, every one counts
+  if (count === null) return null;
+  return (count / Math.max(speechMs, PAUSE_RATE_MIN_SPAN_MS)) * 60000;
+}
+
 export function createVoiceBaseline({ minSpeechMs = 20000 } = {}) {
   const speech = [];
   const tones = [];
@@ -26,6 +40,7 @@ export function createVoiceBaseline({ minSpeechMs = 20000 } = {}) {
     wordsPerMinute: median(speech.map(turn => turn.wordsPerMinute)),
     pauseCount: median(speech.map(turn => turn.pauseCount)),
     longestPauseMs: median(speech.map(turn => turn.longestPauseMs)),
+    longPausesPerMinute: median(speech.map(turn => turn.longPausesPerMinute)),
     pitchMedianHz: median(speech.map(turn => turn.pitchMedianHz)),
     pitchRangeSt: median(speech.map(turn => turn.pitchRangeSt)),
     loudnessDb: median(speech.map(turn => turn.loudnessDb)),
@@ -44,6 +59,7 @@ export function createVoiceBaseline({ minSpeechMs = 20000 } = {}) {
         wordsPerMinute: finiteOrNull(prosody.wordsPerMinute),
         pauseCount: finiteOrNull(prosody.pauseCount) ?? 0,
         longestPauseMs: finiteOrNull(prosody.longestPauseMs) ?? 0,
+        longPausesPerMinute: longPausesPerMinute(prosody),
         pitchMedianHz: finiteOrNull(prosody.pitchMedianHz),
         pitchRangeSt: finiteOrNull(prosody.pitchRangeSt),
         loudnessDb: finiteOrNull(prosody.loudnessDb),
@@ -64,9 +80,11 @@ export function createVoiceBaseline({ minSpeechMs = 20000 } = {}) {
       const base = medians();
       const rateRatio = Number.isFinite(prosody.wordsPerMinute) && base.wordsPerMinute > 0
         ? round(prosody.wordsPerMinute / base.wordsPerMinute, 3) : null;
-      // Smoothed count ratio keeps zero-pause baselines finite.
-      const pauseRatio = Number.isFinite(prosody.pauseCount)
-        ? round((1 + prosody.pauseCount) / (1 + base.pauseCount), 3) : null;
+      // Long pauses per minute against the usual rate; the +1 per minute keeps a zero-pause baseline finite, so a
+      // single noticeable pause in a minute never reads as "more than usual" on its own.
+      const rate = longPausesPerMinute(prosody);
+      const baseRate = base.longPausesPerMinute;
+      const pauseRatio = rate !== null && baseRate !== null ? round((1 + rate) / (1 + baseRate), 3) : null;
       const pitchRangeDeltaSt = Number.isFinite(prosody.pitchRangeSt) && base.pitchRangeSt !== null
         ? round(prosody.pitchRangeSt - base.pitchRangeSt, 2) : null;
       const loudnessDeltaDb = Number.isFinite(prosody.loudnessDb) && base.loudnessDb !== null

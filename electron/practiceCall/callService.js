@@ -73,6 +73,7 @@ const DEFAULTS = Object.freeze({
   loadCandidateName: lazily(() => moduleExport(() => import('./candidateName.js'), ['loadCandidateName'])),
   loadListing: lazily(() => moduleExport(() => import('../ipc/interviewPreparation.js'), ['loadInterviewListingText'])),
   draftAnswer: lazily(() => moduleExport(() => import('./draftAnswer.js'), ['draftCandidateAnswer'])),
+  draftWork: lazily(() => moduleExport(() => import('./draftAnswer.js'), ['draftCandidateWork'])),
   orderCards: lazily(() => moduleExport(() => import('../ipc/interviewQaPractice.js'), ['orderPracticeQuestions'])),
   engineFactory: lazily(() => moduleExport(() => import('../interviewPracticeCallEngine.js'), ['createPracticeCallEngine'])),
   helperFactory: lazily(() => moduleExport(() => import('../interviewPracticeAudio.js'), ['createPracticeAudioHelper'])),
@@ -313,7 +314,7 @@ export function stampInjectedLines(transcript, spans) {
 
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null, candidateSpeaking: false,
+    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
@@ -551,19 +552,21 @@ export function createPracticeCallService(deps = {}) {
     };
   }
   /**
-   * Where each sent message stands with the candidate's voice: 'waiting' (queued, not heard yet), 'playing' (its line
-   * has started) or 'failed' (never spoken). A message on a call without a voice has no `voice` at all. The window's
-   * wand keeps spinning while its message waits.
+   * Where each sent message stands with the candidate's voice: 'waiting' (queued, its voice not made yet), 'ready'
+   * (made: about to play, or held for the end of a pause), 'playing' (its line has started) or 'failed' (never spoken).
+   * A message on a call without a voice has no `voice` at all. The window's wand spins only while its message waits.
    */
   function settleVoice(chatIds, voice) {
     const ids = new Set(Array.isArray(chatIds) ? chatIds : []);
     if (!ids.size) return;
-    state.chat = state.chat.map(entry => (entry.from === 'candidate' && ids.has(entry.id) && entry.voice === 'waiting' ? { ...entry, voice } : entry));
+    const open = entry => entry.voice === 'waiting' || (entry.voice === 'ready' && voice !== 'ready');
+    state.chat = state.chat.map(entry => (entry.from === 'candidate' && ids.has(entry.id) && open(entry) ? { ...entry, voice } : entry));
   }
   /** Nothing more will be spoken: every message still waiting on the voice is let go. */
   function releaseWaitingVoices() {
-    if (!state.chat.some(entry => entry.voice === 'waiting')) return;
-    state.chat = state.chat.map(entry => (entry.voice === 'waiting' ? { ...entry, voice: 'failed' } : entry));
+    const open = entry => entry.voice === 'waiting' || entry.voice === 'ready';
+    if (!state.chat.some(open)) return;
+    state.chat = state.chat.map(entry => (open(entry) ? { ...entry, voice: 'failed' } : entry));
   }
   function joinColleague(self, entry) {
     // Nobody joins a paused call: the resume re-arms the wait for what is left of it.
@@ -1356,6 +1359,14 @@ export function createPracticeCallService(deps = {}) {
         // reads as made around the picture. Only for a picture actually shown; a missing one leaves the text as it was.
         if (visual.lead && typeof part.content === 'string') part.content = `${visual.lead}\n\n${part.content}`.slice(0, 6000);
       }
+      // A setup's visual is made once and stays up on every later part that shares it (visualFrom, from the planner).
+      const shared = (self.settledPlan?.problems || []).find(problem => problem.ref === id.slice(0, dot));
+      (shared?.parts || []).forEach((planned, index) => {
+        const other = self.prepared?.[shared.ref]?.parts?.[index];
+        if (!other || `${shared.ref}.${planned.visualFrom}` !== id) return;
+        other.visual = { id, kind: visual.kind };
+        if (visual.lead && typeof other.content === 'string') other.content = `${visual.lead}\n\n${other.content}`.slice(0, 6000);
+      });
       const file = `${id.replace(/[^A-Za-z0-9._-]/gu, '_')}.${visual.kind === 'diagram' ? 'svg' : visual.mime === 'image/png' ? 'png' : visual.mime === 'image/webp' ? 'webp' : 'jpg'}`;
       visual.file = file;
       try {
@@ -1491,7 +1502,7 @@ export function createPracticeCallService(deps = {}) {
       problems: (plan.problems || []).map(problem => ({
         ...problem,
         parts: problem.parts.map((part, index) => {
-          const made = visualView(self, `${problem.ref}.${index + 1}`);
+          const made = visualView(self, `${problem.ref}.${part.visualFrom || index + 1}`);
           // The text as it is shown: a picture's lead sentence sits above it (settleVisuals).
           const shown = self.prepared?.[problem.ref]?.parts?.[index]?.content;
           return { title: part.title, content: typeof shown === 'string' ? shown : part.content, ...(made ? { visual: { kind: made.kind, description: made.description } } : {}) };
@@ -1664,6 +1675,10 @@ export function createPracticeCallService(deps = {}) {
     self.setup = settled.setup;
     self.targetMinutes = targetMinutes;
     state.persona = { name: persona.name, initials: persona.initials, role: persona.role, team: persona.team };
+    // The meeting's own name, as the calendar invite would have it: the position being interviewed for, not anyone's
+    // job title (shown beside the clock, it otherwise read as the role of whoever was presenting).
+    { const title = String(self.brief?.role?.title || '').trim(); const company = String(self.brief?.role?.company || '').trim();
+      state.meetingTitle = title ? `Interview: ${title}${company ? ` · ${company}` : ''}` : company ? `Interview · ${company}` : ''; }
     // call.voice is always the factory of the voice actually used.
     self.voice = factory;
     showParticipants(self);
@@ -1860,8 +1875,10 @@ export function createPracticeCallService(deps = {}) {
     const watcherReady = watcher ? started(watcher.start({ instructions: self.instructions.watcher })) : Promise.resolve();
     // Each colleague gets the same warm-up line as the lead, beside the session starts. One whose
     // voice does not answer cannot speak, so they are left out rather than heard in the lead's voice.
+    // The candidate's own voice is warmed too: its first line was otherwise the cold one (3.5 s late in call-mwqscir3).
+    const candidateWarm = warmCandidateVoice(self);
     const warmed = await Promise.all((self.panel || []).map(entry => warmUpVoice({ factory: entry.factory, clock })));
-    await Promise.all([mainReady, openerReady, classifierReady, watcherReady]);
+    await Promise.all([mainReady, openerReady, classifierReady, watcherReady, candidateWarm]);
     dbg('session-start', { ms: Math.round(clock.now() - (self.markAt ?? self.startedAt)), mainModel: mainReply.model, watcher: Boolean(watcher), instructionChars: { main: self.instructions.main?.length ?? 0, opener: self.instructions.opener?.length ?? 0, ...(watcher ? { watcher: self.instructions.watcher?.length ?? 0 } : {}) } });
     if (warmed.some(ok => !ok)) {
       const gone = new Set((self.panel || []).filter((entry, at) => !warmed[at]).map(entry => entry.key));
@@ -1943,9 +1960,22 @@ export function createPracticeCallService(deps = {}) {
       } else publish();
       return;
     }
-    // A candidate-voice line started playing, or was given up on: its messages no longer wait on the voice.
-    if ((event.type === 'candidate-voice' && event.state === 'started') || (event.type === 'error' && event.code === 'candidate-voice-failed')) {
-      settleVoice(event.chatIds, event.type === 'error' ? 'failed' : 'playing');
+    // An interviewer started speaking: the window's wand gives way like a person (its typing stops after `yieldMs`).
+    // A count, so each new start is seen even when two come close together.
+    if (event.type === 'floor') {
+      state.floor = { n: (state.floor?.n ?? 0) + 1, yieldMs: Number.isFinite(event.yieldMs) ? event.yieldMs : 600, speakerId: event.speakerId ?? null };
+      publish();
+      emitEvent(event);
+      return;
+    }
+    // A line heard to its end: its messages are 'heard' (the wand working an exercise types its next piece after it).
+    if (event.type === 'candidate-voice' && event.state === 'finished' && Array.isArray(event.chatIds) && event.chatIds.length) {
+      const ids = new Set(event.chatIds);
+      state.chat = state.chat.map(entry => (entry.from === 'candidate' && ids.has(entry.id) && entry.voice && entry.voice !== 'failed' ? { ...entry, voice: 'heard' } : entry));
+    }
+    // A candidate-voice line is made (ready), started playing, or was given up on: its messages no longer wait on the voice.
+    if ((event.type === 'candidate-voice' && (event.state === 'started' || event.state === 'ready')) || (event.type === 'error' && event.code === 'candidate-voice-failed')) {
+      settleVoice(event.chatIds, event.type === 'error' ? 'failed' : event.state === 'ready' ? 'ready' : 'playing');
       if (event.type === 'candidate-voice') { publish(); emitEvent(event); return; }
     }
     if (event.type === 'error' && ENGINE_NOTICES[event.code]) {
@@ -2069,7 +2099,7 @@ export function createPracticeCallService(deps = {}) {
         const index = state.chat.findIndex(entry => entry.id === item?.chatId && entry.from === 'candidate');
         if (index < 0) continue;
         const heard = String(item.heard ?? '').trim().replace(/[\s,;:.!?…—–-]+$/u, '');
-        const voice = state.chat[index].voice === 'waiting' ? { voice: heard ? 'playing' : 'failed' } : {};
+        const voice = state.chat[index].voice === 'waiting' || state.chat[index].voice === 'ready' ? { voice: heard ? 'playing' : 'failed' } : {};
         state.chat[index] = heard
           ? { ...state.chat[index], text: `${heard} —`, cutOff: true, sent: state.chat[index].sent ?? state.chat[index].text, ...voice }
           : { ...state.chat[index], unsaid: true, ...voice };
@@ -2174,6 +2204,23 @@ export function createPracticeCallService(deps = {}) {
    * with no room treatment: it is the candidate's own side of the line. Tags come from `candidateTagText`, which the
    * app passes in; without it the lines are spoken untagged.
    */
+  /** One discarded line on the candidate's voice (the gender in use, else each), so its first real line is not the slow one. Never fails the call. */
+  async function warmCandidateVoice(self) {
+    const ids = self.candidateVoiceIds;
+    if (!ids || !self.key) return;
+    try {
+      let gender;
+      try { gender = typeof deps.candidateVoiceGender === 'function' ? deps.candidateVoiceGender() : undefined; } catch { gender = undefined; }
+      const entries = gender && ids[gender] ? [[gender, ids[gender]]] : Object.entries(ids);
+      const voiceFactory = await resolve('voiceFactory');
+      const started = clock.now();
+      const results = await Promise.all(entries.map(([, voice]) => warmUpVoice({ factory: voiceFactory({ key: self.key, voiceId: voice.voiceId, tier: self.tier }), clock })));
+      dbg('candidate-voice-warm-up', { ms: Math.round(clock.now() - started), warmed: results });
+    } catch (error) {
+      dbg('candidate-voice-warm-up', { error: error?.message || String(error) });
+    }
+  }
+
   async function makeCandidateVoice(self) {
     const ids = self.candidateVoiceIds;
     if (!ids || !self.key) return null;
@@ -2804,11 +2851,14 @@ export function createPracticeCallService(deps = {}) {
     sendChat: (text, options) => {
       // Nobody is listening once the interviewer has left, so nothing is recorded as delivered.
       if (state.interviewerLeft) return snapshot();
-      // Paused: only the shortcut resumes, so a message is neither recorded nor sent.
-      if (state.paused) return snapshot();
+      const generated = options?.generated === true;
+      // Paused: only the shortcut resumes, so a message is neither recorded nor sent. A generated line (the wand) is
+      // the exception when the voice can hold it: it is made now and plays on the resume (the window holds it otherwise).
+      let holdsVoice = false;
+      try { holdsVoice = state.paused && generated && call?.engine?.canHoldVoice?.() === true; } catch { holdsVoice = false; }
+      if (state.paused && !holdsVoice) return snapshot();
       const value = typeof text === 'string' ? text.trim() : '';
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
-      const generated = options?.generated === true;
       dbg('user', { action: 'chat', text: value, ...(generated ? { generated } : {}) });
       if (call) (call.sentLines ||= []).push({ text: value, generated });
       const chatId = `m${(state.chat.length + 1).toString(36)}-${clock.now().toString(36)}`;
@@ -2889,12 +2939,15 @@ export function createPracticeCallService(deps = {}) {
           return { careerText, listingText };
         })();
         const sources = await self.draftSources;
-        const draft = await resolve('draftAnswer');
+        // With the coding pad open the wand works the exercise (steps of a line and the pad after it), when the app passes
+        // that call in; otherwise it only talks, as before.
+        const working = !!state.pad?.open && typeof deps.draftWorkText === 'function';
+        const draft = await resolve(working ? 'draftWork' : 'draftAnswer');
         const engineState = self.engine?.state?.() || { transcript: [] };
         // For a typed job the career documents sit in the résumé slot; they are passed once, as career text.
         const application = self.application?.source === 'career-documents' ? { resume: '', coverLetter: '' } : self.application;
-        const text = await draft({
-          callText: deps.draftText, signal: abort.signal,
+        const result = await draft({
+          callText: working ? deps.draftWorkText : deps.draftText, signal: abort.signal,
           brief: self.promptBrief || promptBrief(self.brief), listingText: sources.listingText, careerText: sources.careerText,
           application, candidateName: self.candidateName, transcript: engineState.transcript, pad: state.pad,
           // Who said what: the interviewers introduced themselves, so the reply can tell them apart and use their names.
@@ -2903,6 +2956,12 @@ export function createPracticeCallService(deps = {}) {
           screen: sharedScreenForDraft(self),
           pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),
         });
+        if (working) {
+          dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0) });
+          if (call !== self || self.finished) return { error: 'The call has ended.' };
+          return { steps: result.map(step => ({ say: step.say, code: step.code, together: step.together === true })) };
+        }
+        const text = result;
         dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });
         if (call !== self || self.finished) return { error: 'The call has ended.' };
         return { text };
