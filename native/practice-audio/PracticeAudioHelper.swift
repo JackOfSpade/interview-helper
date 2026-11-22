@@ -399,6 +399,11 @@ final class MicProcessor: @unchecked Sendable {
     private var muted = false
     private var analyzerNeedsStart = true
     private var vad = EnergyVad()
+    /// Speech on the raw microphone while muted, never heard by anyone: only tells the call to show "You're muted".
+    private var mutedVad = EnergyVad()
+    private var mutedRunMs = 0.0
+    private var mutedRunReported = false
+    private static let mutedSpeechMs = 400.0
     private var levelSumSquares = 0.0
     private var levelCount = 0
     private var timer: DispatchSourceTimer?
@@ -445,6 +450,7 @@ final class MicProcessor: @unchecked Sendable {
         queue.async {
             guard !self.stopped, self.muted != value else { return }
             self.muted = value
+            self.mutedVad.reset(); self.mutedRunMs = 0; self.mutedRunReported = false
             if value {
                 // An injected line is still "spoken" while muted: keep its VAD and level state.
                 if self.lines.isEmpty {
@@ -745,6 +751,32 @@ final class MicProcessor: @unchecked Sendable {
         } catch { fail("recording-failed") }
     }
 
+    /// Muted: the raw signal is only measured, to tell when the candidate seems to be talking into a muted mic (as a
+    /// meeting app does). One `muted-speech` per run of speech that lasts `mutedSpeechMs`; nothing else leaves here.
+    private func detectMutedSpeech(_ samples: UnsafeMutablePointer<Float>, frames: Int, rate: Double, startSec: Double) {
+        let windowFrames = max(1, Int(rate * PracticeVadTuning.windowMs / 1000))
+        var index = 0
+        while index < frames {
+            let count = min(windowFrames, frames - index)
+            var sum: Float = 0
+            for i in index..<(index + count) { sum += samples[i] * samples[i] }
+            let windowMs = Double(count) / rate * 1000
+            let startMs = (startSec + Double(index) / rate) * 1000
+            if let change = mutedVad.process(rms: (sum / Float(count)).squareRoot(), startMs: startMs, durationMs: windowMs) {
+                mutedRunMs = 0
+                if !change.speaking { mutedRunReported = false }
+            }
+            if mutedVad.speaking, !mutedRunReported {
+                mutedRunMs += windowMs
+                if mutedRunMs >= Self.mutedSpeechMs {
+                    mutedRunReported = true
+                    writer.send(["type": "muted-speech", "atMs": max(0, Int(startMs.rounded()))])
+                }
+            }
+            index += count
+        }
+    }
+
     private func process(_ mono: AVAudioPCMBuffer, arrival: TimeInterval) {
         guard !stopped else { return }
         let rate = mono.format.sampleRate
@@ -778,7 +810,10 @@ final class MicProcessor: @unchecked Sendable {
         timelineSec += duration
         // A muted mic is zeroed; an injected line still goes through everything below.
         let mixing = !lines.isEmpty || startSec < injectTailUntilSec
-        if muted, let samples = mono.floatChannelData?[0] { samples.update(repeating: 0, count: frames) }
+        if muted, let samples = mono.floatChannelData?[0] {
+            detectMutedSpeech(samples, frames: frames, rate: rate, startSec: startSec)
+            samples.update(repeating: 0, count: frames)
+        }
         if mixing, let samples = mono.floatChannelData?[0] {
             mixInjected(into: samples, frames: frames, rate: rate, startSec: startSec)
         }

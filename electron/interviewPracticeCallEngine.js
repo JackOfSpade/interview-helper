@@ -312,6 +312,7 @@ export function createPracticeCallEngine({
   const voicedNotes = new WeakMap(); // voice line entry -> the ear's pending tone note for it
   let lastVadEndMs = null;
   let typingNow = false;
+  let muted = false; // the candidate's microphone is muted: their voice, AI lines included, goes out to no one
   let paused = false; // hidden pause: silence accounting and the elapsed time the interviewer sees stand still
   let pausedAt = null;
   let pausedTotalMs = 0;
@@ -3524,6 +3525,8 @@ export function createPracticeCallEngine({
     // Only the shortcut resumes: a message typed during a pause is refused. A generated line (the wand) is the exception
     // when the voice goes through the microphone: it is made now and held, so it is ready the moment the call resumes.
     if (!text || (paused && !(generated === true && injectMode()))) return false;
+    // Muted, nothing the candidate says goes out, a line in their AI voice no more than their own voice.
+    if (muted) return false;
     // chatId: the window's chat entry for this message, so a line cut short can be cut short there too.
     queueTyped({ text, generated: generated === true, ...(chatId != null ? { chatId: String(chatId) } : {}) });
     return true;
@@ -3584,6 +3587,41 @@ export function createPracticeCallEngine({
     }
     if (current) discardPending(true);
     beginTyped(item);
+  }
+
+  /**
+   * The candidate muted or unmuted. A muted mic carries nothing, so a line in their AI voice gets no special treatment:
+   * one playing is cut where it stands (heard up to there, like speech stopped by the mute), one still being made and
+   * everything queued behind it are dropped, and nothing new is spoken until they unmute and send it again.
+   */
+  function setMuted(value) {
+    const next = !!value;
+    if (next === muted) return;
+    muted = next;
+    if (muted && phase !== 'ended') {
+      if (injecting) injecting.holding = false; // a line held by a pause is dropped too, never played on the resume
+      stopInjection();
+      // A voice the app plays itself (a helper that cannot inject): what is queued behind the line is dropped, and the
+      // line stops where it stands, heard up to there.
+      if (pendingTyped.length) {
+        const queued = pendingTyped;
+        pendingTyped = [];
+        emit({ type: 'candidate-voice', state: 'cut', heardChars: 0, messages: heardByMessage(queued, '') });
+      }
+      if (said && !said.stopping) {
+        const line = said;
+        line.stopping = true;
+        // The start watch goes too: a line stopped before its first audio is not a failed voice to try again.
+        for (const key of ['startTimer', 'finishTimer', 'boundaryTimer']) { unschedule(line[key]); line[key] = null; }
+        attempt(() => line.ctl?.abort());
+        attempt(() => line.stream?.cancel());
+        line.positionMs = livePosition(line);
+        line.positionAt = now();
+        attempt(() => audio.cancel(line.utteranceId));
+        line.cancelWait = schedule(CANCEL_WAIT_MS, () => saidEnded(line, line.positionMs, null));
+      }
+    }
+    emit({ type: 'muted', muted });
   }
 
   /** Pause or resume the silence clock. Resuming re-arms the wait from zero; the check-in count is kept. */
@@ -3702,6 +3740,7 @@ export function createPracticeCallEngine({
     canHoldVoice: () => injectMode(),
     typing,
     setPaused,
+    setMuted,
     setPadText,
     /** A late colleague arrived: the model hears about it with the next message, never on its own. */
     participantJoined(id) {

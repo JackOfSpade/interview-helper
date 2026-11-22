@@ -124,6 +124,7 @@ export default function InCall({ state, api }) {
     const entry = [...chat].reverse().find(item => item?.from === 'candidate' && typeof item.id === 'string' && !known.has(item.id));
     // Refused for a pause (a call whose voice cannot hold a line): the reply waits for the resume.
     if (result?.paused && !entry) { heldReplyRef.current = text; return null; }
+    if (result?.muted && !entry) { setVoiceWait(null); return null; } // muted: refused, nothing is said
     setVoiceWait(entry && entry.voice === 'waiting' ? { id: entry.id } : null);
     return entry ? entry.id : null;
   };
@@ -286,6 +287,24 @@ export default function InCall({ state, api }) {
     return () => clearTimeout(timer);
   }, [joinToast]);
   const muted = !!state?.muted;
+  // Muting stops a wand working the pad as well: nothing more is said or typed until it is pressed again.
+  // A wand line held for a pause is dropped too: after unmuting the wand is pressed again.
+  useEffect(() => {
+    if (!muted) return;
+    if (workRef.current) workRef.current.stop = true;
+    heldReplyRef.current = '';
+  }, [muted]);
+  // "You're muted", as a meeting app shows it: the candidate talked into the muted mic, or pressed the wand or sent a
+  // line while muted. Each hint shows for a few seconds; a new one restarts it.
+  const hint = muted ? state?.mutedHint : null;
+  const [expiredHintId, setExpiredHintId] = useState(null);
+  const hintId = hint?.id ?? null;
+  useEffect(() => {
+    if (hintId === null) return undefined;
+    const timer = setTimeout(() => setExpiredHintId(hintId), TOAST_MS);
+    return () => clearTimeout(timer);
+  }, [hintId]);
+  const shownHint = hint && hint.id !== expiredHintId ? hint : null;
   // The candidate's voice going out (their microphone or their AI voice): a steady ring, with a
   // glow that grows and shrinks with the sound itself rather than on a timer.
   const selfSpeaking = !!state?.candidateSpeaking;
@@ -336,6 +355,8 @@ export default function InCall({ state, api }) {
   }, [voiceWait, paused]);
   const suggestReply = async () => {
     if (!canSuggest || spinning || interviewerLeft) return;
+    // Muted: nothing is written or spoken; the call answers with "You're muted" and the wand is pressed again after unmuting.
+    if (muted) { try { await api.draftAnswer(); } catch { /* bridge gone */ } return; }
     // Pressed while it works: this run ends where it is (the pad keeps what was typed) and a fresh one starts from there.
     const previous = workRef.current;
     if (previous) { previous.stop = true; await previous.done; }
@@ -348,6 +369,7 @@ export default function InCall({ state, api }) {
     if (!mountedRef.current) return;
     setSuggesting(false);
     reportTyping(false);
+    if (result?.muted) return; // muted while it was being written: dropped, never spoken
     const steps = Array.isArray(result?.steps) ? result.steps.filter(step => step && (typeof step.say === 'string' || typeof step.code === 'string')) : [];
     if (steps.length) { await runWork(steps.map(step => ({ say: String(step.say || '').trim().slice(0, CHAT_MAX_LENGTH), code: typeof step.code === 'string' ? step.code : null, together: step.together === true }))); return; }
     if (!text) { setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.'); return; }
@@ -524,6 +546,9 @@ export default function InCall({ state, api }) {
       <span className="min-w-0 flex-1">Your microphone isn't available, so no one can hear you. Allow microphone access in System Settings, then rejoin.</span>
       {typeof api?.openMicrophoneSettings === 'function' && <button type="button" onClick={() => { api.openMicrophoneSettings(); }} className="shrink-0 rounded-md px-2 py-1 font-medium text-[#8ab4f8] hover:bg-white/10">Open settings</button>}
     </div>}
+    {shownHint && <p key={shownHint.id} role="status" data-muted-hint={shownHint.reason} className="pc-rise pointer-events-none fixed bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-lg bg-[#3c4043] px-4 py-2 text-[13px] text-[#e8eaed] shadow-lg">
+      {shownHint.reason === 'speech' ? 'Are you talking? Your mic is off. Unmute to speak.' : "You're muted. Unmute to be heard."}
+    </p>}
     <footer className="grid h-20 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 px-6">
       <p className="flex min-w-0 items-center gap-3 text-sm font-medium text-[#e8eaed]">
         <span role="timer" aria-label="Call timer" className="tabular-nums">{formatTime(state?.elapsedMs)}</span>

@@ -77,7 +77,7 @@ export default function ChatPanel({ chat, draft = '', onDraftChange, disabled = 
     // The window hears about a pause a moment after the shortcut is pressed. A message sent in
     // that moment is refused by the call, so it is put back in the box instead of being lost.
     if (typeof onSend === 'function') {
-      Promise.resolve(onSend(text)).then(result => { if (result?.paused) setDraft(current => current || text); }, () => {});
+      Promise.resolve(onSend(text)).then(result => { if (result?.paused || result?.muted) setDraft(current => current || text); }, () => {});
     }
     setDraft('');
     notifyTyping(false);

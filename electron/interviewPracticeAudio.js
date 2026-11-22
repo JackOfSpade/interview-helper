@@ -48,6 +48,9 @@ function validateHelperEvent(value) {
     case 'level':
       return typeof value.rms === 'number' && value.rms >= 0 && value.rms <= 1 && isMs(value.atMs)
         ? { type: 'level', rms: value.rms, atMs: value.atMs } : null;
+    case 'muted-speech':
+      // The candidate seems to be talking into a muted microphone: nothing of it is heard or kept, it only prompts a hint.
+      return isMs(value.atMs) ? { type: 'muted-speech', atMs: value.atMs } : null;
     case 'vad':
       return typeof value.speaking === 'boolean' && isMs(value.atMs)
         ? { type: 'vad', speaking: value.speaking, atMs: value.atMs } : null;

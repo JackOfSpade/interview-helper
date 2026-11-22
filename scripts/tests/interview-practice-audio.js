@@ -600,6 +600,9 @@ export default [
       assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true, microphone: false });
       h.send({ type: 'status', state: 'ready', inject: true, microphone: true });
       assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true });
+      // Talking into a muted mic only says when: nothing of it is heard or kept.
+      h.send({ type: 'muted-speech', atMs: 1200, text: 'never' });
+      assert.deepEqual(h.events.at(-1), { type: 'muted-speech', atMs: 1200 });
       h.helper.stop();
       assert.equal(h.helper.canInject(), false);
     },

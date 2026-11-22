@@ -178,6 +178,10 @@ export const presentingTests = [
         const refused = html({ ...PRESENT_STATE, microphoneUnavailable: true }, { openMicrophoneSettings: () => true });
         assert(refused.includes('data-mic-unavailable') && refused.includes('no one can hear you') && refused.includes('Open settings'), refused);
         assert(!/Interview Helper|practice/iu.test(refused.match(/data-mic-unavailable[^]*?<\/div>/u)[0]), 'the notice never names the app');
+        const hinted = html({ ...PRESENT_STATE, muted: true, mutedHint: { id: 1, reason: 'speech' } });
+        assert(hinted.includes('data-muted-hint="speech"') && hinted.includes('Your mic is off'), 'talking into a muted mic gets the hint');
+        assert(html({ ...PRESENT_STATE, muted: true, mutedHint: { id: 2, reason: 'wand' } }).includes("You&#x27;re muted"), 'so does the wand pressed while muted');
+        assert(!html({ ...PRESENT_STATE, muted: false, mutedHint: { id: 3, reason: 'wand' } }).includes('data-muted-hint'), 'never once unmuted');
       } finally { await bundle.dispose(); }
     },
   },

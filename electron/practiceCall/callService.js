@@ -316,7 +316,7 @@ export function stampInjectedLines(transcript, spans) {
 
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, microphoneUnavailable: false, level: 0, speaking: null, candidateSpeaking: false,
+    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
@@ -926,6 +926,16 @@ export function createPracticeCallService(deps = {}) {
     };
   }
 
+  let mutedHintSeq = 0;
+  /** "You're muted": the candidate spoke into a muted mic, or pressed the wand or sent a line while muted. */
+  function noteMutedHint(reason) {
+    // Ids never restart, so a hint after an unmute is never mistaken for one the window already let fade.
+    mutedHintSeq += 1;
+    state.mutedHint = { id: mutedHintSeq, reason };
+    dbg('muted-hint', { reason });
+    publish();
+  }
+
   /** The interviewer playing wins over the candidate's voice activity: the highlight follows who has the floor. */
   function refreshSpeaking(self) {
     state.speaking = self.interviewerPlaying ? 'interviewer' : self.candidateVad ? 'candidate' : null;
@@ -962,6 +972,7 @@ export function createPracticeCallService(deps = {}) {
     if (Number.isFinite(event?.atMs)) self.helperClock = { atMs: event.atMs, at: clock.now() };
     // The helper runs on silence when macOS refused the microphone: the call says so instead of failing quietly
     // (found 2026-11-21: every call had run unheard and nothing on screen told the candidate).
+    if (event?.type === 'muted-speech') { if (state.muted && self.inCall && !self.finished) noteMutedHint('speech'); return; }
     if (event?.type === 'status' && event.state === 'ready') { state.microphoneUnavailable = event.microphone === false; publish(); }
     if (event?.type === 'level') { state.level = Math.max(0, Math.min(1, Number(event.rms) || 0)); publish(); }
     if (event?.type === 'vad') {
@@ -2301,6 +2312,7 @@ export function createPracticeCallService(deps = {}) {
         ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, present: entry.joined, joined: entry.joined }))] } } : {}),
         ...(deps.thresholds ? { thresholds: deps.thresholds } : {}),
       });
+      if (state.muted) { try { self.engine.setMuted?.(true); } catch { /* engine already ended */ } } // muted before the call connected
       // The call clock starts when the call is answered; the setup time stays in timings.precheckMs.
       note(`rooms ${JSON.stringify([{ id: 'A', amount: self.persona.roomAmount ?? null, room: self.persona.room ?? null }, ...panel.map(entry => ({ id: entry.id, amount: entry.roomAmount ?? null, room: entry.room ?? null }))])}`);
       const answeredAt = clock.now();
@@ -2859,6 +2871,10 @@ export function createPracticeCallService(deps = {}) {
       dbg('user', { action: 'mute', muted: !!muted });
       state.muted = !!muted;
       try { call?.audioMirror?.mute(!!muted); } catch { /* mute is best effort */ }
+      // A muted mic carries the AI voice no more than the candidate's own: the line playing is cut, and a suggestion
+      // still being written is dropped unspent (the wand is pressed again after unmuting).
+      try { call?.engine?.setMuted?.(!!muted); } catch { /* engine already ended */ }
+      if (muted) { try { call?.draftAbort?.abort(); } catch { /* already settled */ } } else state.mutedHint = null;
       publish();
       return snapshot();
     },
@@ -2872,6 +2888,9 @@ export function createPracticeCallService(deps = {}) {
       let holdsVoice = false;
       try { holdsVoice = state.paused && generated && call?.engine?.canHoldVoice?.() === true; } catch { holdsVoice = false; }
       if (state.paused && !holdsVoice) return snapshot();
+      // Muted, nothing the candidate says goes out, typed lines spoken in their voice included: the call shows
+      // "You're muted" and the window keeps the text.
+      if (state.muted) { noteMutedHint(generated ? 'wand' : 'chat'); return snapshot(); }
       const value = typeof text === 'string' ? text.trim() : '';
       if (!value || value.length > 2000) throw new TypeError('sendChat expects 1-2000 characters');
       dbg('user', { action: 'chat', text: value, ...(generated ? { generated } : {}) });
@@ -2928,6 +2947,8 @@ export function createPracticeCallService(deps = {}) {
       if (!self || self.finished || !self.inCall || self.interviewerEnded || state.interviewerLeft) return { error: 'No one is waiting for an answer.' };
       if (typeof deps.draftText !== 'function') return { error: 'Suggestions are not available.' };
       if (self.drafting) return { error: 'A suggestion is already being written.' };
+      // Muted, nothing would be heard: nothing is written (and nothing spent) until the candidate unmutes and asks again.
+      if (state.muted) { noteMutedHint('wand'); return { muted: true }; }
       self.drafting = true;
       const abort = new AbortController();
       self.draftAbort = abort;
@@ -2974,15 +2995,18 @@ export function createPracticeCallService(deps = {}) {
         if (working) {
           dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0) });
           if (call !== self || self.finished) return { error: 'The call has ended.' };
+          if (state.muted) return { muted: true };
           return { steps: result.map(step => ({ say: step.say, code: step.code, together: step.together === true })) };
         }
         const text = result;
         dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });
         if (call !== self || self.finished) return { error: 'The call has ended.' };
+        if (state.muted) return { muted: true }; // muted while it was written: dropped, never spoken
         return { text };
       } catch (error) {
         dbg('draft-answer', { ms: Math.round(clock.now() - started), error: error?.code || error?.message || 'error' });
         if (call !== self || self.finished) return { error: 'The call has ended.' };
+        if (state.muted) return { muted: true }; // cancelled by the mute
         warn(`[PracticeCall] suggestion failed: ${error?.code || error?.name || 'error'}`);
         return { error: 'Could not suggest a reply. Try again.' };
       } finally {

@@ -4867,6 +4867,62 @@ test('draftAnswer: pausing neither refuses a suggestion nor stops one being writ
   await service.hangUp({ feedback: false });
 });
 
+test('muted: the wand writes nothing, a line is not sent, a suggestion being written is dropped, and the call says so', async () => {
+  const muted = [];
+  const typedLines = [];
+  const engineFactory = () => ({ start() {}, hangUp() {}, setMuted(value) { muted.push(value); }, typed(text) { typedLines.push(text); return true; }, state: () => ({ transcript: [], elapsedMs: 0 }) });
+  let release;
+  let aborted = false;
+  let drafts = 0;
+  let helperEvent;
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    helperFactory: ({ onEvent }) => {
+      helperEvent = onEvent;
+      return { start: async () => ({ ok: true }), play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, stop: async () => { onEvent({ type: 'recording', state: 'closed' }); } };
+    },
+    draftAnswer: async ({ signal }) => {
+      drafts += 1;
+      signal.addEventListener('abort', () => { aborted = true; release?.(); });
+      await new Promise(resolve => { release = resolve; });
+      if (signal.aborted) throw new Error('aborted');
+      return 'Written.';
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  helperEvent({ type: 'muted-speech', atMs: 10 });
+  assert.equal(service.getState().mutedHint, null, 'talking with the mic on is no hint');
+  // Muted while a suggestion is being written: it is aborted and never spoken.
+  const during = service.draftAnswer();
+  await flush();
+  service.setMuted(true);
+  assert.deepEqual(muted, [true], 'the engine hears of the mute and cuts what it is saying');
+  assert.equal(aborted, true, 'nothing more is spent on it');
+  assert.deepEqual(await during, { muted: true });
+  // Pressed while muted: nothing is written at all.
+  assert.deepEqual(await service.draftAnswer(), { muted: true });
+  assert.equal(drafts, 1, 'no suggestion is written while muted');
+  assert.deepEqual(service.getState().mutedHint, { id: 1, reason: 'wand' });
+  const chatBefore = service.getState().chat.length;
+  const refused = service.sendChat('Hello?');
+  assert.equal(refused.muted, true);
+  assert.equal(service.getState().chat.length, chatBefore, 'a line sent while muted is not posted');
+  assert.deepEqual(typedLines, [], 'nor heard');
+  assert.deepEqual(service.getState().mutedHint, { id: 2, reason: 'chat' });
+  helperEvent({ type: 'muted-speech', atMs: 20 });
+  assert.deepEqual(service.getState().mutedHint, { id: 3, reason: 'speech' }, 'talking into the muted mic');
+  service.setMuted(false);
+  assert.deepEqual(muted, [true, false]);
+  assert.equal(service.getState().mutedHint, null);
+  service.sendChat('Hello?');
+  assert.deepEqual(typedLines, ['Hello?'], 'after unmuting it goes out as ever');
+  service.setMuted(true);
+  await service.draftAnswer();
+  assert.deepEqual(service.getState().mutedHint, { id: 4, reason: 'wand' }, 'a hint after an unmute gets a new id, so the window shows it');
+  await service.hangUp({ feedback: false });
+});
+
 test('draftAnswer: one at a time, a failure reads as a retryable error, and hanging up aborts the one in flight', async () => {
   const engineFactory = () => ({ start() {}, hangUp() {}, state: () => ({ transcript: [], elapsedMs: 0 }) });
   let release;

@@ -659,6 +659,28 @@ test('injected: a listen on a line whose words settled waits for the candidate, 
   assert.equal(rig.of('quiet-relook').length, 0);
 });
 
+test('muted: a line playing in the AI voice is cut where it stands and nothing more is said until unmuted', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  assert.equal(rig.engine.typed('And a second line queued behind it.', { chatId: 'm2' }), true);
+  rig.engine.setMuted(true);
+  await flush();
+  assert.equal(injectCancels(rig, line.utteranceId).length, 1, 'the line playing is cut');
+  rig.h.inject(line.utteranceId, 'cancelled', 900);
+  await flush();
+  await rig.clock.advance(500);
+  const cut = rig.of('candidate-voice').filter(item => item.state === 'cut');
+  assert(cut.length >= 1, 'its chat entries are cut where they stand');
+  assert.equal(voice.lines.length, 1, 'the queued line is dropped, never made');
+  assert.equal(rig.engine.typed('Can you hear me?', { chatId: 'm3' }), false, 'nothing is spoken while muted');
+  assert.deepEqual(rig.of('muted').map(item => item.muted), [true]);
+  rig.engine.setMuted(false);
+  assert.equal(rig.engine.typed('Can you hear me now?', { chatId: 'm4' }), true, 'after unmuting it is sent again');
+});
+
 test('injected: the end of the AI voice line is a sure finish, however the turn model scores it', async () => {
   const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
   const { rig, voice } = await injectRig({ ear });
@@ -1203,6 +1225,25 @@ test('injected: a helper that cannot inject keeps the old app-played path', asyn
   rig.streams.at(-1).audio(3200);
   await flush();
   assert(rig.engine.state().transcript.some(item => item.voiced), 'the AI-voice entry exists on the fallback');
+});
+
+test('muted on the app-played path: the line stops where it stands, the queue is dropped, and nothing is tried again', async () => {
+  const candidateVoice = fakeCandidateVoice();
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: false });
+  await greet(rig);
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  await playLine(rig, line);
+  rig.engine.typed('And a second line behind it.', { chatId: 'm2' });
+  await flush();
+  rig.engine.setMuted(true);
+  await flush();
+  assert(rig.opsOf('cancel').some(item => item.id === line.utteranceId), 'the playing line is stopped');
+  await rig.clock.advance(20000);
+  assert.equal(candidateVoice.lines.length, 1, 'the queued line is never made, and the stopped one is not retried');
+  assert(rig.of('candidate-voice').some(item => item.state === 'cut' && item.messages?.some(message => message.chatId === 'm2')), 'the queued entry is cut');
+  assert.equal(rig.of('error').filter(item => item.code === 'candidate-voice-failed').length, 0);
 });
 
 test('a line reports when it starts playing, naming its messages, so the window stops waiting only then', async () => {
