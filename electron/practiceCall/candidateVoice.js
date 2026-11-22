@@ -22,6 +22,9 @@ export const CANDIDATE_VOICE_GENDERS = Object.freeze(['female', 'male']);
 export const DEFAULT_CANDIDATE_VOICE_GENDER = 'male';
 // The interviewer is waiting for the line: tags that are not back by then are not worth the wait.
 export const TAG_TIMEOUT_MS = 4000;
+// Lines tagged ahead (the steps of a worked exercise) go in one call, and nobody waits on it until a line opens, so it
+// may take longer; each line still waits at most TAG_TIMEOUT_MS from its own start.
+export const PREPARE_TIMEOUT_MS = 15000;
 const TRANSCRIPT_TURNS = 12;
 const TURN_MAX = 600;
 const TAG = /\[[^[\]\n]{1,80}\]/gu;
@@ -58,14 +61,15 @@ export function splitSentences(line) {
 }
 
 /** The prompt for the tagging call: the numbered sentences in, the tags to insert out. */
-export function candidateTagPrompt({ text, transcript = [], role = '', company = '' } = {}) {
+export function candidateTagPrompt({ text, sentences: given = null, transcript = [], role = '', company = '' } = {}) {
   const lines = (Array.isArray(transcript) ? transcript : [])
     .filter(entry => entry && typeof entry.text === 'string' && entry.text.trim() && !entry.acknowledgement)
     .slice(-TRANSCRIPT_TURNS)
     .map(entry => `${entry.speaker === 'candidate' ? 'Candidate' : 'Interviewer'}: ${clip(wordsOf(entry.text), TURN_MAX)}`);
-  const sentences = splitSentences(String(text ?? '').trim()).map((sentence, index) => `${index + 1}. ${sentence.trim()}`);
+  // Several lines tagged together (said one after another, with code typed between them) are numbered straight through.
+  const sentences = (Array.isArray(given) ? given : splitSentences(String(text ?? '').trim())).map((sentence, index) => `${index + 1}. ${String(sentence).trim()}`);
   return [
-    `A job candidate is answering out loud in a live video interview${role ? ` for ${role}` : ''}${company ? ` at ${company}` : ''}. Their next line is below, split into numbered sentences. It will be performed by an expressive text-to-speech voice.`,
+    `A job candidate is answering out loud in a live video interview${role ? ` for ${role}` : ''}${company ? ` at ${company}` : ''}. ${Array.isArray(given) ? 'What they say next, in a few lines said one after another while they work, is below' : 'Their next line is below'}, split into numbered sentences. It will be performed by an expressive text-to-speech voice.`,
     'Choose delivery tags so it sounds like a prepared, confident, likeable candidate speaking naturally on a call, not someone reading aloud. You only name the tags; the line itself is never re-typed.',
     '',
     'Rules:',
@@ -92,19 +96,28 @@ export function candidateTagPrompt({ text, transcript = [], role = '', company =
  * so there is nothing to check afterwards.
  */
 export function applyTags(original, reply) {
-  const line = String(original ?? '').trim();
-  const sentences = splitSentences(line);
+  const sentences = splitSentences(String(original ?? '').trim());
+  return insertTags(sentences, parseTags(reply, sentences.length));
+}
+
+/** The reply's tags by sentence index (0-based), read leniently as applyTags describes. */
+function parseTags(reply, count) {
   const tags = new Map();
   for (const row of String(reply ?? '').split('\n')) {
     const found = row.match(/^\W*(\d{1,3})\s*[.:)\-–]\s*(\[[^[\]\n]{1,80}\])/u);
     if (!found) continue;
     const index = Number(found[1]) - 1;
     const tag = found[2].replace(/\s+/gu, ' ');
-    if (index >= 0 && index < sentences.length && !tags.has(index)) tags.set(index, tag);
+    if (index >= 0 && index < count && !tags.has(index)) tags.set(index, tag);
   }
-  if (!tags.size) return null;
+  return tags;
+}
+
+/** The sentences joined again with the tags put in, or null when none lands on them. `offset` is the first sentence's index. */
+function insertTags(sentences, tags, offset = 0) {
+  if (!sentences.some((_, index) => tags.has(offset + index))) return null;
   return sentences.map((sentence, index) => {
-    const tag = tags.get(index);
+    const tag = tags.get(offset + index);
     if (!tag) return sentence;
     const lead = sentence.match(/^\s*/u)[0];
     return `${lead}${tag} ${sentence.slice(lead.length)}`;
@@ -138,6 +151,48 @@ export async function tagCandidateLine({ tagText, text, transcript, brief, signa
 }
 
 /**
+ * Tags for several lines said one after another, in one call: one result per line, in order, each the line as written
+ * when the call fails, runs past `timeoutMs` or tags none of its sentences. Heard 2026-11-22: the seven steps of a
+ * worked exercise went out as seven calls at once, and every one of them ran past the 4 s limit.
+ */
+export async function tagCandidateLines({ tagText, texts = [], transcript, brief, clock = globalThis, timeoutMs = PREPARE_TIMEOUT_MS } = {}) {
+  const lines = (Array.isArray(texts) ? texts : []).map(value => String(value ?? '').trim());
+  const plain = () => lines.map(text => ({ text, tagged: false }));
+  const split = lines.map(line => splitSentences(line));
+  const all = split.flat();
+  if (!all.length || typeof tagText !== 'function') return plain();
+  const controller = new AbortController();
+  let timer = null;
+  try {
+    const timeout = new Promise(resolve => { timer = clock.setTimeout(() => { try { controller.abort(); } catch { /* stopped */ } resolve(null); }, timeoutMs); });
+    const reply = await Promise.race([
+      Promise.resolve(tagText({ prompt: candidateTagPrompt({ sentences: all, transcript, role: brief?.role, company: brief?.company }), signal: controller.signal })).catch(() => null),
+      timeout,
+    ]);
+    const tags = parseTags(typeof reply === 'string' ? reply : reply?.text, all.length);
+    let offset = 0;
+    return lines.map((text, index) => {
+      const tagged = insertTags(split[index], tags, offset);
+      offset += split[index].length;
+      return tagged ? { text: tagged, tagged: true } : { text, tagged: false };
+    });
+  } catch {
+    return plain();
+  } finally {
+    try { if (timer !== null) clock.clearTimeout(timer); } catch { /* fired */ }
+  }
+}
+
+/** The prepared result, or the line as written when it is not back within `ms` (the line is not held up longer). */
+function within(promise, ms, fallback, clock) {
+  let timer = null;
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise(resolve => { timer = clock.setTimeout(() => resolve(fallback), ms); }),
+  ]).finally(() => { try { if (timer !== null) clock.clearTimeout(timer); } catch { /* fired */ } });
+}
+
+/**
  * The engine's candidate voice. `factories` holds a dialogue voice factory per gender (either may
  * be missing); `gender()` reads the setting. `open({ utteranceId, text, signal })` returns a stream
  * with `sampleRate`, `onAudio`, `onWords`, `cancel` and `done` (settles when the voice has sent
@@ -158,14 +213,13 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
   const keyOf = value => String(value ?? '').replace(/\s+/gu, ' ').trim();
   return Object.freeze({
     prepare(texts = []) {
-      for (const value of Array.isArray(texts) ? texts : [texts]) {
-        const key = keyOf(value);
-        if (!key || prepared.has(key)) continue;
-        const { transcript, brief } = attemptValue(context) || {};
-        const promise = tagCandidateLine({ tagText, text: key, transcript, brief, clock }).catch(() => ({ text: key, tagged: false }));
-        prepared.set(key, promise);
-        while (prepared.size > PREPARED_MAX) prepared.delete(prepared.keys().next().value);
-      }
+      const keys = [...new Set((Array.isArray(texts) ? texts : [texts]).map(keyOf).filter(key => key && !prepared.has(key)))];
+      if (!keys.length) return;
+      const { transcript, brief } = attemptValue(context) || {};
+      // One call for all of them (see tagCandidateLines), shared by each line's entry.
+      const batch = tagCandidateLines({ tagText, texts: keys, transcript, brief, clock }).catch(() => keys.map(text => ({ text, tagged: false })));
+      keys.forEach((key, index) => prepared.set(key, batch.then(results => results[index] ?? { text: key, tagged: false })));
+      while (prepared.size > PREPARED_MAX) prepared.delete(prepared.keys().next().value);
     },
     open({ utteranceId, text, signal } = {}) {
       const chosen = pick();
@@ -177,7 +231,9 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
       if (ready) prepared.delete(key);
       const done = (async () => {
         const { transcript, brief } = attemptValue(context) || {};
-        const tagged = ready ? await ready : await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
+        const tagged = ready
+          ? await within(ready, TAG_TIMEOUT_MS, { text: String(text ?? '').trim(), tagged: false }, clock)
+          : await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
         attemptValue(() => onEvent({ type: 'candidate-voice', gender: chosen.gender, tagged: tagged.tagged, tagMs: Math.round((typeof clock.now === 'function' ? clock.now() : Date.now()) - started), chars: tagged.text.length }));
         if (signal?.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
         stream.sendText(tagged.text);

@@ -1343,6 +1343,42 @@ export default [
     },
   },
   {
+    // In the call of 2026-11-22 the window never passed setPadLanguage on to the call screen, so no dropdown showed.
+    name: 'practice call render: the window passes the pad language choice through, so an open pad with no required language has the Language dropdown',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const picks = [];
+          let pad = { open: true, lang: '', text: '', choice: '' };
+          let pushState = null;
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat: [], pad });
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            setPadLanguage: async name => { picks.push(name); pad = { ...pad, choice: name }; pushState?.(current()); return current(); },
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => new Promise(resolve => setTimeout(resolve, 5)));
+            const select = () => window.document.querySelector('[data-pad-language-choice="true"]');
+            assert(select(), 'the open pad has the Language dropdown');
+            assert(picks.length === 1 && picks[0], 'a first pad starts on a language');
+            await act(() => {
+              select().value = 'Go';
+              select().dispatchEvent(new window.Event('change', { bubbles: true }));
+            });
+            assert(picks.at(-1) === 'Go', 'a pick reaches the service');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
     name: 'practice call render: the wand keeps spinning until its line starts playing, through a pause that holds it, and stops when the line is given up on',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');

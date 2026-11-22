@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { askedParser, flush, greet, makeRig, speak } from './interview-practice-call-engine.js';
-import { applyTags, splitSentences, candidateTagPrompt, createCandidateVoice, tagCandidateLine, wordsOf, CANDIDATE_VOICE_STAGE, DEFAULT_CANDIDATE_VOICE_GENDER } from '../../electron/practiceCall/candidateVoice.js';
+import { applyTags, splitSentences, candidateTagPrompt, createCandidateVoice, tagCandidateLine, wordsOf, CANDIDATE_VOICE_STAGE, DEFAULT_CANDIDATE_VOICE_GENDER, TAG_TIMEOUT_MS } from '../../electron/practiceCall/candidateVoice.js';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { contradictsGender } from '../../electron/practiceCall/eleven/voiceCatalog.js';
@@ -415,20 +415,40 @@ test('the voice speaks the setting\'s gender, falls back to the other one, and s
   assert.equal(DEFAULT_CANDIDATE_VOICE_GENDER, 'male');
 });
 
-test('lines prepared ahead are tagged at once and spoken with those tags; an unprepared line is tagged when it opens', async () => {
+test('lines prepared ahead are tagged in one call and spoken with those tags; an unprepared line is tagged when it opens', async () => {
+  // Call of 2026-11-22: seven steps prepared as seven calls at once all ran past the 4 s limit and went out untagged.
   const sent = [];
   const factory = { open: () => ({ sampleRate: 24000, onAudio() {}, onWords() {}, cancel() {}, sendText: text => sent.push(text), finish: async () => 'done' }) };
   const asked = [];
-  const voice = createCandidateVoice({ factories: { male: factory }, gender: () => 'male', tagText: async ({ prompt }) => { asked.push(prompt); return '1: [thoughtful]'; } });
-  voice.prepare(['First I set up  the window.', 'Then I shrink it.', '']);
+  const voice = createCandidateVoice({ factories: { male: factory }, gender: () => 'male', tagText: async ({ prompt }) => { asked.push(prompt); return asked.length === 1 ? '1: [thoughtful]\n3: [confident]' : '1: [thoughtful]'; } });
+  voice.prepare(['First I set up  the window. Then', 'Then I shrink it.', '']);
   voice.prepare('Then I shrink it.'); // already prepared: no second call
   await flush();
-  assert.equal(asked.length, 2, 'both lines were tagged before either was spoken');
-  await voice.open({ utteranceId: 'u1', text: 'First I set up the window.' }).done;
-  assert.equal(asked.length, 2, 'the prepared tags were used');
-  await voice.open({ utteranceId: 'u2', text: 'Something else.' }).done;
-  assert.equal(asked.length, 3, 'a line nobody prepared is tagged as before');
-  assert.deepEqual(sent, ['[thoughtful] First I set up the window.', '[thoughtful] Something else.']);
+  assert.equal(asked.length, 1, 'both lines were tagged in one call before either was spoken');
+  assert(asked[0].includes('1. First I set up the window.') && asked[0].includes('2. Then') && asked[0].includes('3. Then I shrink it.'), 'sentences are numbered straight through the lines');
+  await voice.open({ utteranceId: 'u1', text: 'First I set up the window. Then' }).done;
+  await voice.open({ utteranceId: 'u2', text: 'Then I shrink it.' }).done;
+  assert.equal(asked.length, 1, 'the prepared tags were used');
+  await voice.open({ utteranceId: 'u3', text: 'Something else.' }).done;
+  assert.equal(asked.length, 2, 'a line nobody prepared is tagged as before');
+  assert.deepEqual(sent, ['[thoughtful] First I set up the window. Then', '[confident] Then I shrink it.', '[thoughtful] Something else.']);
+});
+
+test('a line prepared ahead whose tags are late waits at most the line limit, then speaks plain', async () => {
+  const timers = [];
+  const clock = { now: () => 0, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: () => {} };
+  const sent = [];
+  const factory = { open: () => ({ sampleRate: 24000, onAudio() {}, onWords() {}, cancel() {}, sendText: text => sent.push(text), finish: async () => 'done' }) };
+  const voice = createCandidateVoice({ factories: { male: factory }, gender: () => 'male', clock, tagText: () => new Promise(() => {}) });
+  voice.prepare(['One step.', 'Two steps.']);
+  await flush();
+  const line = voice.open({ utteranceId: 'u1', text: 'One step.' });
+  await flush();
+  const own = timers.find(timer => timer.ms === TAG_TIMEOUT_MS);
+  assert(own, 'the line waits no longer than a line tagged on its own');
+  own.fn();
+  await line.done;
+  assert.deepEqual(sent, ['One step.']);
 });
 
 test('a voice draw can ask for one gender', async () => {
@@ -610,6 +630,34 @@ test('injected: the turn ends by vad and speculation like speech, with the micro
   assert.notEqual(entry.channel, 'chat', 'a microphone entry, not a sent message');
   assert(!entry.voiced && !entry.interrupted);
   assert.equal(ear.calls.prepared.length + ear.calls.noted.length, 0, 'the ear measures candidate.wav, not the AI voice');
+});
+
+test('injected: the interviewer is told the words that were sent, not the recogniser\'s mishearing of the AI voice', async () => {
+  // Call of 2026-11-22: "A self-loop counts as a cycle" reached the interviewer as "A cell loop counters a cycle".
+  const { rig, voice } = await injectRig();
+  const before = rig.sessions.main.calls.length;
+  rig.engine.typed('A self-loop counts as a cycle.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'A cell loop counters a cycle.');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  micSettles(rig, 'A cell loop counters a cycle.');
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(10);
+  assert.equal(rig.sessions.main.calls.length, before + 1);
+  const message = lastMain(rig);
+  assert(message.includes("Candidate: 'A self-loop counts as a cycle.'"), message);
+  assert(!message.includes('cell loop'), message);
+  rig.sessions.main.answer('Right. And duplicates?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  await rig.clock.advance(700);
+  const entry = rig.engine.state().transcript.find(item => item.speaker === 'candidate');
+  assert.equal(entry.text, 'A cell loop counters a cycle.', 'the transcript keeps what the microphone heard (the review swaps in the sent text)');
 });
 
 test('injected: after a line heard whole the first look waits for the recogniser\'s final on its last words, a little while at most', async () => {

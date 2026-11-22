@@ -5071,6 +5071,20 @@ test('a line the AI voice spoke through the microphone is stamped voiced and gen
   assert.equal(split.every(entry => entry.generated === true && entry.sentText === undefined), true);
 });
 
+test('one recognised entry that joins several AI-voice lines (a worked exercise with typing between them) is stamped, with their texts joined', () => {
+  // Call of 2026-11-22: seven lines of 9 to 21 s became one 116 s entry; none covered half of it, so it went unstamped.
+  const spans = [
+    { startMs: 10000, endMs: 25000, generated: true, whole: true, text: 'First I restate it.' },
+    { startMs: 30000, endMs: 45000, generated: true, whole: true, text: 'Then the graph.' },
+    { startMs: 60000, endMs: 75000, generated: true, whole: true, text: 'Done.' },
+  ];
+  const entry = { speaker: 'candidate', text: 'first I restate it then the graph done', startMs: 10200, endMs: 74800 };
+  const [stamped] = stampInjectedLines([entry], spans);
+  assert.deepEqual(stamped, { ...entry, voiced: true, generated: true, sentText: 'First I restate it. Then the graph. Done.' });
+  const [mostlyLive] = stampInjectedLines([{ speaker: 'candidate', text: 'x', startMs: 0, endMs: 100000 }], spans);
+  assert.equal(mostlyLive.generated, undefined, 'lines covering less than half of a long entry do not make it generated');
+});
+
 test('the engine\'s spoken line is matched back to the sent messages it was joined from', () => {
   const fresh = () => [{ text: 'one', generated: false }, { text: 'two', generated: true }, { text: 'three', generated: true }];
   assert.equal(generatedRunFor(fresh(), 'two three'), true);

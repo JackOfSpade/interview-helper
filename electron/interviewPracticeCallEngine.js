@@ -130,6 +130,10 @@ const SCREEN_CONTENT_CAP = 6000;
 const PAD_TEXT_CAP = 20000;
 const FINISH_SLACK_MS = 3000;
 const OVERLAP_LOOKBACK_MS = 250;
+// A recognised segment belongs to an injected line when its middle falls inside the line's playback, give or take these.
+const INJECTED_MATCH_EARLY_MS = 300;
+const INJECTED_MATCH_LATE_MS = 800;
+const INJECTED_HEARD_MAX = 30;
 const OVERLAP_WORD_WAIT_MS = 600;
 const WAIT_MIN_S = 6;
 const WAIT_MAX_S = 300;
@@ -284,7 +288,7 @@ export function createPracticeCallEngine({
   const segments = new Map();
   const handles = new Set();
   const named = { spec: null, commit: null, quietRelook: null, silence: null, typing: null, padIdle: null, padTyping: null, liveLook: null, watch: null };
-  const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null, veto: null }; // the watcher's checks: one at a time; veto: the main's last <listen/> to a cut-in of this answer
+  const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null, veto: null, padSeen: null }; // the watcher's checks: one at a time; veto: the main's last <listen/> to a cut-in of this answer; padSeen: the pad text the watcher last received
   const classifierControllers = new Set();
   let phase = 'connecting';
   let startedAt = null;
@@ -324,6 +328,12 @@ export function createPracticeCallEngine({
   const askedQuestions = []; // plan numbers in first-asked order
   const answeredQuestions = []; // asked questions the candidate went on to answer
   let openQuestions = []; // the questions asked last, still waiting for an answer
+  // What the interviewer's latest line was, for the watcher: the plan number it asked (0 for the interviewer's own
+  // question), or null when it asked nothing from the plan (a follow-up, small talk, the closing). Seen 2026-11-22:
+  // every line after the exercise was given as "plan question 19", so the watcher judged a 2.5-minute question and the
+  // follow-ups against the exercise's 7 minutes.
+  let latestPlanNumber = null;
+  let lastPlanNumber = null; // the plan question asked most recently, whatever came after it
   let answerWords = 0; // words the candidate has said or typed since those were asked
   let padAtAsk = 0; // length of the pad text when they were asked
   let pendingAcks = [];
@@ -332,6 +342,7 @@ export function createPracticeCallEngine({
   let said = null; // the candidate's voice line being spoken (see speakTyped)
   let injecting = null; // the candidate's voice line being mixed into the microphone (see injectTyped); never in `said`
   let injectQueue = []; // sent messages waiting for the injected line before them: { text, generated, chatId? }
+  let injectedHeard = []; // lines said in the candidate's injected voice: { startMs, endMs, text } on the helper timeline, newest last
   let voicedDone = []; // candidate voice lines heard in full or in part that no reply has answered yet
   let voicedHeld = false; // a voice line ended during a pause: the interviewer answers it on resume
   let cancelling = null; // reply stopped, waiting for the helper's cancelled event
@@ -435,6 +446,29 @@ export function createPracticeCallEngine({
     return [...segments.values()].filter(item => item.startMs >= fromMs)
       .sort((a, b) => a.startMs - b.startMs).map(item => item.text.trim()).filter(Boolean).join(' ');
   }
+
+  /**
+   * The candidate's words as the interviewer would hear them: recognised speech, except that a line said in the
+   * candidate's injected voice is given as the words that were sent (or, for a cut line, heard), not as the recogniser
+   * wrote them. Heard 2026-11-22: "A self-loop counts as a cycle" reached the interviewer as "A cell loop counters a
+   * cycle", and "Kahn's" as "Khan's"; a person on the call would have heard the words. Only for the messages to the
+   * sessions: every count and comparison keeps using candidateText.
+   */
+  function heardCandidateText(fromMs = turnStartMs) {
+    const used = new Set();
+    const out = [];
+    for (const item of [...segments.values()].filter(entry => entry.startMs >= fromMs).sort((a, b) => a.startMs - b.startMs)) {
+      const said = item.text.trim();
+      if (!said) continue;
+      const mid = Number.isFinite(item.endMs) ? (item.startMs + item.endMs) / 2 : item.startMs;
+      const line = injectedHeard.find(entry => mid >= entry.startMs - INJECTED_MATCH_EARLY_MS && mid <= entry.endMs + INJECTED_MATCH_LATE_MS);
+      if (!line) { out.push(said); continue; }
+      if (!used.has(line)) { used.add(line); out.push(line.text); }
+    }
+    return out.join(' ');
+  }
+  /** `text` as the interviewer hears it, when it is the recognised speech since `fromMs`; anything else as it is. */
+  const asHeard = (text, fromMs = turnStartMs) => (injectedHeard.length && text && text === candidateText(fromMs) ? heardCandidateText(fromMs) || text : text);
   // The helper's VAD onset can trail the recogniser's start, so look back a little.
   const overlapText = record => candidateText(record.startMs - OVERLAP_LOOKBACK_MS);
   const lastSpoken = () => {
@@ -541,7 +575,7 @@ export function createPracticeCallEngine({
     armSilence();
     if (watch.veto && reply.watched && reply.liveLook) armWatch(); // the next check waits out the back-off
     if (kind === 'listen' && answerLook(reply)) {
-      listenedText = reply.turnBase?.candidateText ?? null;
+      listenedText = reply.rawCandidateText ?? reply.turnBase?.candidateText ?? null;
       if (reply.quietLook) {
         // Still not done after the quiet look: wait on, and check in sooner than a normal silence would.
         checkInAt = (toClock(lastVadEndMs) ?? now()) + th.listenCheckInMs;
@@ -699,7 +733,7 @@ export function createPracticeCallEngine({
     if (greeting) reply.messages = { main: `${prefix}[elapsed 00:00] ${connectedMarker(callback)}${presence ? ` ${presenceNote(presence)}` : ''}` };
     else {
       const base = {
-        elapsedMs: elapsed(), candidateText: text, channel, silenceMs, acknowledgements: pendingAcks.slice(),
+        elapsedMs: elapsed(), candidateText: asHeard(text), channel, silenceMs, acknowledgements: pendingAcks.slice(),
         interruption: pendingInterruption ? { heardText: pendingInterruption.reply.heardText ?? '', unheardText: unheardFor(pendingInterruption.reply) } : null,
         notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true, ...(mostRecent ? { mostRecent } : {}), ...(cutInBy ? { cutInBy } : {}) } : {}), ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
@@ -709,6 +743,7 @@ export function createPracticeCallEngine({
       reply.padSnapshot = padText;
       reply.padCarried = padText !== padSent && pausedAck === null;
       reply.turnBase = base;
+      reply.rawCandidateText = text; // what a later look compares with (recognised words, as candidateText gives them)
       // A silence prompt or pad progress answers nothing the candidate said, so there is nothing to acknowledge first.
       // Nor does a cut-in: the interviewer is taking the floor, not reacting to a finished answer.
       const withOpener = !reply.checkIn && !reply.padProgress && !handover && !cutInCheck;
@@ -788,7 +823,7 @@ export function createPracticeCallEngine({
   }
 
   /** The acknowledgement is known (spoken, dropped, passed, timed out or failed): report it once and release the main reply. */
-  function finishOpener(reply, outcome, written = '', words = 0) {
+  function finishOpener(reply, outcome, written = '', words = 0, cutFrom = '') {
     if (reply.openerSettled) return;
     reply.openerSettled = true;
     unschedule(reply.openerTimer);
@@ -798,7 +833,7 @@ export function createPracticeCallEngine({
       recentReactions.push({ speaker: speakers ? castMember(reply.openSpeaker)?.name || 'Interviewer' : 'Interviewer', text: stripAudioTags(written).trim() });
       recentReactions = recentReactions.slice(-RECENT_REACTIONS);
     }
-    emit({ type: 'opener', text: written, spoken: outcome === 'spoken', words, ms: Math.round(now() - reply.spec.at), outcome });
+    emit({ type: 'opener', text: written, spoken: outcome === 'spoken', words, ms: Math.round(now() - reply.spec.at), outcome, ...(cutFrom ? { cutFrom } : {}) });
     if (outcome === 'listen') return;
     maybeStartMain(reply);
     settle(reply);
@@ -1223,8 +1258,37 @@ export function createPracticeCallEngine({
 
   function addControl(reply, control) {
     // The anchor is the main reply's spoken characters before the tag; the acknowledgement spoken first is added when it is checked.
-    reply.controls.push({ ...control, afterMain: spokenChars(reply.mainSentences.join(' ')) });
+    const added = { ...control, afterMain: spokenChars(reply.mainSentences.join(' ')) };
+    reply.controls.push(added);
+    // A pad that comes with a screen already shared in this reply goes up with it (see deliverOneControl).
+    if (added.kind === 'pad' && added.open && reply.sharedAt != null && padWithScreen(reply, reply.sharedAt + 1) === added) deliverPulledPad(reply, added);
     if (reply.playbackStarted && reply === current) deliverDueControls(reply, reply.positionMs);
+  }
+
+  /**
+   * The pad opening that belongs with a screen: the first pad open after the controls index `from`, with no other
+   * screen, screen stop or pad change before it. Seen 2026-11-22: the interviewer shared the problem, then said
+   * "there's a coding pad open beside it too" at the end of the line, so the pad came up 13 s after the problem.
+   * In a real coding interview the problem and the pad arrive together.
+   */
+  function padWithScreen(reply, from) {
+    for (let index = from; index < reply.controls.length; index += 1) {
+      const control = reply.controls[index];
+      if (control.kind === 'pad' && control.open && !control.pulled) return control;
+      if (control.kind === 'screen' || control.kind === 'screen-stop' || control.kind === 'pad') return null;
+    }
+    return null;
+  }
+
+  function deliverPulledPad(reply, control) {
+    control.pulled = true;
+    emitPad(control, helperTimelineMs());
+  }
+
+  function emitPad(control, atMs) {
+    // Opening an open pad keeps its text; a label given again replaces the old one.
+    padState = control.open ? { open: true, lang: control.lang || (padState.open ? padState.lang : '') } : { open: false, lang: padState.lang };
+    emit({ type: 'pad', open: padState.open, lang: padState.lang, atMs });
   }
 
   /** Whether playback has heard everything spoken before this control's tag (see deliverDueControls for the fallbacks). */
@@ -1275,6 +1339,7 @@ export function createPracticeCallEngine({
   function deliverOneControl(reply) {
     const control = reply.controls[reply.deliveredControls];
     reply.deliveredControls += 1;
+    if (control.pulled) return; // already went up with its screen
     const atMs = helperTimelineMs();
     if (control.kind === 'chat') {
       emit({ type: 'chat', from: 'interviewer', text: control.text });
@@ -1284,13 +1349,14 @@ export function createPracticeCallEngine({
       const visual = control.visualId ? { visualId: control.visualId } : {};
       screenShown = { title: control.title, content: control.content, speakerId: control.speakerId, ...visual };
       emit({ type: 'screen', title: control.title, content: control.content, speakerId: control.speakerId, delayMs, atMs, ...visual });
+      reply.sharedAt = reply.deliveredControls - 1;
+      const pad = padWithScreen(reply, reply.sharedAt + 1);
+      if (pad) deliverPulledPad(reply, pad);
     } else if (control.kind === 'screen-stop') {
       screenShown = null;
       emit({ type: 'screen-stop', atMs });
     } else if (control.kind === 'pad') {
-      // Opening an open pad keeps its text; a label given again replaces the old one.
-      padState = control.open ? { open: true, lang: control.lang || (padState.open ? padState.lang : '') } : { open: false, lang: padState.lang };
-      emit({ type: 'pad', open: padState.open, lang: padState.lang, atMs });
+      emitPad(control, atMs);
     }
   }
 
@@ -1474,11 +1540,21 @@ export function createPracticeCallEngine({
         }
         // A pass from the acknowledgement session only means it makes no sound. Whether the line gets a reply is the
         // main session's decision alone: found live on 2026-11-18, where this session's pass cancelled a real reply.
-        const written = [...head.sentences, ...tail.sentences].join(' ').trim();
+        const sentences = [...head.sentences, ...tail.sentences].map(item => String(item).trim()).filter(Boolean);
+        const written = sentences.join(' ').trim();
         // The acknowledgement chooses its own length and is spoken as written, however long (the owner's call,
         // 2026-11-19: a word cap was arbitrary and untested). A bare delivery tag with no words makes no sound.
         const words = tokens(stripAudioTags(written)).length;
-        const spoken = words >= 1 && !repeatsRecentReaction(written) ? written : '';
+        // A reaction that repeats a recent one is cut at the first sentence that does, so what comes before it is still
+        // said. Heard 2026-11-22: "Right. That's followed." was dropped whole for "followed" (said earlier in "Yep,
+        // followed."), and the interviewer was silent 3.1 s instead of about 1.7 s while the main reply was written.
+        const kept = [];
+        for (const sentence of sentences) {
+          if (repeatsRecentReaction([...kept, sentence].join(' '))) break;
+          kept.push(sentence);
+        }
+        const keptText = kept.join(' ').trim();
+        const spoken = words >= 1 && tokens(stripAudioTags(keptText)).length >= 1 ? keptText : '';
         if (spoken) {
           sendVoice(reply, spoken);
           reply.openerChars = nonSpace(spoken);
@@ -1489,7 +1565,7 @@ export function createPracticeCallEngine({
           reply.flushAfter = spoken;
           if (reply.gateOpen) attempt(() => reply.stream.flush?.());
         }
-        return finishOpener(reply, spoken ? 'spoken' : control === 'pass' ? 'pass' : 'dropped', written, words);
+        return finishOpener(reply, spoken ? 'spoken' : control === 'pass' ? 'pass' : 'dropped', spoken || written, words, spoken && spoken !== written ? written : '');
       } catch (error) {
         if (current !== reply || reply.openerSettled || (isCancel(error) && !guard?.state.timedOut)) return;
         if (tries >= 1) return finishOpener(reply, 'error');
@@ -1533,6 +1609,10 @@ export function createPracticeCallEngine({
         for (const item of items) {
           if (item.asked !== undefined) {
             reply.asked.push(item.asked);
+            if (Number.isInteger(item.asked) && item.asked >= 0) {
+              reply.planNumber = item.asked;
+              if (reply.committed) { latestPlanNumber = item.asked; lastPlanNumber = item.asked; }
+            }
             // A tag that arrives once the reply is already being delivered counts at once.
             if (reply.committed) noteAsked(reply);
           }
@@ -1852,6 +1932,8 @@ export function createPracticeCallEngine({
     // (resumed, respeculated, listen) or one the voice never spoke never gets here, so it counts nothing.
     noteAnswer(reply.candidates); // these words answer what was asked before this reply, so they are counted first
     noteAsked(reply);
+    latestPlanNumber = Number.isInteger(reply.planNumber) ? reply.planNumber : null;
+    if (latestPlanNumber !== null) lastPlanNumber = latestPlanNumber;
     noteWait(reply);
     disarm('commit');
     markNotesDelivered(reply);
@@ -2728,17 +2810,23 @@ export function createPracticeCallEngine({
     const text = candidateText();
     if (now() < vetoBackoffUntil()) { armWatch(); return; }
     const question = watchQuestion();
-    const mostRecent = lastSentenceOf(text);
+    const heardText = asHeard(text); // a line in the candidate's injected voice as its words, not the recogniser's
+    const mostRecent = lastSentenceOf(heardText);
     const veto = watch.veto?.answerAt === answerSince ? watch.veto : null;
+    // The interviewers watch the candidate type, also while they talk: the watcher gets the open pad whenever it
+    // changed since its last look (the session keeps what it saw), so a cut-in can come from the code as well.
+    const padShown = padState.open && padText && padText !== watch.padSeen ? padText : null;
     let message;
     try {
       message = formatWatch({
-        elapsedMs: elapsed(), questionText: question.text, questionNumber: openQuestions.at(-1) ?? askedQuestions.at(-1) ?? null,
-        askedBy: question.askedBy, answerText: text, answerMs: Math.max(0, now() - answerSince), mostRecent,
+        elapsedMs: elapsed(), questionText: question.text, questionNumber: latestPlanNumber, ...(latestPlanNumber === null && lastPlanNumber !== null ? { lastPlanNumber } : {}),
+        askedBy: question.askedBy, answerText: heardText, answerMs: Math.max(0, now() - answerSince), mostRecent,
         ...(veto ? { declined: { reason: veto.reason, agoMs: Math.max(0, now() - veto.at), count: veto.count } } : {}),
+        ...(padShown !== null ? { padText: padShown } : {}),
       });
     } catch { message = null; }
     if (typeof message !== 'string' || !message) { armWatch(); return; }
+    if (padShown !== null) watch.padSeen = padShown;
     const controller = new AbortController();
     watch.running = true;
     watch.again = false;
@@ -2781,6 +2869,7 @@ export function createPracticeCallEngine({
       error => {
         const crashed = !settled && !isCancel(error) && phase !== 'ended';
         failed = true;
+        watch.padSeen = null; // it may not have taken the look in: the pad goes again with the next one
         // The restart is in flight before anything can start the next check, so that check waits for it; one at a time.
         if (crashed && !watch.restart) {
           const restarting = Promise.resolve(restart('watcher')).catch(() => false);
@@ -3553,6 +3642,11 @@ export function createPracticeCallEngine({
     dropInject(utterance);
     const heard = stripAudioTags(heardFor(utterance, Number.isFinite(positionMs) ? positionMs : utterance.positionMs));
     const whole = positionMs === Infinity || (!utterance.extraTexts.length && tokens(heard).length >= tokens(stripAudioTags(utterance.text)).length && tokens(heard).length > 0);
+    const heardWords = whole ? stripAudioTags(utterance.text) : heard;
+    if (utterance.started && Number.isFinite(utterance.startMs) && heardWords.trim()) {
+      injectedHeard.push({ startMs: utterance.startMs, endMs: Math.max(utterance.startMs, helperTimelineMs()), text: heardWords.replace(/\s+/gu, ' ').trim() });
+      if (injectedHeard.length > INJECTED_HEARD_MAX) injectedHeard = injectedHeard.slice(-INJECTED_HEARD_MAX);
+    }
     emit({
       type: 'candidate-voice', state: whole ? 'finished' : 'cut', injected: true, heardChars: whole ? utterance.text.length : heard.length,
       ...(whole ? { chatIds: chatIdsOf(utterance.texts) } : { messages: heardByMessage([...utterance.texts, ...utterance.extraTexts], heard) }),

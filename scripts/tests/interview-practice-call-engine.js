@@ -576,6 +576,20 @@ test('an opener that reuses a longer word of a recent reaction, in any ending, i
   ]);
 });
 
+test('an opener whose later sentence repeats a recent reaction is cut there, and what came before is still said', async () => {
+  // Call of 2026-11-22: "Right. That's followed." was dropped whole after "Yep, followed.", leaving 3.1 s of silence.
+  const rig = makeRig();
+  await greet(rig);
+  await answerTurn(rig, 'Go on.', 'Yep, followed.');
+  const stream = await answerTurn(rig, 'Go on.', 'Right. That\'s followed.');
+  await answerTurn(rig, 'Go on.', 'All followed. Right.');
+  assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text, event.cutFrom]), [
+    ['spoken', 'Yep, followed.', undefined], ['spoken', 'Right.', 'Right. That\'s followed.'], ['dropped', 'All followed. Right.', undefined],
+  ]);
+  assert(stream.texts.join(' ').startsWith('Right.') && !stream.texts.join(' ').includes('followed'), stream.texts.join(' | '));
+  assert(rig.sessions.main.calls.at(-2).message.includes("started your reply out loud with: 'Right.'"), 'the main reply carries on from what was said');
+});
+
 test('listen from main after a finished line: the opener reaction is not spoken, nothing plays, the line stays unconsumed', async () => {
   const rig = makeRig({ thresholds: { voiceGateMs: 600 } }); // gate open at speculation
   await greet(rig);
@@ -3296,7 +3310,7 @@ test('a cut-off reply keeps only the screen and pad whose position playback had 
   await rig.clock.advance(600);
   rig.sessions.opener.answer('Right.');
   await flush();
-  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then more.[[pad-open:go]]');
+  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then more.[[stop]]');
   rig.streams[1].audio(1000);
   rig.streams[1].words(words('Right.', 'Look.', 'Then', 'more.'));
   await flush();
@@ -3307,7 +3321,7 @@ test('a cut-off reply keeps only the screen and pad whose position playback had 
   rig.h.transcript('one two three four', 'z', rig.clock.now(), false, rig.clock.now() + 900);
   await flush();
   assert.deepEqual(rig.engine.state().screen, { title: 'Keep', content: 'Stay.', speakerId: 'A' });
-  assert.deepEqual(rig.of('pad'), [], 'the pad tag came after words that were never heard');
+  assert.deepEqual(rig.of('screen-stop'), [], 'the stop tag came after words that were never heard');
 });
 
 test('screen title and content are capped', async () => {
@@ -5240,10 +5254,33 @@ test('controls: a tag before any text takes effect at playback start, not before
   assert.deepEqual(eventTypes(rig), ['screen', 'pad-open'], 'both sit at the very start');
 });
 
+test('controls: a pad opened later in the same reply goes up with the screen it belongs to (call of 2026-11-22: 13 s apart)', async () => {
+  const rig = makeRig({ createParser: screenParser });
+  await openReply(rig, 'One two.[[screen:Sum|Add.]] Three four. Five six.[[pad-open:go]]', words('One', 'two.', 'Three', 'four.', 'Five', 'six.'));
+  rig.h.playback('utt1', 'started');
+  rig.h.playback('utt1', 'position', 700); // 'two.' has been heard, 'six.' has not
+  assert.deepEqual(eventTypes(rig), ['screen', 'pad-open'], 'the pad comes with the problem');
+  assert.equal(rig.of('pad')[0].lang, 'go');
+  rig.h.playback('utt1', 'position', 5000);
+  rig.h.playback('utt1', 'finished', 5000);
+  await flush();
+  assert.deepEqual(eventTypes(rig), ['screen', 'pad-open'], 'and not again at its own place');
+});
+
+test('controls: a pad after a stop or another screen keeps its own place', async () => {
+  const rig = makeRig({ createParser: screenParser });
+  await openReply(rig, 'One two.[[screen:Sum|Add.]] Three four.[[stop]] Five six.[[pad-open:go]]', words('One', 'two.', 'Three', 'four.', 'Five', 'six.'));
+  rig.h.playback('utt1', 'started');
+  rig.h.playback('utt1', 'position', 700);
+  assert.deepEqual(eventTypes(rig), ['screen']);
+  rig.h.playback('utt1', 'position', 5000);
+  assert.deepEqual(eventTypes(rig), ['screen', 'screen-stop', 'pad-open']);
+});
+
 test('controls: without word timings a tag is placed in proportion to its characters, and a tag at the end waits for the finish', async () => {
   const rig = makeRig({ createParser: screenParser });
   // 17 of 25 characters precede the screen tag; 48000 bytes at 24 kHz is 1000 ms of audio, so it falls at 680 ms.
-  await openReply(rig, 'One two. Three four.[[screen:Sum|Add.]] Five six.[[pad-open:go]]', null, 48000);
+  await openReply(rig, 'One two. Three four.[[screen:Sum|Add.]] Five six.[[stop]]', null, 48000);
   rig.h.playback('utt1', 'started');
   rig.h.playback('utt1', 'position', 500);
   assert.deepEqual(eventTypes(rig), []);
@@ -5253,7 +5290,7 @@ test('controls: without word timings a tag is placed in proportion to its charac
   assert.deepEqual(eventTypes(rig), ['screen'], 'the end tag sits at the very end of the audio');
   rig.h.playback('utt1', 'finished', 1500);
   await flush();
-  assert.deepEqual(eventTypes(rig), ['screen', 'pad-open']);
+  assert.deepEqual(eventTypes(rig), ['screen', 'screen-stop']);
 });
 
 test('controls: a tag whose position is never confirmed is delivered at finish', async () => {
@@ -5687,7 +5724,7 @@ test('a cancel reporting a heard position past the last position event delivers 
   await flush();
   await flush();
   // 'Then.' is a whole sentence: the stub parser drops an unterminated fragment, which the old punctuation-inclusive count tolerated by accident.
-  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then.[[chat:Hear.]] More.[[pad-open:go]]');
+  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then.[[chat:Hear.]] More.[[screen:Next|Later.]]');
   rig.streams[1].audio(1000);
   rig.streams[1].words(words('Right.', 'Look.', 'Then.', 'More.'));
   await flush();
@@ -5702,7 +5739,7 @@ test('a cancel reporting a heard position past the last position event delivers 
   await flush();
   assert.deepEqual(rig.engine.state().screen, { title: 'Keep', content: 'Stay.', speakerId: 'A' });
   assert.deepEqual(rig.of('chat').map(event => event.text), ['Hear.']);
-  assert.deepEqual(rig.of('pad'), [], 'the pad tag follows words that were not heard');
+  assert.equal(rig.of('screen').length, 1, 'the second screen tag follows words that were not heard');
 });
 
 test('when the voice fails part way, controls after the words that were never spoken are dropped', async () => {
@@ -5713,7 +5750,7 @@ test('when the voice fails part way, controls after the words that were never sp
   rig.sessions.opener.answer('Right.');
   await flush();
   await flush();
-  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then more.[[pad-open:go]][[chat:Late note.]]');
+  rig.sessions.main.answer('Look.[[screen:Keep|Stay.]] Then more.[[screen:Next|Later.]][[chat:Late note.]]');
   rig.streams[1].audio(1000);
   rig.streams[1].words(words('Right.', 'Look.')); // the voice stopped after these
   rig.streams[1].finish = () => Promise.reject(new Error('voice dropped'));
@@ -5724,7 +5761,7 @@ test('when the voice fails part way, controls after the words that were never sp
   await flush();
   assert.deepEqual(rig.of('error').map(event => event.code), ['voice-failed']);
   assert.deepEqual(rig.engine.state().screen, { title: 'Keep', content: 'Stay.', speakerId: 'A' });
-  assert.deepEqual(rig.of('pad'), []);
+  assert.equal(rig.of('screen').length, 1);
   assert.deepEqual(rig.of('chat'), []);
 });
 
@@ -5820,20 +5857,17 @@ test('share gap: the screen control is delivered once, when playback reaches the
   assert.equal(rig.of('screen').length, 1);
 });
 
-test('share gap: a pad control after the tag waits for its position after the silence, and nothing is paused', async () => {
+test('share gap: a pad control after the tag goes up with the screen, not after the silence, and nothing is paused', async () => {
   // The words after the tag are timed with the 6 s silence included.
   const silent = [...REPLY_WORDS.slice(0, 8), { word: 'What', startMs: 8400, endMs: 8700 }, { word: 'was', startMs: 8700, endMs: 8900 }, { word: 'hard?', startMs: 8900, endMs: 9300 }];
   const rig = await shareRig('Tell me about the design.[[screen:Doc|Body text.|#6]] What was hard?[[pad-open:go]]', {}, silent);
   rig.h.playback('utt2', 'position', 2400);
   await flush();
   assert.equal(rig.of('screen').length, 1);
-  assert.equal(rig.of('pad').length, 0, 'not during the silence');
-  rig.h.playback('utt2', 'position', 5000);
-  await flush();
-  assert.equal(rig.of('pad').length, 0, 'the silence is not speech');
+  assert.equal(rig.of('pad').length, 1, 'the pad comes with the problem it belongs to');
   rig.h.playback('utt2', 'position', 9400);
   await flush();
-  assert.equal(rig.of('pad').length, 1);
+  assert.equal(rig.of('pad').length, 1, 'once');
   assert.equal(rig.opsOf('pause').length + rig.opsOf('resume').length, 0, 'no pause or resume for a share');
 });
 
@@ -6489,6 +6523,59 @@ test('watcher: the first check comes at cutInFirstMs into the answer and carries
   assert(sent.answerMs >= 3000 && sent.answerMs < 3300, String(sent.answerMs));
   assert(sent.elapsedMs >= 3000);
   assert.equal(mainCalls(rig).length, calls, 'the main session is not asked yet: the timed looks are replaced');
+});
+
+test('watcher: with the pad open it sees the code, sent again only when it changed since its last look', async () => {
+  const rig = watchRig({ createParser: screenParser, thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  await rig.clock.advance(3000);
+  await watchedAnswer(rig, 'Here is my plan');
+  await rig.clock.advance(3100);
+  assert.equal(watchSent(rig).padText, undefined, 'no pad, no code');
+  await watchSays(rig, 'listen');
+  rig.h.vad(false);
+  await deliver(rig, 'Write it in the pad.[[pad-open:go]]');
+  assert.equal(rig.engine.state().pad.open, true);
+  rig.engine.setPadText('func f() {}');
+  const before = watchCalls(rig).length;
+  await watchedAnswer(rig, 'So I start with the function signature and then');
+  await rig.clock.advance(3100);
+  assert.equal(watchCalls(rig).length, before + 1);
+  assert.equal(watchSent(rig).padText, 'func f() {}', 'the watcher sees the code being written while the candidate talks');
+  await watchSays(rig, 'listen');
+  await rig.clock.advance(1100);
+  assert.equal(watchCalls(rig).length, before + 2);
+  assert.equal(watchSent(rig).padText, undefined, 'unchanged code is not sent again');
+  await watchSays(rig, 'listen');
+  rig.engine.setPadText('func f() { return 1 }');
+  await rig.clock.advance(1100);
+  assert.equal(watchSent(rig).padText, 'func f() { return 1 }', 'changed code is');
+});
+
+test('watcher: a line after a plan question that tags nothing is no plan question; the interviewer\'s own question 0 is one', async () => {
+  // Call of 2026-11-22: every line after the exercise went to the watcher as "plan question 19".
+  const rig = watchRig({ createParser: askedParser, thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  const ask = async (text, word) => {
+    await askedReply(rig, text);
+    rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+    rig.h.playback(rig.streams.at(-1).utteranceId, 'finished', 1000);
+    await flush();
+    await watchedAnswer(rig, `${word} is what we chose for the queue`);
+    await rig.clock.advance(3100);
+    const sent = watchSent(rig);
+    await watchSays(rig, 'listen');
+    rig.h.vad(false);
+    return sent;
+  };
+  const first = await ask('<asked n="4"/>Tell me about a scheduler you built.', 'Kafka');
+  assert.equal(first.questionNumber, 4);
+  assert.equal(first.lastPlanNumber, undefined);
+  const follow = await ask('Why that queue?', 'Throughput');
+  assert.equal(follow.questionNumber, null, 'a follow-up is not plan question 4');
+  assert.equal(follow.lastPlanNumber, 4);
+  const own = await ask('<asked n="0"/>Different gear: how would you red-team it?', 'Coverage');
+  assert.equal(own.questionNumber, 0, 'the interviewer\'s own question has its own number and time');
 });
 
 test('watcher: a long answer with no sentence end falls back to the last words said', async () => {

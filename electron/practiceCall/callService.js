@@ -297,21 +297,44 @@ export function generatedRunFor(sent, line) {
  * (never over a value already there), so the metrics and the review never judge it as the candidate's own delivery.
  * A line recognised as a single entry also carries `sentText`, the known words (the whole line, or for a cut line the
  * part that was heard), which are counted and shown to the review instead of the recogniser's text.
+ * Seen 2026-11-22: the recogniser joined the seven lines of a worked exercise (with the typing between them) into one
+ * 116 s entry that no single line covered half of, so it went unstamped and the review judged the wand's typing gaps
+ * as the candidate's silences. An entry counts as generated when the generated lines together cover half of it, and
+ * one made of several whole lines (each in no other entry) carries their texts joined.
  */
 export function stampInjectedLines(transcript, spans) {
   const entries = Array.isArray(transcript) ? transcript : [];
   const generatedSpans = (Array.isArray(spans) ? spans : []).filter(span => span?.generated === true && Number.isFinite(span.startMs) && Number.isFinite(span.endMs));
   if (!generatedSpans.length) return entries;
   const overlapOf = (entry, span) => Math.min(entry.endMs, span.endMs) - Math.max(entry.startMs, span.startMs);
-  const mine = entries.map(entry => (entry?.speaker === 'candidate' && !entry.acknowledgement && entry.channel !== 'chat' && Number.isFinite(entry.startMs) && Number.isFinite(entry.endMs)
-    ? generatedSpans.filter(span => overlapOf(entry, span) > 0 && overlapOf(entry, span) >= (entry.endMs - entry.startMs) / 2) : []));
+  // How much of the entry the spans cover together, overlapping spans counted once.
+  const coveredBy = (entry, list) => {
+    let covered = 0;
+    let reach = -Infinity;
+    for (const span of [...list].sort((a, b) => a.startMs - b.startMs)) {
+      const from = Math.max(entry.startMs, span.startMs, reach);
+      const to = Math.min(entry.endMs, span.endMs);
+      if (to > from) covered += to - from;
+      reach = Math.max(reach, to);
+    }
+    return covered;
+  };
+  const mine = entries.map(entry => {
+    if (!(entry?.speaker === 'candidate' && !entry.acknowledgement && entry.channel !== 'chat' && Number.isFinite(entry.startMs) && Number.isFinite(entry.endMs))) return [];
+    const touching = generatedSpans.filter(span => overlapOf(entry, span) > 0);
+    return touching.length && coveredBy(entry, touching) >= (entry.endMs - entry.startMs) / 2 ? touching : [];
+  });
   return entries.map((entry, index) => {
     const spansHere = mine[index];
     if (!spansHere.length) return entry;
-    const sole = spansHere.length === 1 && mine.filter(list => list.includes(spansHere[0])).length === 1 ? spansHere[0] : null;
+    const own = spansHere.every(span => mine.filter(list => list.includes(span)).length === 1);
+    const sole = spansHere.length === 1 && own ? spansHere[0] : null;
     // A whole line is its full text; a cut line is the part the engine reported heard (never the unplayed rest).
-    const sent = sole && sole.whole === true && typeof sole.text === 'string' ? sole.text
+    let sent = sole && sole.whole === true && typeof sole.text === 'string' ? sole.text
       : sole && sole.whole !== true && typeof sole.heardText === 'string' && sole.heardText.trim() ? sole.heardText.trim() : '';
+    if (!sole && own && spansHere.every(span => span.whole === true && typeof span.text === 'string')) {
+      sent = [...spansHere].sort((a, b) => a.startMs - b.startMs).map(span => span.text.trim()).filter(Boolean).join(' ');
+    }
     return {
       ...entry,
       voiced: entry.voiced ?? true,

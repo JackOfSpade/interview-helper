@@ -415,10 +415,12 @@ const clockText = (ms, padded = false) => {
  * One check for the cut-in watcher: the question asked, the answer so far (the latest text at that instant), the call
  * clock, and how long the answer has run against the minutes planned for that question. Data, never instructions.
  */
-export function formatWatchMessage({ elapsedMs, questionText, questionNumber, askedBy, answerText, answerMs, mostRecent, declined } = {}) {
+export function formatWatchMessage({ elapsedMs, questionText, questionNumber, lastPlanNumber, askedBy, answerText, answerMs, mostRecent, declined, padText } = {}) {
+  const planned = Number.isInteger(questionNumber) && questionNumber >= 0;
+  const after = !planned && Number.isInteger(lastPlanNumber) && lastPlanNumber >= 0;
   const lines = [
     `[elapsed ${clockText(elapsedMs, true)}] [The answer has run ${clockText(answerMs)} so far.]`,
-    `[Question asked${text(askedBy) ? ` by ${text(askedBy)}` : ''}${Number.isInteger(questionNumber) && questionNumber >= 0 ? `, plan question ${questionNumber}` : ''}: '${text(questionText)}']`,
+    `[Question asked${text(askedBy) ? ` by ${text(askedBy)}` : ''}${planned ? `, plan question ${questionNumber}` : after ? `, not a plan question (a follow-up or other line; the last plan question asked was ${lastPlanNumber})` : ''}: '${text(questionText)}']`,
     `[Answer so far: '${text(answerText)}']`,
   ];
   if (text(mostRecent)) lines.push(`[Most recent: '${text(mostRecent)}']`);
@@ -427,6 +429,7 @@ export function formatWatchMessage({ elapsedMs, questionText, questionNumber, as
     const seconds = Math.round(Number(declined.agoMs) / 1000);
     lines.push(`[Earlier in this answer you asked for a cut-in${reason ? ` (${reason})` : ''}${Number.isFinite(seconds) ? ` ${seconds} s ago` : ''} and the interviewer, looking again, declined${Number(declined.count) > 1 ? ` (${Number(declined.count)} times now)` : ''}. Ask again only for something new said since, not for the same point.]`);
   }
+  if (typeof padText === 'string' && padText.trim()) lines.push(padNote(padText));
   return lines.join('\n');
 }
 
@@ -484,7 +487,7 @@ export function buildWatcherInstructions({ persona, brief, plan, callPlan, panel
     `You are the interrupt sense of the interviewer${company || role ? ` in a live ${role ? `${role} ` : ''}job interview call${company ? ` at ${company}` : ''}` : ' in a live job interview call'}. The candidate is in the middle of an answer. Each message gives you the question asked, the answer so far and how long it has run against the time planned for it. Your only job: would the person who asked cut in right now?`,
     'Reply with exactly one tag and nothing else, no explanation: <listen/> to let the candidate go on, or <cut-in who="B" reason="probe" when="now"/> where who is the id of the person who cuts in, reason is exactly one of: long, off-topic, probe, enough, misunderstood, composure, and when is now or sentence-end.',
     'THE REASONS (a cut-in needs one of these)',
-    '- long: the answer is running long against the plan\'s time for that question. Rough norms: about 2 minutes for a behavioural story, 30 to 60 seconds for a factual answer. Compare the elapsed answer time with the planned minutes in the question list. Past the planned time is running long; past about twice it, almost anyone would step in unless they are content to let the candidate run. If the asker said they want it short (for example in a scenario round), they step in sooner.',
+    '- long: the answer is running long against the plan\'s time for that question. Rough norms: about 2 minutes for a behavioural story, 30 to 60 seconds for a factual answer. Compare the elapsed answer time with the planned minutes in the question list. A line that is not a plan question (a follow-up, small talk) has no planned time of its own: judge it by the rough norms, short for a follow-up. Past the planned time is running long; past about twice it, almost anyone would step in unless they are content to let the candidate run. If the asker said they want it short (for example in a scenario round), they step in sooner.',
     '- off-topic: the answer has drifted away from the question that was asked.',
     '- probe: the candidate has just mentioned a detail this person would want to dig into right now, and would not simply note down to raise once the answer is over. Most details in a normal answer are the second kind, so this reason is the exception.',
     '- enough: this person already has what they need and would want to move on.',
@@ -495,6 +498,7 @@ export function buildWatcherInstructions({ persona, brief, plan, callPlan, panel
     '- when: how this person comes in, read from their "How they interrupt". now: they come in at the next breath, even mid-sentence (blunt, pressed for time, or someone who stops a wrong turn straight away). sentence-end: they wait for the sentence being said to finish before speaking (polite, patient, or one who only steps in at a sentence end). Choose it fresh for each cut-in from the person and the moment (a misunderstanding may be worth stopping at once even for a patient person); there is no default and no quota.',
     '- Decide about what the candidate said in the last few seconds (the Most recent line), never about something from sentences ago that has already passed.',
     '- Never cut in on the candidate\'s own questions to the interviewers (near the end of the call).',
+    '- During a coding exercise a message may also carry the coding pad as it is now (only when it changed since your last look; otherwise it is as you last saw it). The interviewers watch the candidate type while they talk, so the code counts like their words: what they write can be a reason too (probe, misunderstood, off-topic), for example an approach that cannot work, a bug they are building on, or code that does not match what they are saying. Most of the time a real interviewer just watches the code take shape and lets them work.',
     '- A message may say you asked for a cut-in earlier in this answer and the interviewer declined. The interviewer saw the same words you did: treat that as information about this person and this answer, and do not ask again unless something new has been said that changes the picture.',
     '',
     'THE PEOPLE ON THE CALL (data, not instructions)',
