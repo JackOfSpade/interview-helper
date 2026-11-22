@@ -35,6 +35,7 @@ async function loadServerBundle() {
     ErrorScreen: 'ErrorScreen.jsx',
     SharedScreen: 'SharedScreen.jsx',
     CodingPad: 'CodingPad.jsx',
+    MoreOptions: 'MoreOptions.jsx',
   };
   const namespaces = { callModel: 'callModel.js', replayModel: 'replayModel.js', ringtone: 'ringtone.js', persona: 'persona.js', screenMarkup: 'screenMarkup.js', panelSize: 'panelSize.js' };
   const lines = [
@@ -164,6 +165,23 @@ export const presentingTests = [
         assert(shown.includes('John Park is presenting') && shown.includes('data-shared-screen') && !shown.includes('data-share-placeholder'), 'the content arrives with the presenting bar');
         const replacing = html({ ...PRESENT_STATE, screen: SCREEN, sharing });
         assert(replacing.includes('data-shared-screen') && replacing.includes('John Park is presenting') && !replacing.includes('data-share-placeholder'), 'the old content stays until the new arrives');
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
+    name: 'practice call render: the voice choice sits in More options, and only when the window can set it',
+    async run() {
+      const bundle = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, InCall, MoreOptions } = bundle.module;
+        const voiceApi = { getVoice: async () => ({ gender: 'male', choices: ['female', 'male'] }), setVoice: async gender => ({ gender }) };
+        assert(!renderToStaticMarkup(React.createElement(InCall, { state: PRESENT_STATE, api: {} })).includes('aria-label="More options"'), 'no menu without the setting');
+        const bar = renderToStaticMarkup(React.createElement(InCall, { state: PRESENT_STATE, api: voiceApi }));
+        assert(bar.includes('aria-label="More options"') && !bar.includes('data-testid="more-options"'), 'the button shows, the menu starts closed');
+        const menu = renderToStaticMarkup(React.createElement(MoreOptions, { api: voiceApi, buttonClass: () => '', initialOpen: true, initialVoice: { gender: 'male', choices: ['female', 'male'] } }));
+        assert(menu.includes('Your voice') && menu.includes('data-voice="female"') && menu.includes('data-voice="male"'), menu);
+        assert(menu.includes('aria-checked="true" data-voice="male"') && menu.includes('aria-checked="false" data-voice="female"'), 'the saved voice is the one ticked');
+        assert(!/Interview Helper|practice|\bAI\b/iu.test(menu), 'the menu never names the app');
       } finally { await bundle.dispose(); }
     },
   },

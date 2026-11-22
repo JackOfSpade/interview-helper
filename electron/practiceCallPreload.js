@@ -52,6 +52,8 @@ const practiceCallAPI = Object.freeze({
   onReplayUpdated: cb => subscribe(`${PREFIX}replay-updated`, cb),
   deleteRecording: () => invoke('delete-recording'),
   openMicrophoneSettings: () => invoke('open-microphone-settings'),
+  getVoice: () => invoke('get-voice'),
+  setVoice: gender => invoke('set-voice', gender === 'female' || gender === 'male' ? gender : fail('setVoice expects female or male')),
   close: () => invoke('close'),
   // One line of the window's own event log (clicks, errors, console warnings) for the call's debug log.
   logEvent: line => invoke('log-event', typeof line === 'string' ? line.slice(0, MAX_EVENT_LINE) : ''),

@@ -167,11 +167,20 @@ export function createSavedInterviewStore({ rootDir, fs = fsPromises, now = () =
       await prune(id);
       return id;
     },
-    /** The interview was held again: it moves to the front of the queue. */
-    async touch(id) {
+    /**
+     * The interview was held again: it moves to the front of the queue. `changes` may carry new
+     * `candidateVoiceIds` (a candidate voice drawn again because the kept one was missing); nothing else changes.
+     */
+    async touch(id, changes = {}) {
       const entry = await readEntry(id);
       if (!entry) return false;
-      await writeJson(dirOf(id), { ...entry, lastUsedAt: now(), timesUsed: (Number(entry.timesUsed) || 0) + 1 });
+      const voices = changes?.candidateVoiceIds;
+      const next = { ...entry, lastUsedAt: now(), timesUsed: (Number(entry.timesUsed) || 0) + 1,
+        ...(voices && typeof voices === 'object' && !Array.isArray(voices) ? { candidateVoiceIds: voices } : {}) };
+      if (next.candidateVoiceIds !== entry.candidateVoiceIds && Number.isFinite(Number(entry.bytes))) {
+        next.bytes = Number(entry.bytes) + Buffer.byteLength(JSON.stringify(next.candidateVoiceIds ?? null)) - Buffer.byteLength(JSON.stringify(entry.candidateVoiceIds ?? null));
+      }
+      await writeJson(dirOf(id), next);
       return true;
     },
     remove,

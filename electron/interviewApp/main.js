@@ -31,7 +31,8 @@ import { BUG_REPORT_DIRECTORY, REPORT_CALLS, createBugReportService, createBugRe
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { attachContextMenu } from './contextMenu.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
-import { createPracticeVoiceStore, registerPracticeVoiceHandlers } from './practiceVoiceSetting.js';
+import { createPracticeVoiceStore, practiceVoiceState, registerPracticeVoiceHandlers } from './practiceVoiceSetting.js';
+import { CANDIDATE_VOICE_GENDERS } from '../practiceCall/candidateVoice.js';
 import { parallelImageSearch, readParallelKey } from '../ipc/parallelSearch.js';
 
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, shell, systemPreferences } = electronPkg;
@@ -343,6 +344,12 @@ if (!app.requestSingleInstanceLock()) {
       practiceCallController = createPracticeCallController({
         BrowserWindow, ipcMain, appInstance: dataApp,
         openMicrophoneSettings: () => microphoneAccess.openSettings(),
+        // The call window's own voice choice reads and writes the same setting as Settings; a change applies to the next line.
+        getCandidateVoice: () => (practiceVoice ? practiceVoiceState(practiceVoice.read()) : null),
+        setCandidateVoice: async gender => {
+          if (!practiceVoice || !CANDIDATE_VOICE_GENDERS.includes(gender)) throw new TypeError('That voice is not one of the choices.');
+          return practiceVoiceState(await practiceVoice.write(gender));
+        },
         callMenu: {
           enter: () => { if (callMenu) Menu.setApplicationMenu(callMenu); },
           leave: () => { if (appMenu) Menu.setApplicationMenu(appMenu); },

@@ -286,6 +286,22 @@ test('open microphone settings stays off unless the app passes it in', async () 
   assert.equal(await h.invoke('practice-call-window:open-microphone-settings'), false);
 });
 
+test('the call window reads and sets the candidate voice only through what the app passes in', async () => {
+  const off = await harness({ phase: 'ringing' });
+  await off.invoke('practice-call:start', { nodeId: 'n1' });
+  assert.equal(await off.invoke('practice-call-window:get-voice'), null);
+  assert.equal(await off.invoke('practice-call-window:set-voice', 'female'), null);
+  let gender = 'male';
+  const on = await harness({ phase: 'ringing', deps: {
+    getCandidateVoice: () => ({ gender, choices: ['female', 'male'] }),
+    setCandidateVoice: async next => { gender = next; return { gender, choices: ['female', 'male'] }; },
+  } });
+  await on.invoke('practice-call:start', { nodeId: 'n1' });
+  assert.equal((await on.invoke('practice-call-window:get-voice')).gender, 'male');
+  assert.equal((await on.invoke('practice-call-window:set-voice', 'female')).gender, 'female');
+  assert.equal(gender, 'female');
+});
+
 export default cases;
 
 // Seen in the built app: quitting during a call left only a half-written recording and no record.

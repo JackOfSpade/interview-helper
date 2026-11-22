@@ -49,6 +49,24 @@ export const isConversational = voice => {
   return cases.includes('conversational');
 };
 
+// Words in a voice's name or description that say which gender it sounds. The library's gender label is the
+// uploader's own and is sometimes wrong (a call drew "Belle B - Natural AI Companion" as a male voice).
+const FEMALE_CUES = /\b(female|feminine|woman|women|woman's|girl|girls|girly|lady|ladies|gal|madam|ma'am|she|her|hers|herself|mom|mum|mother|sister|wife|girlfriend|queen|princess|actress|diva)\b/u;
+const MALE_CUES = /\b(male|masculine|man|men|man's|guy|guys|boy|boys|gentleman|gentlemen|sir|mister|he|him|his|himself|dad|father|brother|husband|boyfriend|king|prince|actor|dude|bro)\b/u;
+
+/**
+ * True when a voice's own words (name, descriptive label, description) speak only of the other gender: such a
+ * voice is left out of a draw for its labelled gender. Words for both, or for neither, never count against it.
+ */
+export const contradictsGender = (gender, ...texts) => {
+  const words = texts.map(item => String(item ?? '').toLowerCase().replace(/[’`]/gu, "'")).join(' \n ');
+  const female = FEMALE_CUES.test(words);
+  const male = MALE_CUES.test(words);
+  if (gender === 'male') return female && !male;
+  if (gender === 'female') return male && !female;
+  return false;
+};
+
 export const hasKnownGender = voice => {
   const gender = String(voice?.gender ?? voice?.labels?.gender ?? '').trim();
   return gender.length > 0;

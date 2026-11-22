@@ -191,6 +191,14 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'delete-recording']() { return service.deleteRecording(current?.callId ?? service.getState().callId); },
     // Off unless the app passes it in: a unit suite must never open System Settings.
     async [WINDOW_PREFIX + 'open-microphone-settings']() { return typeof deps.openMicrophoneSettings === 'function' ? Boolean(await deps.openMicrophoneSettings()) : false; },
+    // The candidate's own voice (female or male), the same setting as in the app's Settings. Off unless the app passes it in.
+    async [WINDOW_PREFIX + 'get-voice']() { return typeof deps.getCandidateVoice === 'function' ? deps.getCandidateVoice() : null; },
+    async [WINDOW_PREFIX + 'set-voice'](gender) {
+      if (typeof deps.setCandidateVoice !== 'function') return null;
+      const state = await deps.setCandidateVoice(gender);
+      try { service.logWindowEvent?.(`voice set to ${state?.gender ?? gender}`); } catch { /* diagnostics only */ }
+      return state;
+    },
     async [WINDOW_PREFIX + 'close']() { if (windowAlive()) win.close(); return null; },
     async [WINDOW_PREFIX + 'log-event'](line) {
       if (typeof line !== 'string' || !line) return null;

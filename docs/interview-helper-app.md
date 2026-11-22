@@ -342,13 +342,17 @@ passes `draftText` in (`main.js`), so the unit suites never call Claude.
 
 **The candidate picks the language (2026-11-22, owner's request).** When the exercise leaves the language open, the interviewer is now told to say that any language is fine (and that the pad lets them pick), and the pad's title has a Language dropdown instead of a label (`CodingPad` `choice`/`onChooseLanguage`; the list is `src/practice-call/padLanguages.js`, shared with the main process). A first pad starts on the candidate's last pick (`practiceCall.padLanguage` in the window's localStorage) or Python. A pick goes through `setPadLanguage` (preload, `set-pad-language`), which takes only a listed name, stores it as `state.pad.choice`, logs `pad-language` and keeps it in `call.json` as `pad.chosen` (only while no language is required); the replay shows it as the pad's label. The wand writes every piece of code in that language only, says once in passing which language it is using (unless it already did), and rewrites code already in the pad when the pick changed. The interviewers are not told of the pick: they hear it from the candidate and see the code. A required language is a label with no dropdown and wins over a pick. Render- and unit-tested only, not yet seen in a call.
 
+**Voices and the asked tag (2026-11-22, call-mws8wx6g).** The library's gender label is the uploader's and can be wrong: the male candidate voice drawn was "Belle B - Natural AI Companion", labelled male but described as "her". A library voice whose name or description speaks only of the other gender is now never drawn (`contradictsGender`, voiceCatalog.js), and a retake of a kept interview draws again any candidate voice missing from it (never a built-in voice, as on a new call) and, once answered, keeps it with the interview (`touch` with `candidateVoiceIds`). The interviewer said its reasoning about the unprepared question's tag out loud ("unnumbered, no asked tag"): that question is now Plan question 0 and is tagged like any other (the engine ignores 0), and the prompt says every word outside a tag is spoken. Unit-tested only.
+
 **No gap between the wand's lines (2026-11-22).** Each candidate line gets delivery tags from a short AI call (about 2 s) that began only when the line opened, so the steps of a worked exercise had about 2.4 s of silence between them, and the review counted those gaps as the candidate's own pauses (8 over two seconds in that call). When the work steps arrive, the service now has them all tagged at once (`prepare` on the candidate voice); `open` takes the tags for the same words, and a line nobody prepared is tagged as before. Unit-tested only.
 
 **The wand's spinner stops when the line is ready (2026-11-21).** A chat entry's `voice` is now 'waiting', 'ready' (the voice has made it), 'playing', 'heard' or 'failed', and the spinner runs only while it is 'waiting'. During a pause the wand's line is still sent: the voice makes it and holds it (`canHoldVoice`, engine `releaseHeld`), so the spinner stops while paused and the line plays the moment the call resumes. A line not yet heard when a pause starts is held the same way instead of being dropped.
 
 **Sent messages are spoken (2026-11-20).** A message sent in the call chat is
 spoken in the candidate's own voice and the interviewer may cut into it; the
-voice (female or male) is chosen in Settings (sidebar, or ⌘,). See
+voice (female or male) is chosen in Settings (sidebar, or ⌘,), or during a call
+under More options (⋮) in the call's control bar, which writes the same setting and
+applies to the next line said. See
 docs/interview-practice-call.md, section 6. Unit-tested only.
 
 **Pictures and diagrams on shared screens (2026-11-21).** The planner may give a

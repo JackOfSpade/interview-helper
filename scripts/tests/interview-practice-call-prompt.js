@@ -937,19 +937,21 @@ export default [
     },
   },
   {
-    name: 'interview practice prompt: the unprepared question is rendered from its text, privately marked, and never gets an asked tag',
+    name: 'interview practice prompt: the unprepared question is rendered from its text as plan question 0 and is marked like any other',
     run() {
       const withExtra = { ...callPlan, questions: [callPlan.questions[0], { number: 0, text: 'Synthetic unprepared question about capacity planning?', askedBy: 'B', minutes: 6, probes: ['a number from the resume'] }, callPlan.questions[1]], problems: [{ ...callPlan.problems[0], question: 0 }] };
       const text = buildInterviewerInstructions({ persona, brief, plan, callPlan: withExtra });
       const section = text.slice(text.indexOf('\nTHE PLANNED INTERVIEW'), text.indexOf('\nPANEL\n'));
-      assert(section.includes('2. Question ("Synthetic unprepared question about capacity planning?"); asked by John Reyes; about 6 minutes.'));
+      assert(section.includes('2. Plan question 0 ("Synthetic unprepared question about capacity planning?"); asked by John Reyes; about 6 minutes.'));
       assert(section.includes('a number from the resume'));
-      assert(!section.includes('Plan question 0'), 'no label that marks it as special');
-      assert(section.includes('not from the prepared pool') && section.includes('never write an <asked/> tag for it'));
-      assert.equal(buildInterviewerInstructions({ persona, brief, plan, callPlan }).includes('not from the prepared pool'), false, 'no note without the extra question');
+      // An exception to the tag rule ("never write an <asked/> tag for it") had the interviewer say its reasoning aloud.
+      assert(section.includes('rather than taken from the prepared pool') && section.includes('<asked n="0"/>'));
+      assert.equal(text.includes('never write an <asked/> tag'), false);
+      assert(text.includes('Every word outside a tag is spoken aloud'), 'no thinking aloud about the instructions');
+      assert.equal(buildInterviewerInstructions({ persona, brief, plan, callPlan }).includes('rather than taken from the prepared pool'), false, 'no note without the extra question');
       assert(text.includes('"planQuestion": 0'), 'a prepared problem may belong to it');
       const empty = buildInterviewerInstructions({ persona, brief, plan, callPlan: { ...callPlan, questions: [{ number: 0, askedBy: 'A', minutes: 3 }] } });
-      assert.equal(empty.includes('Question ('), false, 'a number-0 entry with no text is dropped');
+      assert.equal(empty.includes('Plan question 0 ('), false, 'a number-0 entry with no text is dropped');
     },
   },
   {
@@ -1100,7 +1102,7 @@ export default [
       assert(text.includes('Run the arc of the kind of interview described under THE PLANNED INTERVIEW') && text.includes('always end with the candidate\'s own questions, what happens next, and goodbye'));
       const controls = text.slice(text.indexOf('CONTROL TAGS'), text.indexOf('STAY IN CHARACTER'));
       assert(controls.includes('<asked n="3"/>') && controls.includes('It is never spoken'));
-      assert(controls.includes('Write it once per planned question, only the first time; never for follow-ups, small talk or questions of your own.'));
+      assert(controls.includes('Write it once per planned question (Plan question 0 included, as n="0"), only the first time; never for follow-ups, small talk or questions that are not in the plan.'));
       assert(controls.includes('before any speaker tag'));
       assert(text.includes("[You have already started your reply out loud with:"), 'the marker rule is kept');
     },

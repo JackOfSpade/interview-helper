@@ -11,7 +11,7 @@ import { SUBSCRIPTION_URL } from './dialogueVoice.js';
 import { atomicWriteFile } from '../../utils/atomicWrite.js';
 import { classifyFailure, redact, voiceError } from './voiceErrors.js';
 import {
-  hasKnownGender, isEnglishVoice, isStandardPrice, languageOf, normalizeGender, rateOf, textOf,
+  contradictsGender, hasKnownGender, isEnglishVoice, isStandardPrice, languageOf, normalizeGender, rateOf, textOf,
 } from './voiceCatalog.js';
 
 export { SUBSCRIPTION_URL };
@@ -81,11 +81,15 @@ const caseLabelsOf = voice => {
   if (!useCases.includes('conversational')) return null;
   if (!isEnglishVoice(voice)) return null;
   if (!isStandardPrice(voice)) return null;
+  const gender = normalizeGender(voice?.gender ?? voice?.labels?.gender);
+  const voiceName = String(voice?.name ?? voice?.voiceName ?? '');
+  // A label the voice's own name or description contradicts is not trusted: the voice is left out.
+  if (contradictsGender(gender, voiceName, voice?.descriptive ?? voice?.labels?.descriptive, voice?.description ?? voice?.labels?.description)) return null;
   return {
     voiceId,
     publicOwnerId,
-    voiceName: String(voice?.name ?? voice?.voiceName ?? ''),
-    gender: normalizeGender(voice?.gender ?? voice?.labels?.gender),
+    voiceName,
+    gender,
     age: textOf(voice?.age ?? voice?.labels?.age),
     accent: textOf(voice?.accent ?? voice?.labels?.accent),
     language: languageOf(voice),

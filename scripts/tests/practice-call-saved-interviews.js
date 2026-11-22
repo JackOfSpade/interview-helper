@@ -63,6 +63,14 @@ test('an interview is saved with its visuals, read back whole, listed per job an
   tick();
   assert.equal(await store.touch(id), true);
   assert.equal((await store.read(id)).timesUsed, 2);
+  // A retake may keep candidate voices drawn again; nothing else in the entry changes.
+  const before = await store.read(id);
+  const voices = { female: { voiceId: 'f1', name: 'Fay' }, male: { voiceId: 'm2', name: 'Max' } };
+  assert.equal(await store.touch(id, { candidateVoiceIds: voices, planned: 'never written' }), true);
+  const after = await store.read(id);
+  assert.deepEqual(after.candidateVoiceIds, voices);
+  assert.deepEqual(after.planned, before.planned, 'only the candidate voices may change');
+  assert.equal(after.timesUsed, 3);
   assert.equal(await store.touch('iv-nothere-000000'), false);
   assert.equal(await store.read('iv-nothere-000000'), null);
   await assert.rejects(() => store.read('../x'), /saved interview id/u);

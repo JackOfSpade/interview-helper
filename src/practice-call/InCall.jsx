@@ -4,6 +4,7 @@ import ChatPanel, { CHAT_MAX_LENGTH, TYPING_REFRESH_MS } from './ChatPanel.jsx';
 import Avatar from './Avatar.jsx';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
+import MoreOptions from './MoreOptions.jsx';
 import { DEFAULT_PAD_LANGUAGE, padLanguageName } from './padLanguages.js';
 import { clampScreen } from './screenMarkup.js';
 import { firstNameOf, participantsOf } from './persona.js';
@@ -584,6 +585,7 @@ export default function InCall({ state, api }) {
       <div className="flex items-center justify-end gap-1">
         <button type="button" className={flatClass(cardsOpen)} aria-pressed={cardsOpen} aria-label="Notes" onClick={toggleCards}><ListChecks size={20} aria-hidden="true" /></button>
         <button type="button" className={`relative ${flatClass(chatOpen)}`} aria-pressed={chatOpen} aria-label="Chat" onClick={() => setPanel(value => (value === 'chat' ? null : 'chat'))}><MessageSquare size={20} aria-hidden="true" />{unreadChat && <span data-testid="chat-unread" role="status" aria-label="New message" className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full bg-[#ea4335] ring-2 ring-[#202124]" />}</button>
+        <MoreOptions api={api} buttonClass={flatClass} />
       </div>
     </footer>
     {/* The pause notice floats over the middle of the window: it takes no room in the layout and lets clicks through. */}

@@ -1133,10 +1133,26 @@ export function createPracticeCallService(deps = {}) {
    * same pool as the interviewers', avoiding every voice already drawn. A failed draw leaves that one out; with
    * neither, sent messages reach the interviewer as typed text, as before the voice.
    */
-  async function drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken }) {
+  /**
+   * ElevenLabs' built-in default voices (and the names their library copies keep), so no draw lands on one. If the
+   * list cannot be read the draw still goes ahead (they are about one row in a thousand).
+   */
+  async function builtInVoicesOf({ pool, fetchImpl, key }) {
+    try {
+      if (typeof pool?.library?.listBuiltInVoices === 'function') {
+        const listed = await pool.library.listBuiltInVoices({ fetch: fetchImpl, key });
+        return { voiceIds: Array.isArray(listed?.voiceIds) ? listed.voiceIds : [], names: Array.isArray(listed?.names) ? listed.names : [] };
+      }
+    } catch (error) {
+      warn(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`);
+    }
+    return { voiceIds: [], names: [] };
+  }
+
+  async function drawCandidateVoices({ pool, fetchImpl, key, random, builtIn = { voiceIds: [], names: [] }, pageCache = new Map(), taken, genders = ['female', 'male'] }) {
     const found = {};
     const avoid = new Set(taken.filter(Boolean));
-    for (const gender of ['female', 'male']) {
+    for (const gender of genders) {
       try {
         const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, gender, excludeVoiceIds: [...avoid, ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache });
         const voiceId = drawn?.voice?.voiceId;
@@ -1477,7 +1493,7 @@ export function createPracticeCallService(deps = {}) {
    */
   function keepInterview(self) {
     if (self.repeat) {
-      savedInterviews.touch(self.repeat.id).catch(error => warn(`[PracticeCall] saved interview not updated: ${error?.code || error?.message || error}`));
+      savedInterviews.touch(self.repeat.id, self.candidateVoicesRedrawn ? { candidateVoiceIds: self.candidateVoiceIds } : {}).catch(error => warn(`[PracticeCall] saved interview not updated: ${error?.code || error?.message || error}`));
       return;
     }
     if (!self.settledPlan || !Array.isArray(self.drawnVoices) || !self.countsKey) return;
@@ -1613,6 +1629,19 @@ export function createPracticeCallService(deps = {}) {
       const held = heldSetup(self);
       drawnVoices = held.drawnVoices;
       self.candidateVoiceIds = deps.candidateVoices === true ? held.candidateVoiceIds : null;
+      // A kept interview whose candidate voice was taken out (a voice of the wrong gender) gets that one drawn again.
+      const keptVoices = self.candidateVoiceIds ?? {};
+      const missing = ['female', 'male'].filter(gender => !keptVoices[gender]?.voiceId);
+      if (deps.candidateVoices === true && missing.length && pool?.library && typeof pool.library.drawVoice === 'function') {
+        // Drawn as a new call draws them: never a built-in voice or one already on this interview.
+        const builtIn = await builtInVoicesOf({ pool, fetchImpl, key });
+        if (call !== self || self.finished) return snapshot();
+        const more = await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, genders: missing,
+          taken: [recentVoiceId, ...drawnVoices.map(item => item.voiceId), ...Object.values(keptVoices).map(item => item?.voiceId)] });
+        if (call !== self || self.finished) return snapshot();
+        // Kept with the interview once the call is answered (keepInterview), so the next retake has them.
+        if (more) { self.candidateVoiceIds = { ...keptVoices, ...more }; self.candidateVoicesRedrawn = true; }
+      }
       mark(self, 'voices', { drawn: drawnVoices.length, repeated: true });
       note(`voices kept ${JSON.stringify(drawnVoices.map(voiceView))}`);
       self.promptBrief = promptBrief(self.brief);
@@ -1626,17 +1655,8 @@ export function createPracticeCallService(deps = {}) {
     } else {
       // The interviewer voice comes only from the shared library: the account's own voices
       // are never candidates and nothing here falls back to them. ElevenLabs' built-in default
-      // voices are skipped as well, including the copies of them published in the library. If the
-      // list of them cannot be read the draw still goes ahead (they are about one row in a thousand).
-      let builtIn = { voiceIds: [], names: [] };
-      try {
-        if (typeof pool?.library?.listBuiltInVoices === 'function') {
-          const listed = await pool.library.listBuiltInVoices({ fetch: fetchImpl, key });
-          builtIn = { voiceIds: Array.isArray(listed?.voiceIds) ? listed.voiceIds : [], names: Array.isArray(listed?.names) ? listed.names : [] };
-        }
-      } catch (error) {
-        warn(`[PracticeCall] built-in voice list unavailable: ${error?.message || error}`);
-      }
+      // voices are skipped as well, including the copies of them published in the library.
+      const builtIn = await builtInVoicesOf({ pool, fetchImpl, key });
       if (call !== self || self.finished) return snapshot();
       let drawn = null;
       // The draws of one setup share the library pages already read.

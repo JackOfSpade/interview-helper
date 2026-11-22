@@ -3,6 +3,7 @@ import { askedParser, flush, greet, makeRig, speak } from './interview-practice-
 import { applyTags, splitSentences, candidateTagPrompt, createCandidateVoice, tagCandidateLine, wordsOf, CANDIDATE_VOICE_STAGE, DEFAULT_CANDIDATE_VOICE_GENDER } from '../../electron/practiceCall/candidateVoice.js';
 import { careerWritingStageProfile } from '../../electron/ipc/careerWritingCore.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
+import { contradictsGender } from '../../electron/practiceCall/eleven/voiceCatalog.js';
 import { createPracticeVoiceStore, registerPracticeVoiceHandlers } from '../../electron/interviewApp/practiceVoiceSetting.js';
 import { CUT_IN_FADE_MS, CUT_IN_OVERLAP_MS, fadeOutTail, firstSpeechSample, mixHeadInto } from '../../electron/practiceCall/audio/cutInMix.js';
 import * as panelVoice from '../../electron/practiceCall/eleven/panelVoice.js';
@@ -441,6 +442,24 @@ test('a voice draw can ask for one gender', async () => {
   const drawn = await drawVoice({ fetch, key: 'k', random, gender: 'female' });
   assert.equal(drawn.voice.voiceId, 'f1');
   assert.equal(drawn.voice.gender, 'female');
+});
+
+test('a voice whose own words contradict its gender label is never drawn for that gender', async () => {
+  // A call drew "Belle B - Natural AI Companion", labelled male by its uploader, as the male candidate voice.
+  const rows = [
+    { voice_id: 'bad', public_owner_id: 'o', name: 'Belle B - Natural AI Companion', gender: 'male', description: 'A soft young woman, warm and caring; she sounds like a friend.', use_case: 'conversational', language: 'en', category: 'high_quality' },
+    { voice_id: 'm1', public_owner_id: 'o', name: 'Max - Calm', gender: 'male', description: 'A calm man in his thirties.', use_case: 'conversational', language: 'en', category: 'high_quality' },
+  ];
+  const fetch = async () => ({ ok: true, status: 200, json: async () => ({ voices: rows, total_count: rows.length }) });
+  let at = 0;
+  const random = () => [0, 0, 0.6][at++ % 3];
+  const drawn = await drawVoice({ fetch, key: 'k', random, gender: 'male' });
+  assert.equal(drawn.voice.voiceId, 'm1');
+  assert.equal(contradictsGender('male', 'Belle B', 'A young woman, she is warm'), true);
+  assert.equal(contradictsGender('female', 'Ava', 'Her voice is warm, like a mother talking to her son and his friends'), false, 'words for both never count against it');
+  assert.equal(contradictsGender('male', 'Jon - Calm Presence', 'Other, human and thematic: the voice of history'), false, 'no cue inside other words');
+  assert.equal(contradictsGender('female', 'Fay', 'A male narrator'), true);
+  assert.equal(contradictsGender('male', 'Max', ''), false, 'no words, no doubt');
 });
 
 test('the voice setting is saved, read back and refused when it is not a choice', async () => {

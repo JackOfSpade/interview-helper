@@ -2748,6 +2748,55 @@ async function savedPanel(saved, { random = () => 0.1, extra = {} } = {}) {
   return { setup, ...started };
 }
 
+test('saved interviews: a kept candidate voice that was taken out is drawn again on a repeat, the other one kept', async () => {
+  const rootDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews');
+  const saved = createSavedInterviewStore({ rootDir });
+  const voiceDeps = { candidateVoices: true, candidateVoice: () => ({ open() { throw new Error('not opened here'); } }) };
+  const first = await savedPanel(saved, { extra: voiceDeps });
+  await first.service.start(ARGS);
+  await first.service.answer();
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'the interview is kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  // The male voice turned out to be a female one and is taken out of the kept interview by hand.
+  const file = path.join(rootDir, kept.id, 'interview.json');
+  const entry = JSON.parse(await readFile(file, 'utf8'));
+  assert(entry.candidateVoiceIds?.female && entry.candidateVoiceIds?.male, 'both candidate voices were kept');
+  const female = entry.candidateVoiceIds.female;
+  delete entry.candidateVoiceIds.male;
+  await writeFile(file, JSON.stringify(entry));
+
+  const again = await savedPanel(saved, { extra: voiceDeps });
+  again.setup.overrides.voiceLibrary.listBuiltInVoices = async () => ({ voiceIds: ['premade-1'], names: ['brian - deep, resonant and comforting'] });
+  const state = await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.notEqual(state.phase, 'error', JSON.stringify(state.error));
+  assert.deepEqual(again.setup.draws.map(item => item.gender), ['male'], 'only the missing voice is drawn');
+  assert(again.setup.draws[0].excludeVoiceIds.includes(female.voiceId), 'never the female voice again');
+  assert(again.setup.draws[0].excludeVoiceIds.includes('premade-1'), 'never a built-in voice, as on a new call');
+  assert.deepEqual(again.setup.draws[0].excludeNames, ['brian - deep, resonant and comforting']);
+  await again.service.answer();
+  await waitFor(async () => JSON.parse(await readFile(file, 'utf8')).timesUsed === 2, 'the retake is counted');
+  const keptAgain = JSON.parse(await readFile(file, 'utf8')).candidateVoiceIds;
+  assert.deepEqual(keptAgain.female, female, 'the kept voice stays as it was');
+  assert(keptAgain.male?.voiceId, 'the voice drawn again is kept with the interview');
+  await again.service.hangUp();
+
+  // The next retake holds both: nothing is drawn.
+  const third = await savedPanel(saved, { extra: voiceDeps });
+  await third.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.deepEqual(third.setup.draws, [], 'the kept voices are used as they are');
+  await third.service.hangUp();
+
+  // Neither kept (both were taken out, or neither drew): both are drawn again.
+  const latest = JSON.parse(await readFile(file, 'utf8'));
+  latest.candidateVoiceIds = null;
+  await writeFile(file, JSON.stringify(latest));
+  const bare = await savedPanel(saved, { extra: voiceDeps });
+  await bare.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.deepEqual(bare.setup.draws.map(item => item.gender), ['female', 'male']);
+  await bare.service.hangUp();
+});
+
 test('saved interviews: an answered call is kept, and a repeat for the same job holds it again with nothing drawn or planned', async () => {
   const saved = createSavedInterviewStore({ rootDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews') });
   const first = await savedPanel(saved);
