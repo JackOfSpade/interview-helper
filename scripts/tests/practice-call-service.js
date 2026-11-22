@@ -4883,7 +4883,7 @@ test('a line the AI voice spoke through the microphone is stamped voiced and gen
   const spans = [
     { startMs: 10000, endMs: 20000, generated: true, whole: true, text: 'Plan two words.' },
     { startMs: 40000, endMs: 50000, generated: false, whole: true, text: 'typed by hand' },
-    { startMs: 60000, endMs: 70000, generated: true, whole: false, text: 'cut line' },
+    { startMs: 60000, endMs: 70000, generated: true, whole: false, text: 'cut line and the unplayed rest', heardText: 'cut line' },
   ];
   const transcript = [
     { speaker: 'interviewer', text: 'Question.', startMs: 0, endMs: 9000 },
@@ -4898,7 +4898,7 @@ test('a line the AI voice spoke through the microphone is stamped voiced and gen
   assert.equal(stamped[0], transcript[0]);
   assert.equal(stamped[2], transcript[2], 'live speech is untouched');
   assert.equal(stamped[3], transcript[3], 'a line that was not generated is not stamped');
-  assert.deepEqual(stamped[4], { ...transcript[4], generated: true }, 'a cut line is stamped but has no sent text, and voiced stays as it was');
+  assert.deepEqual(stamped[4], { ...transcript[4], generated: true, sentText: 'cut line' }, 'a cut line is stamped with the part that was heard as its sent text, and voiced stays as it was');
   assert.equal(stamped[5], transcript[5], 'an entry mostly outside the span is not the line');
   assert.equal(stampInjectedLines(transcript, []), transcript);
   // Two entries inside one span: the sent text belongs to neither.

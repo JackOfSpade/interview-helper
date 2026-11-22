@@ -591,13 +591,30 @@ export default [
       assert.doesNotMatch(prompt, /^\[\d+\] .*\(chat\)/mu, 'the voiced line is not marked as chat');
       assert.match(prompt, /\[1\] candidate 00:04-00:12:/u, 'a generated line reads as the candidate speaking, unflagged');
       assert.doesNotMatch(prompt, /AI-voiced|AI-drafted|synthetic voice/u, 'no special treatment for the AI voice');
-      assert.match(prompt, /the interviewer had to stop the candidate here/u);
+      assert.match(prompt, /this answer was cut off by the interviewer.*the reason is not recorded/u);
       assert.doesNotMatch(prompt, /"voiced"|voiced: true|"generated"/iu);
       assert.doesNotMatch(prompt, /while the candidate typed/u);
       // A typed line next to it is still typed; the call is not typed-only.
       const mixed = buildReviewPrompt({ callRecord: { ...record, transcript: [...voiced, { speaker: 'candidate', channel: 'chat', text: 'typed bit', startMs: 14000, endMs: 14000 }] }, plan, brief, metrics: {} });
       assert.match(mixed, /^\[\d+\] candidate .*\(chat\)/mu);
       assert.doesNotMatch(mixed, /HOW THE CANDIDATE ANSWERED/u);
+    },
+  },
+  {
+    name: 'practice call analysis: the review sees the words actually sent, the cut-in reason, and a cut after a finished answer is not a cut-in',
+    async run() {
+      const turns = [
+        { speaker: 'interviewer', text: 'Tell me about a mistake.', startMs: 0, endMs: 3000 },
+        { speaker: 'candidate', text: 'I was wrong about the tale', sentText: 'I was wrong about the tail', channel: 'chat', voiced: true, generated: true, interrupted: true, cutOffBy: 'interviewer', cutInReason: 'probe', cutWhileSpeaking: true, startMs: 4000, endMs: 12000 },
+        { speaker: 'interviewer', text: 'Say more about that.', startMs: 11000, endMs: 13000 },
+        { speaker: 'candidate', text: 'All done here', channel: 'chat', voiced: true, generated: true, interrupted: true, cutOffBy: 'interviewer', cutInReason: 'enough', cutWhileSpeaking: false, startMs: 14000, endMs: 20000 },
+      ];
+      const prompt = buildReviewPrompt({ callRecord: { ...callRecord, transcript: turns }, plan, brief, metrics: {} });
+      assert.match(prompt, /\[1\] candidate 00:04-00:12: I was wrong about the tail/u);
+      assert.match(prompt, /recogniser heard it as: I was wrong about the tale/u);
+      assert.match(prompt, /the interviewer's reason: probe/u);
+      assert.match(prompt, /not a cut-in/u);
+      assert.match(prompt, /Never print transcript turn numbers/u);
     },
   },
   {

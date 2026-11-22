@@ -67,10 +67,19 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   // break, one at a time. A check not answered within watchTimeoutMs counts as <listen/>. A cut-in written while the
   // candidate is mid-sentence is held to the next breath, at most cutInHoldMs; if more than cutInStaleWords words have been
   // said since the look began, it is dropped unspoken and the watcher is asked again at once.
+  // Stale is judged in time, not words alone (a fast voice, the AI one included, says 12 words while the main writes its
+  // first sentence): the cut-in is stale once more than cutInStaleWords words AND more than cutInStaleMs have passed since the
+  // look began, or at once past cutInStaleHardWords words.
+  // When the main session declines a watcher cut-in (<listen/>), the watcher is not asked again for watchVetoBackoffMs
+  // (unless the candidate has said watchVetoWords more words), and its next message says B was asked and declined.
   watchEveryMs: 2500,
+  watchVetoBackoffMs: 10000,
+  watchVetoWords: 40,
   watchTimeoutMs: 2500,
   cutInHoldMs: 1500,
   cutInStaleWords: 12,
+  cutInStaleMs: 5000,
+  cutInStaleHardWords: 30,
   // A cut-in the watcher timed for the end of the sentence waits at most this long for one to be heard, then comes in at
   // the next breath.
   cutInSentenceMaxMs: 5000,
@@ -275,7 +284,7 @@ export function createPracticeCallEngine({
   const segments = new Map();
   const handles = new Set();
   const named = { spec: null, commit: null, quietRelook: null, silence: null, typing: null, padIdle: null, padTyping: null, liveLook: null, watch: null };
-  const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null }; // the watcher's checks: one at a time
+  const watch = { running: false, token: 0, controller: null, lastStartAt: null, again: false, restart: null, veto: null }; // the watcher's checks: one at a time; veto: the main's last <listen/> to a cut-in of this answer
   const classifierControllers = new Set();
   let phase = 'connecting';
   let startedAt = null;
@@ -515,6 +524,13 @@ export function createPracticeCallEngine({
   function discardSilent(reply, kind) {
     if (current !== reply) return;
     if (reply.padProgress) markPadReceived(reply); // watched in silence: it left no trace, but it did see the text
+    // The main has been told once that its previous reply was not spoken: a <listen/> is not a lost reply, so the note is
+    // not repeated on every later look (found 2026-11-21: 11 looks in a row carried it).
+    if (notSpoken && reply.used?.notSpoken) notSpoken = false;
+    // The main declined a cut-in the watcher asked for: remember it so the watcher backs off and is told.
+    if (kind === 'listen' && reply.watched && reply.liveLook && answerSince !== null) {
+      watch.veto = { answerAt: answerSince, at: now(), words: tokens(candidateText()).length, reason: reply.cutInInfo?.reason ?? null, count: (watch.veto?.answerAt === answerSince ? watch.veto.count : 0) + 1 };
+    }
     current = null;
     abortReply(reply);
     emitDiscarded(reply, kind);
@@ -522,6 +538,7 @@ export function createPracticeCallEngine({
     if (kind === 'pass' && reply.candidates.length) keepPassedLine(reply);
     setPhase('listening');
     armSilence();
+    if (watch.veto && reply.watched && reply.liveLook) armWatch(); // the next check waits out the back-off
     if (kind === 'listen' && answerLook(reply)) {
       listenedText = reply.turnBase?.candidateText ?? null;
       if (reply.quietLook) {
@@ -1596,6 +1613,11 @@ export function createPracticeCallEngine({
   }
 
   const wordsSinceLook = reply => Math.max(0, tokens(candidateText()).length - reply.snapshotWords);
+  /** A watched cut-in is about something said too long ago: many words and several seconds since the look began (or very many words). */
+  const cutInIsStale = reply => {
+    const fresh = wordsSinceLook(reply);
+    return fresh > th.cutInStaleHardWords || (fresh > th.cutInStaleWords && now() - reply.spec.at > th.cutInStaleMs);
+  };
 
   /**
    * A cut-in the watcher asked for is ready to commit. While the candidate is mid-sentence it waits for the next breath (the
@@ -1617,7 +1639,7 @@ export function createPracticeCallEngine({
   function gateWatchedCutIn(reply) {
     const info = reply.cutInInfo ?? {};
     if (info.when === 'sentence-end' && !paused && !reply.sentenceGaveUp) {
-      if (!reply.sentenceHeld && wordsSinceLook(reply) <= th.cutInStaleWords) {
+      if (!reply.sentenceHeld && !cutInIsStale(reply)) {
         reply.sentenceHeld = true;
         reply.holdAt ??= now();
         reply.sentenceTimer = schedule(th.cutInSentenceMaxMs, () => {
@@ -1648,9 +1670,8 @@ export function createPracticeCallEngine({
     }
     unschedule(reply.holdTimer);
     reply.holdTimer = null;
-    const fresh = wordsSinceLook(reply);
-    if (fresh > th.cutInStaleWords && !reply.sentenceHeld) {
-      emit({ type: 'cut-in', state: 'stale', ...info, wordsSinceSnapshot: fresh });
+    if (cutInIsStale(reply) && !reply.sentenceHeld) {
+      emit({ type: 'cut-in', state: 'stale', ...info, wordsSinceSnapshot: wordsSinceLook(reply) });
       discardPending(true, 'stale-cut-in');
       if (watcherOn && answerSince !== null) { disarm('watch'); runWatch('stale'); }
       return false;
@@ -1754,7 +1775,9 @@ export function createPracticeCallEngine({
     // A cut-in on live speech: the candidate is still talking, so the words so far (more than when the look began) are
     // what the interviewer cut into. A reply with nothing to say takes nothing from the candidate.
     if (reply.liveLook && !reply.silent && candidateText()) {
-      reply.candidates = [{ speaker: 'candidate', text: candidateText(), ...candidateSpan(), interrupted: true, cutOffBy: 'interviewer' }];
+      reply.candidates = [{ speaker: 'candidate', text: candidateText(), ...candidateSpan(), interrupted: true, cutOffBy: 'interviewer',
+        // Why, and whether the candidate was still talking: an answer that had essentially finished is not one the interviewer had to stop.
+        ...(reply.cutInInfo?.reason ? { cutInReason: reply.cutInInfo.reason } : {}), cutWhileSpeaking: speaking && !paused }];
     }
     // Commit is the one point where a reply is certain to be delivered: a speculative reply thrown away
     // (resumed, respeculated, listen) or one the voice never spoke never gets here, so it counts nothing.
@@ -2563,16 +2586,26 @@ export function createPracticeCallEngine({
   }
 
   /** Next check: the first at cutInFirstMs into the answer, then at least every watchEveryMs from the start of the last one. */
+  /** When the main declined this answer's last cut-in, the next watcher check waits (unless much new has been said). */
+  function vetoBackoffUntil() {
+    const veto = watch.veto;
+    if (!veto || veto.answerAt !== answerSince) return -Infinity;
+    if (tokens(candidateText()).length - veto.words >= th.watchVetoWords) return -Infinity;
+    return veto.at + th.watchVetoBackoffMs;
+  }
+
+  const watchDueAt = () => Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs, vetoBackoffUntil());
+
   function armWatch() {
     if (!watcherOn || phase === 'ended' || answerSince === null || named.watch !== null || watch.running) return;
-    const dueAt = Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs);
+    const dueAt = watchDueAt();
     arm('watch', Math.max(0, dueAt - now()), onWatchDue);
   }
 
   function onWatchDue() {
     if (phase === 'ended') return;
     if (!candidateSpoke || answerSince === null) { clearLiveAnswer(); return; }
-    const dueAt = Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs);
+    const dueAt = watchDueAt();
     if (now() < dueAt) { arm('watch', dueAt - now(), onWatchDue); return; }
     if (watch.running) { watch.again = true; return; }
     if (watchReady()) { runWatch('timer'); return; }
@@ -2584,6 +2617,7 @@ export function createPracticeCallEngine({
   /** A breath (a VAD end): the next check starts at once, or as soon as the one in flight returns. */
   function watchBreath() {
     if (!candidateSpoke || answerSince === null || now() < answerSince + th.cutInFirstMs) return;
+    if (now() < vetoBackoffUntil()) return; // the main just declined a cut-in: the timer armed for the end of the back-off checks next
     if (watch.running) { watch.again = true; return; }
     if (!watchReady()) return;
     disarm('watch');
@@ -2623,13 +2657,16 @@ export function createPracticeCallEngine({
     if (!watchReady()) { armWatch(); return; }
     if (watch.running) { watch.again = true; return; }
     const text = candidateText();
+    if (now() < vetoBackoffUntil()) { armWatch(); return; }
     const question = watchQuestion();
     const mostRecent = lastSentenceOf(text);
+    const veto = watch.veto?.answerAt === answerSince ? watch.veto : null;
     let message;
     try {
       message = formatWatch({
         elapsedMs: elapsed(), questionText: question.text, questionNumber: openQuestions.at(-1) ?? askedQuestions.at(-1) ?? null,
         askedBy: question.askedBy, answerText: text, answerMs: Math.max(0, now() - answerSince), mostRecent,
+        ...(veto ? { declined: { reason: veto.reason, agoMs: Math.max(0, now() - veto.at), count: veto.count } } : {}),
       });
     } catch { message = null; }
     if (typeof message !== 'string' || !message) { armWatch(); return; }
@@ -3094,6 +3131,7 @@ export function createPracticeCallEngine({
     if (utterance.stopping) return;
     utterance.stopping = true;
     utterance.cutBy = reply;
+    utterance.cutSpeaking = speaking; // is the recogniser still hearing the line (VAD active) as the interviewer comes in
     unschedule(utterance.finishTimer);
     utterance.finishTimer = null;
     const position = livePosition(utterance);
@@ -3145,6 +3183,20 @@ export function createPracticeCallEngine({
     audio.pushAudio(reply.utteranceId, data);
   }
 
+  /**
+   * What the transcript entry of a voice line cut by an interviewer records: who cut, why (the watcher's reason) and whether
+   * the candidate was still mid-line (cutWhileSpeaking). A line played to about nine tenths of its length, or nearly all of it
+   * with the recogniser already quiet, had essentially finished: the interviewer came in after the answer, not over it.
+   */
+  function cutNote(utterance, positionMs, heard) {
+    const bytesMs = utterance.sampleRate ? (utterance.audioBytes / 2 / utterance.sampleRate) * 1000 : 0;
+    const total = stripAudioTags(utterance.text).length;
+    const fraction = utterance.voiceDone && bytesMs > 0 && Number.isFinite(positionMs) ? positionMs / bytesMs : (total > 0 ? heard.length / total : 0);
+    const finished = fraction >= 0.9 || (utterance.cutSpeaking === false && fraction >= 0.75);
+    const reason = utterance.cutBy?.cutInInfo?.reason;
+    return { cutOffBy: 'interviewer', ...(reason ? { cutInReason: reason } : {}), cutWhileSpeaking: !finished, heardFraction: Math.round(Math.min(1, fraction) * 100) / 100 };
+  }
+
   /** The line is over: played to the end (positionMs Infinity) or cut at positionMs. */
   function saidEnded(utterance, positionMs, atMs) {
     if (said !== utterance) return;
@@ -3157,7 +3209,7 @@ export function createPracticeCallEngine({
     // A voice line is a sent message (channel chat, so the review keeps it out of the delivery measures) that was spoken.
     const entry = heard ? {
       speaker: 'candidate', channel: 'chat', voiced: true, text: heard, startMs, endMs, ...(utterance.generated ? { generated: true } : {}),
-      ...(whole ? {} : { interrupted: true, heardText: heard, ...(utterance.cutBy ? { cutOffBy: 'interviewer' } : {}) }),
+      ...(whole ? {} : { interrupted: true, heardText: heard, ...(utterance.cutBy ? cutNote(utterance, positionMs, heard) : {}) }),
     } : null;
     if (heard) captionSaid(utterance, true, heard);
     // A line cut while its voice was still streaming, or whose stream failed late, was never prepared: the audio so far is.

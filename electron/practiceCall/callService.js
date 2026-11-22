@@ -288,8 +288,8 @@ export function generatedRunFor(sent, line) {
  * path, so the recogniser records it like live speech with no flag; the helper's inject events say when each line
  * played. A candidate entry mostly inside a generated line's span is that line: `voiced` and `generated` are set
  * (never over a value already there), so the metrics and the review never judge it as the candidate's own delivery.
- * A line that played whole and was recognised as a single entry also carries `sentText`, the known words, which are
- * counted instead of the recogniser's text.
+ * A line recognised as a single entry also carries `sentText`, the known words (the whole line, or for a cut line the
+ * part that was heard), which are counted and shown to the review instead of the recogniser's text.
  */
 export function stampInjectedLines(transcript, spans) {
   const entries = Array.isArray(transcript) ? transcript : [];
@@ -301,13 +301,15 @@ export function stampInjectedLines(transcript, spans) {
   return entries.map((entry, index) => {
     const spansHere = mine[index];
     if (!spansHere.length) return entry;
-    const only = spansHere.length === 1 && spansHere[0].whole === true && typeof spansHere[0].text === 'string'
-      && mine.filter(list => list.includes(spansHere[0])).length === 1;
+    const sole = spansHere.length === 1 && mine.filter(list => list.includes(spansHere[0])).length === 1 ? spansHere[0] : null;
+    // A whole line is its full text; a cut line is the part the engine reported heard (never the unplayed rest).
+    const sent = sole && sole.whole === true && typeof sole.text === 'string' ? sole.text
+      : sole && sole.whole !== true && typeof sole.heardText === 'string' && sole.heardText.trim() ? sole.heardText.trim() : '';
     return {
       ...entry,
       voiced: entry.voiced ?? true,
       generated: entry.generated ?? true,
-      ...(only && entry.sentText === undefined ? { sentText: spansHere[0].text } : {}),
+      ...(sent && entry.sentText === undefined ? { sentText: sent } : {}),
     };
   });
 }
@@ -966,7 +968,10 @@ export function createPracticeCallService(deps = {}) {
     if (event?.type === 'transcript' && event.final && Number.isFinite(event.startMs) && Number.isFinite(event.endMs)) {
       self.timings.answers.push({ startMs: event.startMs, endMs: event.endMs });
       try {
-        const work = Promise.resolve(self.ear?.noteSpeech({ startMs: event.startMs, endMs: event.endMs, wordCount: wordCountOf(event.text) })).catch(() => {});
+        // Speech that overlaps an injected AI-voice line is that voice, not the candidate's microphone: it feeds the
+        // voiced baseline, so the mic baseline (and the tone notes built on it) never compares a synthetic voice with a person.
+        const voiced = [...(self.injectSpans?.values() ?? [])].some(span => Number.isFinite(span.startMs) && span.startMs <= event.endMs && (Number.isFinite(span.endMs) ? span.endMs : Infinity) >= event.startMs);
+        const work = Promise.resolve(self.ear?.noteSpeech({ startMs: event.startMs, endMs: event.endMs, wordCount: wordCountOf(event.text), ...(voiced ? { voiced: true } : {}) })).catch(() => {});
         (self.noteWork ||= new Set()).add(work);
         work.finally(() => self.noteWork?.delete(work));
       } catch { /* tone is best effort */ }
@@ -2095,6 +2100,13 @@ export function createPracticeCallService(deps = {}) {
     // The candidate's voice was cut off: the chat keeps what was actually said, broken off with a dash, as a
     // transcript would. A message the voice never reached is marked unsent rather than removed.
     if (event.type === 'candidate-voice' && event.state === 'cut' && Array.isArray(event.messages)) {
+      // The words heard of the line that was just cut go on its inject span, for the transcript's sentText.
+      try {
+        const heardAll = event.messages.map(item => String(item?.heard ?? '').trim()).filter(Boolean).join(' ');
+        const cutSpan = [...(call?.injectSpans?.values() ?? [])].filter(span => span.generated === true && span.whole !== true && span.heardText === undefined && Number.isFinite(span.startMs))
+          .sort((left, right) => right.startMs - left.startMs)[0];
+        if (cutSpan && heardAll) cutSpan.heardText = heardAll;
+      } catch { /* sentText is best effort */ }
       for (const item of event.messages) {
         const index = state.chat.findIndex(entry => entry.id === item?.chatId && entry.from === 'candidate');
         if (index < 0) continue;

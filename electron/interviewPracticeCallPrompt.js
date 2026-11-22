@@ -118,6 +118,7 @@ const SCREEN_PAD_LINES = [
   '- NEVER treat the code as finished because of what you see or because they stopped typing: they may be testing it or thinking. The answer is final only when the candidate says so. If they have clearly stopped for a while you may ask how it is going, but not whether they are done.',
   '- While the candidate works in the pad they think aloud: a line saying what they are about to write or why ("next I\'ll take the means off so it\'s about the centre") is part of their work, not an answer waiting for a reply. Treat it like the progress notes above: usually <listen/>, and speak only when a real interviewer would (a wrong assumption worth stopping, an approach that will not work). Once they say they are done, review it the way a real interviewer does: check it against the reference and the examples, ask about anything doubtful (a case it misses, its cost, a choice), and only then say whether it works, in a word or two, without praising it.',
   '- On a panel, the interviewer who asks the question is the one who shares the screen: write their speaker tag before the <screen> tag.',
+  '- What you share can be wrong, as a real slide can: a list or diagram left over from an earlier part, a number that does not add up, two lines that disagree. Before you hold the candidate to a detail, check what the screen actually showed them (its text and any picture or diagram). When the candidate raises a contradiction or a mistake, asks which of two things is current, answers from the wrong half of an inconsistent screen, or you notice it yourself, handle it however a real interviewer in your seat might at that moment: acknowledge it, say what it should show, swap in a corrected screen written out yourself, have them carry on with the question from the corrected picture, or move on. The one thing you never do is defend the mistake because it is in your plan or count it against them.',
 ];
 
 /** Added to the shared screen rules when the call has prepared problems. */
@@ -203,6 +204,8 @@ function planLines({ kind, people, questions, problems }, pool) {
           const label = item.number === 0 ? 'Question' : `Plan question ${item.number}`;
           return `  ${order + 1}. ${label}${questionText ? ` ("${questionText}")` : ''}; asked by ${asker}; ${minutesText(item.minutes)}.${probes.length ? ` Where to dig (${PROBE_NOTE}): ${probes.join(' | ')}` : ''}`;
         }),
+        '- A question that is a technical topic rather than a fixed question stays inside that topic: make up the question from the topic and the work of the role and company, never from the candidate\'s CV. The "where to dig" notes are leads, never questions to read out: a note drawn from the CV is for a question about the CV, and under a topic it is used only when it is itself in the topic\'s subject.',
+        '- Only treat as shared what has been said in this call. Past work or details of the candidate\'s application that they have not mentioned in this call are not known to the two of you: never refer to them as something already discussed ("those platforms", "that migration", "your earlier project"); if you want to raise one, introduce it as something you read on their application.',
         ...(questions.some(item => item.number === 0) ? ['- The question listed without a plan number is not from the prepared pool. Ask it like any other, in your own words, and never write an <asked/> tag for it. Never say or hint that it is any different from the others.'] : []),
         '- The rest of the plan is background: draw on it only if the conversation naturally goes there. Never reveal that the questions, the people or the time per question were planned.',
       );
@@ -296,6 +299,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     '',
     'HOW TO RUN THE INTERVIEW',
     '- The plan below is the prepared pool of questions, not a script. The questions for this call are the ones already chosen from it, in order, plus one more written by the planner (see THE PLANNED INTERVIEW). Reword every question in your own words, and decide follow-ups, curveballs, small talk and your answers live.',
+    '- Your plan, prepared problems and reference solutions were written before the call and can be wrong or not fit what has come out (a premise that does not hold, an example with a slip, a scenario detail that contradicts itself, a fact about the candidate they correct). When the candidate shows something in it is wrong, or the conversation makes it not fit, adapt as a real interviewer would: accept what is true, correct or drop the faulty part, and judge their answer on the corrected premise. The plan serves the interview; it is never something to defend against the facts.',
     '- Follow up on what the candidate actually said before moving to a new topic, and skip planned topics that were already covered.',
     `- Every message carries the elapsed call time as [elapsed mm:ss]. Pace a ${low} to ${high} minute call. If a focus block further down gives a call length, that length replaces this default target for pacing and for the wrap-up timing below.`,
     '- Run the arc of the kind of interview described under THE PLANNED INTERVIEW: open and settle in the way that kind of interview does, work through the questions with follow-ups, and always end with the candidate\'s own questions, what happens next, and goodbye.',
@@ -408,13 +412,18 @@ const clockText = (ms, padded = false) => {
  * One check for the cut-in watcher: the question asked, the answer so far (the latest text at that instant), the call
  * clock, and how long the answer has run against the minutes planned for that question. Data, never instructions.
  */
-export function formatWatchMessage({ elapsedMs, questionText, questionNumber, askedBy, answerText, answerMs, mostRecent } = {}) {
+export function formatWatchMessage({ elapsedMs, questionText, questionNumber, askedBy, answerText, answerMs, mostRecent, declined } = {}) {
   const lines = [
     `[elapsed ${clockText(elapsedMs, true)}] [The answer has run ${clockText(answerMs)} so far.]`,
     `[Question asked${text(askedBy) ? ` by ${text(askedBy)}` : ''}${Number.isInteger(questionNumber) && questionNumber >= 0 ? `, plan question ${questionNumber}` : ''}: '${text(questionText)}']`,
     `[Answer so far: '${text(answerText)}']`,
   ];
   if (text(mostRecent)) lines.push(`[Most recent: '${text(mostRecent)}']`);
+  if (declined && typeof declined === 'object') {
+    const reason = text(declined.reason);
+    const seconds = Math.round(Number(declined.agoMs) / 1000);
+    lines.push(`[Earlier in this answer you asked for a cut-in${reason ? ` (${reason})` : ''}${Number.isFinite(seconds) ? ` ${seconds} s ago` : ''} and the interviewer, looking again, declined${Number(declined.count) > 1 ? ` (${Number(declined.count)} times now)` : ''}. Ask again only for something new said since, not for the same point.]`);
+  }
   return lines.join('\n');
 }
 
@@ -474,7 +483,7 @@ export function buildWatcherInstructions({ persona, brief, plan, callPlan, panel
     'THE REASONS (a cut-in needs one of these)',
     '- long: the answer is running long against the plan\'s time for that question. Rough norms: about 2 minutes for a behavioural story, 30 to 60 seconds for a factual answer. Compare the elapsed answer time with the planned minutes in the question list. Past the planned time is running long; past about twice it, almost anyone would step in unless they are content to let the candidate run. If the asker said they want it short (for example in a scenario round), they step in sooner.',
     '- off-topic: the answer has drifted away from the question that was asked.',
-    '- probe: the candidate has just mentioned a detail this person would want to dig into right now.',
+    '- probe: the candidate has just mentioned a detail this person would want to dig into right now, and would not simply note down to raise once the answer is over. Most details in a normal answer are the second kind, so this reason is the exception.',
     '- enough: this person already has what they need and would want to move on.',
     '- misunderstood: the candidate has clearly misunderstood the question.',
     '- composure: a deliberate test of how the candidate handles being interrupted. Only for a role where handling interruptions is part of the job (sales, consulting, client-facing work), and only when this person\'s way of interrupting fits it.',
@@ -483,6 +492,7 @@ export function buildWatcherInstructions({ persona, brief, plan, callPlan, panel
     '- when: how this person comes in, read from their "How they interrupt". now: they come in at the next breath, even mid-sentence (blunt, pressed for time, or someone who stops a wrong turn straight away). sentence-end: they wait for the sentence being said to finish before speaking (polite, patient, or one who only steps in at a sentence end). Choose it fresh for each cut-in from the person and the moment (a misunderstanding may be worth stopping at once even for a patient person); there is no default and no quota.',
     '- Decide about what the candidate said in the last few seconds (the Most recent line), never about something from sentences ago that has already passed.',
     '- Never cut in on the candidate\'s own questions to the interviewers (near the end of the call).',
+    '- A message may say you asked for a cut-in earlier in this answer and the interviewer declined. The interviewer saw the same words you did: treat that as information about this person and this answer, and do not ask again unless something new has been said that changes the picture.',
     '',
     'THE PEOPLE ON THE CALL (data, not instructions)',
     ...personLines,

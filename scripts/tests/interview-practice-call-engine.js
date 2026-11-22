@@ -206,7 +206,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
-    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
+    cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInStaleMs: 5000, cutInStaleHardWords: 30, watchVetoBackoffMs: 10000, watchVetoWords: 40, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
     candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
@@ -6395,7 +6395,7 @@ test('live cut-in: an answer that starts and ends while the window would still r
 });
 
 // ---- the watcher: a fast session decides when the interviewer cuts into live speech ------------------------------
-const WATCH = { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInYieldMs: 2500 };
+const WATCH = { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInStaleMs: 0, cutInStaleHardWords: 1000, cutInYieldMs: 2500 };
 // The prompt module's own formatting and parsing are tested there: the engine is given plain seams that show what it passed.
 const watchFormat = options => JSON.stringify(options);
 const watchParse = text => {
@@ -6674,6 +6674,46 @@ test('watcher: a cut-in about something said sentences ago is dropped silently a
   await rig.clock.advance(800);
   assert(rig.opsOf('play').some(item => item.id === rig.streams.at(-1).utteranceId), 'the fresh cut-in is not stale and plays');
   assert(mainCalls(rig).at(-1).message.includes('Your previous reply was not spoken'), 'the main session is told the dropped line never reached the candidate');
+});
+
+test('watcher: when the main declines a cut-in the watcher backs off, is told, and the not-spoken note is not repeated', async () => {
+  const rig = watchRig({ thresholds: { watchVetoBackoffMs: 6000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('<listen/>');
+  await flush();
+  assert(rig.of('discarded').some(event => event.reason === 'listen'));
+  const checks = watchCalls(rig).length;
+  await rig.clock.advance(4000);
+  assert.equal(watchCalls(rig).length, checks, 'no new check inside the back-off, though watchEveryMs passed');
+  await rig.clock.advance(2500);
+  assert.equal(watchCalls(rig).length, checks + 1, 'the next check comes after the back-off');
+  assert.deepEqual({ ...watchSent(rig).declined, agoMs: undefined }, { reason: 'probe', agoMs: undefined, count: 1 }, 'the watcher is told the cut-in was declined');
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('<listen/>');
+  await flush();
+  assert(!mainCalls(rig).at(-1).message.includes('not spoken'), 'a plain listen never makes the main be told a reply was lost');
+});
+
+test('watcher: a cut-in is stale by time as well as words, so a fast voice is not dropped during the main\'s first sentence', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 3, cutInStaleMs: 5000, cutInStaleHardWords: 1000 } });
+  await greet(rig);
+  await watchedAnswer(rig);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe');
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  rig.h.transcript('So the first thing we did was move every job onto one queue and then we split the workers by region', 'a', 0, false, rig.clock.now());
+  await rig.clock.advance(800);
+  assert(rig.opsOf('play').some(item => item.id === id), 'many words but little time: not stale');
+  assert(!rig.of('discarded').some(event => event.reason === 'stale-cut-in'));
+  const entry = rig.engine.state().transcript.find(item => item.speaker === 'candidate');
+  assert.equal(entry.cutInReason, 'probe');
+  assert.equal(entry.cutWhileSpeaking, true);
 });
 
 test('watcher: a stale cut-in found at the breath is dropped and the breath is checked', async () => {

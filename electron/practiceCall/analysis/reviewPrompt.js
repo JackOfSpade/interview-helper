@@ -184,6 +184,8 @@ function interviewerText(member) {
   return `${parts.join(', ')}${tail.length ? ` (${tail.join('; ')})` : ''}`;
 }
 
+const sentOf = turn => (turn?.speaker === 'candidate' && typeof turn.sentText === 'string' ? line(turn.sentText) : '');
+
 function formatTranscript(transcript, wordsByTurn, interviewers = []) {
   const names = new Map(interviewers.map(member => [member.id, line(member.name)]).filter(([, name]) => name));
   return transcript.map((turn, index) => {
@@ -195,12 +197,19 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
     const overlap = turn.overlay && turn.speaker !== 'candidate' ? ' (overlapping remark, said over the speaker)' : '';
     // A voiced chat line was spoken on the call: it carries no (chat) mark, so it reads as the speech it was.
     const channelMark = turn.channel && turn.channel !== 'audio' && !(turn.voiced === true && turn.speaker === 'candidate') ? ` (${turn.channel})` : '';
-    const head = `[${index}] ${who}${overlap} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(turn.text)}`}`;
+    const head = `[${index}] ${who}${overlap} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
     const extras = segments.map(segment => `    ${names.get(segment.speakerId) || 'interviewer'}: ${line(segment.text)}`);
-    if (line(turn.heardText)) extras.push(`    heard as: ${line(turn.heardText)}`);
+    // The recogniser's text can carry mis-hearings; for a line the AI voice spoke the known words lead and the recogniser's version follows.
+    if (sentOf(turn) && line(turn.text) && line(turn.text) !== line(sentOf(turn))) extras.push(`    recogniser heard it as: ${line(turn.text)}`);
+    else if (!sentOf(turn) && line(turn.heardText)) extras.push(`    heard as: ${line(turn.heardText)}`);
     const verbatim = wordsOf(wordsByTurn?.[index]);
     if (verbatim) extras.push(`    scribe verbatim: ${verbatim}`);
-    if (turn.speaker === 'candidate' && turn.interrupted === true && turn.cutOffBy === 'interviewer') extras.push('    (the interviewer had to stop the candidate here: this answer was cut off by the interviewer, and only the words above were heard)');
+    if (turn.speaker === 'candidate' && turn.interrupted === true && turn.cutOffBy === 'interviewer') {
+      // cutWhileSpeaking and cutInReason come from the engine; calls recorded before they existed carry neither.
+      const reason = line(turn.cutInReason);
+      if (turn.cutWhileSpeaking === false) extras.push('    (the interviewer came in after the candidate had essentially finished: this is not a cut-in and says nothing about the answer running long)');
+      else extras.push(`    (this answer was cut off by the interviewer, and only the words above were heard${reason ? `; the interviewer's reason: ${reason}` : '; the reason is not recorded'})`);
+    }
     else if (turn.interrupted) extras.push('    (the interviewer was still speaking when this turn started)');
     return [head, ...extras].join('\n');
   }).join('\n');
@@ -221,14 +230,16 @@ function formatMetrics(metrics) {
 
 const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
-  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value.',
+  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
   '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title.',
   '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
-  '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the interviewer had to stop the candidate. Say so in delivery when it happened, with what ran on, and count it from the metrics (interviewerCutInCount), never from memory.',
+  '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the candidate was still speaking when the interviewer came in. Why they came in is a separate question, and the turn says it when recorded: an interviewer can cut in to probe a detail, to move on once they have enough, or because an answer really ran long, and a persona that interrupts readily does so on short answers too. Judge each cut by its recorded reason and by how long the answer had run, and call an answer long only when the reason or its length shows that. A turn that says the interviewer came in after the candidate had essentially finished is not a cut-in. When the reason is not recorded, say so rather than guessing at length. Mention cut-ins in delivery when they happened, and count them from the metrics (interviewerCutInCount), never from memory.',
+  '- Never print transcript turn numbers (the bracketed indices) in any feedback text: refer to the question, or to a time as mm:ss. The indices are only for the chapter and moment index fields.',
+  '- Words: for a candidate line that has a "recogniser heard it as" note, the words on the main line are what was actually said; the note is speech recognition and may be wrong. Never criticise a word that appears only in the recogniser version.',
   '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). Never fault the interviewer for asking about something the candidate has not done.',
   '- Typed turns: a transcript turn marked (chat) was typed, not spoken. Every turn without that mark was spoken, and all spoken answers are judged the same way. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure. Never critique typos, spelling, stray characters or missing punctuation in typed text as if they were speech; typed text is judged for content only.',
 ].join('\n');
@@ -274,7 +285,10 @@ function formatScreens(screens, transcript) {
   return screens.map((screen, index) => {
     const ended = typeof screen.endMs === 'number' && Number.isFinite(screen.endMs) ? `, until ${clock(screen.endMs)}` : ', until the end of the call';
     const head = `screen ${index + 1}: "${line(screen.title) || '(untitled)'}" shown at ${clock(screen.atMs)} (${turnAt(transcript, screen.atMs)})${ended}`;
-    return `${head}\n${fenced(cut(String(screen.content ?? '').trim(), REVIEW_SCREEN_CAP))}`;
+    // What a picture or diagram above the text showed: a stale diagram can contradict the text, and the candidate saw both.
+    const visual = screen.visual && typeof screen.visual === 'object' && line(screen.visual.description)
+      ? `\n(${screen.visual.kind === 'picture' ? 'picture' : 'diagram'} above the text, showing: ${cut(line(screen.visual.description), 600)})` : '';
+    return `${head}${visual}\n${fenced(cut(String(screen.content ?? '').trim(), REVIEW_SCREEN_CAP))}`;
   }).join('\n\n');
 }
 
@@ -292,7 +306,7 @@ const UNPREPARED_NOTE = (text) => [
   'There is no prepared answer for it. Judge it only if the transcript shows the interviewer actually reached it: then judge the candidate\'s answer on its own, as a test of adaptability (structure, relevance, composure) and never fault it for departing from prepared material. If the transcript never shows it being asked, say nothing about it and give it no score.',
 ].join('\n');
 
-const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written.';
+const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written. Before marking an answer down for misreading a screen, check that screen as shown (its text and the picture or diagram above it): when the screen contradicted itself or was wrong, for example an earlier traffic list or a diagram of starting positions left on screen beside an update, an answer that followed one of its versions is not a misreading, so do not count it against the candidate; say the screen was unclear, and credit a candidate who noticed the contradiction or asked which was current.';
 
 /** Active length: the call's length minus the time it was paused (the candidate typing). */
 function lengthLine(callRecord) {

@@ -104,7 +104,7 @@ test('the prompt fits the length to the kind of question without cutting realist
   assert(prompt.includes('a story (situation, what you did, the result) in about 80 to 180 words'), 'a story keeps its usual length');
   assert(prompt.includes('Never more than 250 words.'), 'the ceiling is unchanged');
   assert(prompt.includes('A yes/no or one-fact question') && prompt.includes('no story'), 'a one-fact question gets a short direct answer');
-  assert(prompt.includes('A follow-up or clarifying question gets the answer first'), 'a follow-up does not start a new story');
+  assert(prompt.includes('gets the answer first and the reason after, usually 25 to 60 words'), 'a follow-up does not start a new story');
   assert(prompt.includes('"briefly", "quick one", "in a sentence"'), 'a request for brevity is honoured');
 });
 
@@ -121,7 +121,7 @@ test('cleanDraft drops a label and wrapping quotes and keeps within the chat lim
   const cleaned = cleanDraft(long);
   assert(cleaned.length <= DRAFT_ANSWER_MAX_CHARS);
   assert(cleaned.endsWith('.'));
-  assert.equal(DRAFT_ANSWER_MAX_CHARS, 2000);
+  assert.equal(DRAFT_ANSWER_MAX_CHARS, 1100);
 });
 
 test('draftCandidateAnswer sends the prompt with the signal and returns the cleaned text; empty or missing calls fail', async () => {

@@ -339,6 +339,60 @@ export const presentingTests = [
       } finally { await bundle.dispose(); }
     },
   },
+  {
+    name: 'practice call render: the replay\'s shared screen enlarges over the feedback, follows playback and shrinks with its button, Escape or a click outside',
+    async run() {
+      const { JSDOM } = await import('jsdom');
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true });
+      const saved = {};
+      const realChannel = globalThis.MessageChannel;
+      const channels = [];
+      globalThis.MessageChannel = class { constructor() { const channel = new realChannel(); channels.push(channel); return channel; } };
+      const names = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'KeyboardEvent', 'MouseEvent'];
+      for (const name of names) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true, writable: true }); }
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+      let bundle = null;
+      try {
+        bundle = await loadServerBundle();
+        const { React, createRoot, Replay } = bundle.module;
+        const { act } = React;
+        const replay = {
+          ...REPLAY, persona: { name: 'Dana Whitfield' }, panel: [{ id: 'B', name: 'John Park' }],
+          screens: [{ atMs: 100_000, title: 'Problem one', content: 'Reverse a list', speakerId: 'B', endMs: 300_000, visual: { kind: 'diagram', url: 'practice-call://call-1/visuals/p1.1.svg', description: 'A runway.' } }],
+        };
+        const doc = dom.window.document;
+        const root = createRoot(doc.getElementById('root'));
+        await act(async () => root.render(React.createElement(Replay, { replay, api: {}, initialPositionMs: 200_000 })));
+        const enlarged = () => doc.querySelector('[data-replay-screen-enlarged]');
+        const enlarge = doc.querySelector('[data-replay-share] button[aria-label="Enlarge shared screen"]');
+        assert(enlarge && !enlarged(), 'the screen beside the feedback has an Enlarge button and starts small');
+        await act(async () => { enlarge.click(); });
+        assert(enlarged()?.getAttribute('role') === 'dialog' && enlarged().textContent.includes('Problem one') && enlarged().querySelector('img[src="practice-call://call-1/visuals/p1.1.svg"]'), 'Enlarge shows the same screen, diagram included, over the feedback');
+        assert(enlarged().querySelector('img').className.includes('max-h-[70vh]') && enlarged().querySelector('[data-screen-body]').className.includes('text-[17px]'), 'the enlarged view has a taller diagram and bigger text');
+        assert(doc.activeElement === enlarged().querySelector('button[aria-label="Shrink shared screen"]'), 'focus moves to Shrink');
+        await act(async () => { enlarged().querySelector('button[aria-label="Shrink shared screen"]').click(); });
+        assert(!enlarged(), 'Shrink closes it');
+        await act(async () => { doc.querySelector('[data-replay-share] [data-screen-enlarge]').click(); });
+        await act(async () => { enlarged().dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+        assert(!enlarged(), 'Escape closes it');
+        await act(async () => { doc.querySelector('[data-replay-share] [data-screen-enlarge]').click(); });
+        await act(async () => { enlarged().querySelector('[data-shared-screen]').dispatchEvent(new dom.window.MouseEvent('mousedown', { bubbles: true })); });
+        assert(enlarged(), 'a click on the screen itself keeps it open');
+        await act(async () => { enlarged().dispatchEvent(new dom.window.MouseEvent('mousedown', { bubbles: true })); });
+        assert(!enlarged(), 'a click outside the screen closes it');
+        await act(async () => { doc.querySelector('[data-replay-share] img').click(); });
+        assert(enlarged(), 'clicking the diagram enlarges too');
+        await act(async () => root.unmount());
+      } finally {
+        for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
+        delete globalThis.IS_REACT_ACT_ENVIRONMENT;
+        globalThis.MessageChannel = realChannel;
+        for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+        dom.window.close();
+        if (bundle) await bundle.dispose();
+      }
+    },
+  },
 ];
 
 export default [

@@ -22,6 +22,12 @@ function savedInterviewLabel(item) {
   return parts.join(' · ');
 }
 
+// A technical-topic card's stored text is an instruction to the interviewer; the reader sees "Technical topic: <topic>" (the stored text stays the card's identity).
+function questionLabel(question) {
+  const hit = /^\[Technical topic[^\]]*\]\s*([\s\S]*?)\.?\s*If you pick this[\s\S]*$/u.exec(String(question ?? ''));
+  return hit ? `Technical topic: ${hit[1].trim()}` : question;
+}
+
 // `compact` leaves out the overall score, summary and priorities, for a screen that already shows them.
 export function FeedbackView({ feedback, typedOnly = false, compact = false }) {
   if (!feedback) return null;
@@ -34,7 +40,7 @@ export function FeedbackView({ feedback, typedOnly = false, compact = false }) {
     {!compact && <p className="text-[11px] text-white/75 whitespace-pre-wrap">{feedback.overall?.summary}</p>}
     {!compact && feedback.priorities?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Work on first</p><ol className="list-decimal pl-4 text-[11px] text-amber-100 space-y-0.5">{feedback.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol></div>}
     {(planned.length > 0 || unasked.length > 0) && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="break-inside-avoid rounded-md border border-white/10 bg-black/20 p-1.5">
-      <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{item.question}</p>
+      <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{questionLabel(item.question)}</p>
       {!compact && item.askedAs && <p className="text-[10px] text-white/55">Asked as: {item.askedAs}</p>}
       <section className="practice-memorized" aria-label="Memorized answer"><p className="text-[10px] font-semibold uppercase text-white/40">Memorized answer</p>
         {item.covered && <p className="text-[11px] text-white/70">{item.covered}</p>}
@@ -46,7 +52,7 @@ export function FeedbackView({ feedback, typedOnly = false, compact = false }) {
         <p>{item.extension}</p></details>}
     </li>)}</ul>
       {unasked.length > 0 && <details data-testid="practice-unasked" className="mt-1.5 text-[11px] text-white/60"><summary className="cursor-pointer">{unasked.length === 1 ? '1 prepared question was not asked' : `${unasked.length} prepared questions were not asked`}</summary>
-        <ul className="mt-1 list-disc space-y-0.5 pl-4">{unasked.map((item, index) => <li key={index}>{item.question}</li>)}</ul></details>}</div>}
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">{unasked.map((item, index) => <li key={index}>{questionLabel(item.question)}</li>)}</ul></details>}</div>}
     {feedback.moments?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Rest of the call</p><ul className="space-y-1">{feedback.moments.map((item, index) => <li key={index} className="text-[11px] text-white/75"><span className="text-violet-200">{KIND_LABELS[item.kind] || item.kind}</span> <Score value={item.score} /> · {item.prompt}{item.note ? <span className="text-white/60"> — {item.note}</span> : null}</li>)}</ul></div>}
     {communication.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Communication</p><ul className="space-y-0.5">{communication.map(([key, text]) => <li key={key} className="text-[11px] text-white/75"><span className="capitalize text-violet-200">{key}</span>: {text}</li>)}</ul></div>}
   </div>;

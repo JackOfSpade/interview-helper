@@ -52,6 +52,7 @@ export function createPracticeEar({
   smartTurnPath = null,
   tonePath = null,
   minSpeechMs = 20000,
+  voicedMinSpeechMs: voicedMinOption = null,
   onToneSample = () => {},
 } = {}) {
   if (typeof candidatePath !== 'string' || !candidatePath) throw new TypeError('Practice ear requires the candidate recording path.');
@@ -74,6 +75,8 @@ export function createPracticeEar({
   let voicedBase = null;
   let voicedSpeechMs = 0;
   let voicedLatestTone = null;
+  // A synthetic voice's tone model scores drift more than a person's, so its baseline is built from more speech.
+  const voicedMinSpeechMs = Number.isFinite(voicedMinOption) && voicedMinOption > 0 ? voicedMinOption : minSpeechMs * 3;
 
   let opening = null;
   function reader() {
@@ -111,7 +114,7 @@ export function createPracticeEar({
   function prosodyOf() { return loadOnce('prosody', async () => { pro = await prosody(); return pro; }); }
   function baselineOf() { return loadOnce('baseline', async () => { base = await baseline({ minSpeechMs }); return base; }); }
   function floorOf() { return loadOnce('floor', async () => { return floorBid({ baseline: await baselineOf() }); }); }
-  function voicedBaselineOf() { return loadOnce('voicedBaseline', async () => { voicedBase = await baseline({ minSpeechMs }); return voicedBase; }); }
+  function voicedBaselineOf() { return loadOnce('voicedBaseline', async () => { voicedBase = await baseline({ minSpeechMs: voicedMinSpeechMs }); return voicedBase; }); }
   function noteOf() { return loadOnce('note', async () => { note = await toneNote(); return note; }); }
   // composeVoiceNote is pure and cheap, so load it with the ear: the voice-note
   // path then has it in hand instead of waiting on a model mid-call.
@@ -146,7 +149,7 @@ export function createPracticeEar({
   }
 
   /** Feed an answer span: baseline prosody now, tone scores in the background. */
-  function noteSpeech({ startMs, endMs, wordCount = 0 } = {}) {
+  function noteSpeech({ startMs, endMs, wordCount = 0, voiced = false } = {}) {
     if (closed || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
     const run = async () => {
       // The recording is opened here too: a call may reach its first answer before any
@@ -163,13 +166,14 @@ export function createPracticeEar({
       const turn = words > 0 && spoken > 0
         ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
         : measured;
-      measuredTurns.push({ ...turn, startMs, endMs });
+      measuredTurns.push({ ...turn, startMs, endMs, ...(voiced ? { voiced: true } : {}) });
       // Only the first ~minSpeechMs of candidate speech defines the baseline;
-      // later answers are measured against it rather than moving it.
-      const feedsBaseline = speechMs < minSpeechMs;
-      speechMs += Number(turn?.speechMs) || 0;
-      const active = await baselineOf();
-      if (feedsBaseline) active.add(turn, latestTone);
+      // later answers are measured against it rather than moving it. A segment the caller says is the synthetic
+      // voice (heard on the microphone path) feeds that voice's baseline, never the human's.
+      const feedsBaseline = voiced ? voicedSpeechMs < voicedMinSpeechMs : speechMs < minSpeechMs;
+      if (voiced) voicedSpeechMs += Number(turn?.speechMs) || 0; else speechMs += Number(turn?.speechMs) || 0;
+      const active = voiced ? await voicedBaselineOf() : await baselineOf();
+      if (feedsBaseline) active.add(turn, voiced ? voicedLatestTone : latestTone);
       const workerNow = await workerOf();
       for (let offset = 0; offset < endMs - startMs; offset += TONE_CHUNK_MS) {
         const chunkStart = startMs + offset;
@@ -180,8 +184,8 @@ export function createPracticeEar({
         try {
           const tone = await workerNow.tone(chunk);
           if (!tone) continue;
-          latestTone = tone;
-          const sample = { atMs: chunkStart, endMs: chunkEnd, arousal: tone.arousal, dominance: tone.dominance, valence: tone.valence };
+          if (voiced) voicedLatestTone = tone; else latestTone = tone;
+          const sample = { atMs: chunkStart, endMs: chunkEnd, arousal: tone.arousal, dominance: tone.dominance, valence: tone.valence, ...(voiced ? { voiced: true } : {}) };
           toneSamples.push(sample);
           try { onToneSample(sample); } catch { /* observer errors never break the call */ }
         } catch { /* tone is best effort */ }
@@ -329,11 +333,13 @@ export function createPracticeEar({
       line.turn = record;
       if (finished) recordVoicedTone(line, startMs, heard);
       // Only the first ~minSpeechMs of the synthetic voice defines its baseline, as for the microphone.
-      if (firstNote && voicedSpeechMs < minSpeechMs) active.add(turn, tone);
+      if (firstNote && voicedSpeechMs < voicedMinSpeechMs) active.add(turn, tone);
       if (firstNote) voicedSpeechMs += Number(turn?.speechMs) || 0;
       if (!active.ready()) return null;
       const compose = await noteOf();
-      return compose(active.relative(turn, tone)) ?? null;
+      // The synthetic voice's tone-model confidence and pitch range wander by more than the thresholds on their own, so
+      // only pace, long pauses, energy and restarts can be noted for it.
+      return compose({ ...active.relative(turn, tone), dominanceDelta: null, pitchRangeDeltaSt: null }) ?? null;
     } catch { return null; }
   }
 
@@ -342,7 +348,14 @@ export function createPracticeEar({
     const samples = spanSamples(startMs, endMs);
     if (!samples || !samples.length || !pro || !base || !note) return null;
     if (!base.ready()) return null;
-    const measured = pro({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+    const whole = pro({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+    // The baseline is made of single recogniser segments, so a turn's pauses and speech time come from its segments
+    // too (as the call record has them); measuring the whole span would count the silence between sentences as pauses.
+    const inside = measuredTurns.filter(item => !item.voiced && item.startMs >= startMs - 50 && item.endMs <= endMs + 50);
+    const pauses = inside.flatMap(item => item.pauses ?? []);
+    const measured = inside.length
+      ? { ...whole, pauses, pauseCount: pauses.length, longestPauseMs: pauses.reduce((longest, pause) => Math.max(longest, pause.endMs - pause.startMs), 0), speechMs: inside.reduce((sum, item) => sum + (Number(item.speechMs) || 0), 0) || whole.speechMs }
+      : whole;
     // Pace needs the words of this span: use the caller's count, else the one noted for the same span.
     const known = Number.isFinite(wordCount) ? wordCount : measuredTurns.find(item => !item.voiced && item.startMs === startMs && item.endMs === endMs)?.wordCount;
     const spoken = Number(measured?.speechMs) || 0;

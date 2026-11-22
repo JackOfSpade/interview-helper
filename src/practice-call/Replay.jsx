@@ -361,7 +361,18 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
     return () => cancelAnimationFrame(frame);
   }, [playing, pauseSpans]);
 
+  // The shared screen can be enlarged over the feedback; it keeps following playback, and the player stays usable.
+  const [screenEnlarged, setScreenEnlarged] = useState(false);
+  const shrinkRef = useRef(null);
+  const enlargeOpenedRef = useRef(false);
+  const closeEnlarged = () => {
+    setScreenEnlarged(false);
+    // Focus goes back to the Enlarge button it came from.
+    setTimeout(() => { try { document.querySelector('[data-replay-share] [data-screen-enlarge]')?.focus(); } catch { /* gone */ } }, 0);
+  };
+
   const onKeyDown = event => {
+    if (screenEnlarged && event.key === 'Escape') { event.preventDefault(); closeEnlarged(); return; }
     const action = playerKeyAction(event.key, { altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey });
     if (!action || !audioUrl) return;
     const tag = String(event.target?.tagName || '').toUpperCase();
@@ -383,6 +394,11 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
   const hasPadSnapshots = Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0;
   const showScreen = !showOverview && !!shownScreen;
   const showPad = !showOverview && hasPadSnapshots && !!shownPad;
+  const screenEnlargedShown = screenEnlarged && showScreen;
+  useEffect(() => {
+    if (screenEnlargedShown && !enlargeOpenedRef.current) { enlargeOpenedRef.current = true; try { shrinkRef.current?.focus(); } catch { /* not mounted */ } }
+    if (!screenEnlargedShown) enlargeOpenedRef.current = false;
+  }, [screenEnlargedShown]);
 
   const callTitle = replay?.persona?.name ? `Interview with ${replay.persona.name}` : 'Practice interview';
   const partTitle = chapter ? (chapter.synthetic ? callTitle : chapter.title) : '';
@@ -423,6 +439,7 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
       </div>}
     </div>}
 
+    <div className="relative flex min-h-0 flex-1 flex-col">
     <section aria-label="Now playing" data-replay-focus="true" data-focus-mode={showOverview ? 'overview' : 'part'} tabIndex={0}
       className={`pc-scroll-hidden min-h-0 flex-1 overflow-y-auto px-4 py-5 min-[720px]:px-8 min-[720px]:py-6 ${RING}`}>
       <p className="sr-only" role="status" aria-live="polite" data-replay-announce="true">{showOverview ? '' : partTitle}</p>
@@ -434,12 +451,19 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
           <div className={`grid gap-6 ${showScreen || showPad ? 'min-[1000px]:grid-cols-2' : 'max-w-3xl'}`}>
             <div className="min-w-0"><PartFeedback chapter={chapter} hasFeedback={hasFeedback} /></div>
             {(showScreen || showPad) && <div data-replay-share="true" className="min-w-0 space-y-3">
-              {showScreen && <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-72" />}
+              {showScreen && <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-72" onEnlarge={() => setScreenEnlarged(true)} />}
               {showPad && <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-60" />}
             </div>}
           </div>
         </article>}
     </section>
+    {screenEnlargedShown && <div role="dialog" aria-modal="true" aria-label="Shared screen, enlarged" data-replay-screen-enlarged="true" data-replay-focus="true"
+      onMouseDown={event => { if (event.target === event.currentTarget) closeEnlarged(); }}
+      className="pc-fade absolute inset-0 z-30 flex bg-black/75 p-3 min-[720px]:p-6">
+      <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)}
+        className="mx-auto h-full w-full max-w-6xl shadow-2xl" large onClose={closeEnlarged} closeRef={shrinkRef} />
+    </div>}
+    </div>
 
     <footer data-replay-player="true" className="pc-rise shrink-0 border-t border-white/10 bg-[#17181a] px-4 pb-4 pt-3 min-[720px]:px-8" style={{ animationDelay: '120ms' }}>
       <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" aria-label="Call recording"

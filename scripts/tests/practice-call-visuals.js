@@ -163,6 +163,7 @@ test('the prompts keep a visual honest: no picture beats a poor one, and a diagr
   assert(pick.includes('1. A (about A)') && pick.includes('Choose 0 when none fits'));
   const draw = diagramPrompt({ screen: { title: 'T', content: 'Egress 00:00' }, shows: 'S' });
   assert(draw.includes('must match the screen exactly') && draw.includes('No scripts'));
+  assert(draw.includes('dimension line') && draw.includes('do not overlap each other'));
   assert.deepEqual({ ...careerWritingStageProfile(VISUAL_PICK_STAGE) }, { model: 'sonnet', effort: 'medium' });
   assert.deepEqual({ ...careerWritingStageProfile(VISUAL_DIAGRAM_STAGE) }, { model: 'opus', effort: 'low' });
 });

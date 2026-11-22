@@ -217,6 +217,9 @@ const tests = [
       assert.match(prompt, /LETTER-LINE I love gadgets\./u);
       assert.match(prompt, /THE APPLICATION/u);
       assert.match(prompt, /ONE QUESTION OF YOUR OWN/u);
+      assert.match(prompt, /earlier rounds already covered their background/u, 'a focus note about covered ground steers the picks');
+      assert.match(prompt, /probes stay inside that topic's subject/u, 'topic probes come from the topic, not the CV');
+      assert.match(prompt, /realistic, distinct identifiers/u, 'exercise identifiers are realistic');
       assert.match(prompt, /WHOLE pool/u);
       assert.match(prompt, /number 0/u);
       const empty = buildPlanPrompt({ brief, application: { resume: '', coverLetter: '  ' }, pool, voices, targetMinutes: 30 });

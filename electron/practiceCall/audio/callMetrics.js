@@ -49,6 +49,24 @@ function fastestWindowWpm(wordCount, startMs, endMs, windowMs = 20000) {
   return round((best / windowMs) * 60000, 1);
 }
 
+// A silence between two recogniser segments counts as a pause from this length (the same floor as prosody's own pauses).
+const PAUSE_MIN_MS = 300;
+
+// Merge [start, end] spans so overlapping speech (a talk-over) is counted once; paused time is taken out of the total.
+function mergedSpanMs(spans, pauseSpans) {
+  const sorted = spans.filter(span => finite(span.startMs) && finite(span.endMs) && span.endMs > span.startMs)
+    .map(span => ({ startMs: span.startMs, endMs: span.endMs })).sort((a, b) => a.startMs - b.startMs);
+  let total = 0;
+  let current = null;
+  const close = () => { if (current) total += current.endMs - current.startMs - pausedOverlapMs(pauseSpans, current.startMs, current.endMs); };
+  for (const span of sorted) {
+    if (current && span.startMs <= current.endMs) current.endMs = Math.max(current.endMs, span.endMs);
+    else { close(); current = span; }
+  }
+  close();
+  return Math.max(0, total);
+}
+
 // A line spoken on the call in the candidate's voice is a spoken answer; only an unvoiced chat line is typed.
 const isTypedLine = entry => entry?.channel === 'chat' && entry.voiced !== true;
 
@@ -127,13 +145,43 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     group.words += countWords(entry.voiced === true && typeof entry.sentText === 'string' ? entry.sentText : entry.text);
   });
 
+  // When the call kept no baseline of the synthetic voice (its lines were heard on the microphone path), the voice's
+  // own first stretch of speech is its baseline: the deltas then show drift within the voice, never against a human's.
+  let voicedFallback = null;
+  if (!voicedBaselineSnapshot) {
+    const items = groups.filter(item => item.voicedOnly).flatMap(item => item.turnIndexes.flatMap(index => prosodyFor(prosodyMap, index)))
+      .filter(item => finite(item.startMs)).sort((a, b) => a.startMs - b.startMs);
+    const used = [];
+    let spoken = 0;
+    for (const item of items) {
+      if (spoken >= 20000) break;
+      used.push(item);
+      spoken += finite(item.speechMs) ? item.speechMs : 0;
+    }
+    if (used.length) voicedFallback = { pitchRangeSt: median(used.map(item => item.pitchRangeSt)), loudnessDb: median(used.map(item => item.loudnessDb)) };
+  }
+
   const answers = groups.map((answer, answerIndex) => {
     const prosody = answer.turnIndexes.flatMap(index => prosodyFor(prosodyMap, index));
     const pauses = prosody.flatMap(item => item.pauses ?? []);
+    // Each recogniser segment is measured alone, so the silence between two segments of one answer is a pause no
+    // segment saw. It counts unless the call was paused through it or an interviewer spoke in it.
+    const ordered = prosody.filter(item => finite(item.startMs) && finite(item.endMs)).sort((a, b) => a.startMs - b.startMs);
+    for (let i = 1; i < ordered.length; i += 1) {
+      const fromMs = ordered[i - 1].endMs;
+      const toMs = ordered[i].startMs;
+      if (toMs - fromMs < PAUSE_MIN_MS) continue;
+      if (pausedOverlapMs(pauseSpans, fromMs, toMs) > 0) continue;
+      if (entries.some(other => other?.speaker === 'interviewer' && other.channel !== 'chat' && finite(other.startMs) && finite(other.endMs) && other.startMs < toMs && other.endMs > fromMs)) continue;
+      pauses.push({ startMs: fromMs, endMs: toMs });
+    }
     const speechMs = prosody.reduce((sum, item) => sum + (finite(item.speechMs) ? item.speechMs : 0), 0);
     const durationMs = Math.max(0, answer.endMs - answer.startMs);
+    // Pace is over the time the candidate was on the clock: wall clock less any paused time. The speech-frame rate
+    // (articulationWpm) leaves out every silence, so it reads faster and is a separate figure.
+    const activeMs = Math.max(0, durationMs - pausedOverlapMs(pauseSpans, answer.startMs, answer.endMs));
     const pitchRangeSt = median(prosody.map(item => item.pitchRangeSt));
-    const base = answer.voicedOnly ? voicedBaselineSnapshot : baselineSnapshot;
+    const base = answer.voicedOnly ? (voicedBaselineSnapshot ?? voicedFallback) : baselineSnapshot;
     const prior = answer.turnIndexes[0] - 1;
     // The question is the contiguous run of spoken interviewer entries just before the answer. A back-channel
     // laid over it (an overlay) ends early and is not the question, so the latest end of the run counts, and paused time does not.
@@ -156,8 +204,10 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
       durationMs,
       wordCount: answer.words,
       speechMs,
-      wordsPerMinute: round(speechMs > 0 ? (answer.words / speechMs) * 60000 : (durationMs > 0 ? (answer.words / durationMs) * 60000 : 0), 1),
-      fastest20sWindowWpm: fastestWindowWpm(answer.words, answer.startMs, answer.endMs),
+      activeMs,
+      wordsPerMinute: round(activeMs > 0 ? (answer.words / activeMs) * 60000 : 0, 1),
+      articulationWpm: round(speechMs > 0 ? (answer.words / speechMs) * 60000 : 0, 1),
+      fastest20sWindowWpm: fastestWindowWpm(answer.words, 0, activeMs),
       pauseCount: pauses.length,
       pausesOver1s: pauses.filter(pause => pause.endMs - pause.startMs > 1000).length,
       pausesOver2s: pauses.filter(pause => pause.endMs - pause.startMs > 2000).length,
@@ -189,15 +239,20 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
 
   // Answers the interviewer had to stop: the candidate's line carries the cut-in, spoken live or by voice.
   const interviewerCutIns = [];
+  // A cut that fell in a gap (cutWhileSpeaking false) stopped nothing the candidate was saying: it is not a cut-in.
+  // cutInReason is the reason the interviewer gave, counted per reason; a cut without one is counted as unspecified.
+  const interviewerCutInsByReason = {};
   entries.forEach((entry, index) => {
-    if (entry?.speaker === 'candidate' && entry.interrupted === true && entry.cutOffBy === 'interviewer') {
-      interviewerCutIns.push({ turnIndex: index, atMs: entry.endMs ?? entry.startMs });
+    if (entry?.speaker === 'candidate' && entry.interrupted === true && entry.cutOffBy === 'interviewer' && entry.cutWhileSpeaking !== false) {
+      const reason = typeof entry.cutInReason === 'string' && entry.cutInReason ? entry.cutInReason : 'unspecified';
+      interviewerCutIns.push({ turnIndex: index, atMs: entry.endMs ?? entry.startMs, reason });
+      interviewerCutInsByReason[reason] = (interviewerCutInsByReason[reason] ?? 0) + 1;
     }
   });
 
-  const candidateTalkMs = answers.reduce((sum, answer) => sum + (answer.speechMs > 0 ? answer.speechMs : answer.durationMs), 0);
-  const interviewerTalkMs = entries.filter(entry => entry.speaker === 'interviewer' && entry.channel !== 'chat')
-    .reduce((sum, entry) => sum + Math.max(0, (entry.endMs ?? 0) - (entry.startMs ?? 0)), 0);
+  // Both sides on wall-clock spans: overlapping speech on one side counts once and paused time counts for neither.
+  const candidateTalkMs = mergedSpanMs(entries.filter(entry => entry?.speaker === 'candidate' && !isTypedLine(entry) && !entry.acknowledgement), pauseSpans);
+  const interviewerTalkMs = mergedSpanMs(entries.filter(entry => entry?.speaker === 'interviewer' && entry.channel !== 'chat'), pauseSpans);
   const totalTalkMs = candidateTalkMs + interviewerTalkMs;
 
   return {
@@ -215,6 +270,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     interruptionCount: candidateInterruptions.length,
     interviewerCutIns,
     interviewerCutInCount: interviewerCutIns.length,
+    interviewerCutInsByReason,
     responseLatencyMs: median(answers.map(answer => answer.responseLatencyMs)),
     longAnswerCount: answers.filter(answer => answer.longAnswer).length,
     pausesOver1s: answers.reduce((sum, answer) => sum + answer.pausesOver1s, 0),

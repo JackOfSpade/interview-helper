@@ -174,7 +174,7 @@ export default [
       for (let i = 0; i < 4; i += 1) baseline.add({ speechMs: 950, wordsPerMinute: 160, pauseCount: 0, pauses: [], longestPauseMs: 0, pitchRangeSt: 6, loudnessDb: -20 });
       const breaths = Array.from({ length: 6 }, (_, i) => ({ startMs: i * 15000, endMs: i * 15000 + 320 + i * 15 }));
       const answer = baseline.relative({ speechMs: 100000, wordsPerMinute: 160, pauseCount: 6, pauses: breaths, pitchRangeSt: 6, loudnessDb: -20 });
-      assert.equal(answer.pauseRatio, 1);
+      assert.equal(answer.pauseRatio, null, 'breaths are not long pauses, so there is no pause ratio to note');
       // Real hesitation does show: five 1.5 s gaps in a minute of speech.
       const halting = Array.from({ length: 5 }, (_, i) => ({ startMs: i * 10000, endMs: i * 10000 + 1500 }));
       assert(baseline.relative({ speechMs: 60000, wordsPerMinute: 120, pauses: halting, pauseCount: 5 }).pauseRatio >= 1.6);
@@ -198,13 +198,13 @@ export default [
       assert.equal(snapshot.loudnessDb, -20);
       assert.equal(snapshot.arousal, 0.5);
       // 15 s of speech with two long (>= 700 ms) pauses is 8 per minute. The baseline turns give only a count (one
-      // pause in a second of speech, counted over the 15 s floor: 4 per minute): (1 + 8) / (1 + 4).
+      // pause in a second of speech, counted over the 15 s floor: 4 per minute): (1 + 8) / (2 + 4).
       const relative = baseline.relative(
         { speechMs: 15000, wordsPerMinute: 150, pauseCount: 3, pauses: [{ startMs: 0, endMs: 800 }, { startMs: 2000, endMs: 2400 }, { startMs: 5000, endMs: 6000 }], pitchRangeSt: 6, loudnessDb: -18, restarts: 1 },
         { arousal: 0.6, dominance: 0.4, valence: 0.5 },
       );
       assert.equal(relative.rateRatio, 1.25);
-      assert.equal(relative.pauseRatio, 1.8);
+      assert.equal(relative.pauseRatio, 1.5);
       assert.equal(relative.pitchRangeDeltaSt, -2);
       assert.equal(relative.loudnessDeltaDb, 2);
       assert.equal(relative.arousalDelta, 0.1);
@@ -419,7 +419,7 @@ export default [
       assert.equal(metrics.typedAnswerCount, 1);
       assert.deepEqual(metrics.typedAnswers, [{ startMs: 240000, endMs: 245000, wordCount: 3, text: 'typed note here' }]);
       const [first, second, third] = metrics.answers;
-      assert.equal(first.wordsPerMinute, 20, '10 synthetic words over 30 s of speech');
+      assert.equal(first.wordsPerMinute, 16.7, '10 synthetic words over the 36 s the answer ran (wall clock, pauses included)');
       assert.equal(first.fastest20sWindowWpm, 18);
       assert.equal(first.pausesOver1s, 2);
       assert.equal(first.pausesOver2s, 1);
@@ -428,16 +428,17 @@ export default [
       assert.equal(first.longAnswer, false);
       assert.equal(first.pitchRangeDeltaSt, 2);
       assert.equal(first.loudnessDeltaDb, 0);
-      assert.equal(second.wordsPerMinute, 3);
+      assert.equal(second.wordsPerMinute, 1.6, '5 words over 185 s of answer');
+      assert.equal(second.articulationWpm, 3, 'the voiced-time rate is kept apart');
       assert.equal(second.longAnswer, true, '185 s is over the two minute flag');
       assert.equal(second.responseLatencyMs, 2000);
       assert.equal(second.pausesOver1s, 1);
       assert.equal(second.pausesOver2s, 0);
-      assert.equal(third.wordsPerMinute, 90);
+      assert.equal(third.wordsPerMinute, 72);
       assert.equal(third.fastest20sWindowWpm, 72, 'a short answer is one window');
       assert.equal(third.responseLatencyMs, 0, 'negative latency clamps to zero');
-      assert.equal(metrics.talkRatio, 0.937);
-      assert.equal(metrics.candidateTalkMs, 134000);
+      assert.equal(metrics.talkRatio, 0.962);
+      assert.equal(metrics.candidateTalkMs, 226000, 'spoken answer spans, on the same wall-clock basis as the interviewer');
       assert.equal(metrics.interviewerTalkMs, 9000);
       assert.deepEqual(metrics.candidateInterruptions, [{
         turnIndex: 6, atMs: 253000, interviewerFirstIndex: 5, interviewerEndMs: 254000, overlapMs: 1000, beforeQuestionFinished: true,
@@ -504,7 +505,7 @@ export default [
       assert.equal(generated.pausesOver1s, 1);
       assert.equal(metrics.responseLatencyMs, 4000, 'the median takes both answers');
       assert.equal(metrics.pausesOver1s, 1);
-      assert.equal(metrics.candidateTalkMs, 9000, 'both answers count as talk time');
+      assert.equal(metrics.candidateTalkMs, 11000, 'both answers count as talk time, by their spans like the interviewer\'s');
     },
   },
   {
@@ -786,7 +787,7 @@ export default [
       const tones = [];
       const toneCalls = [];
       const ear = createPracticeEar({
-        candidatePath: file, minSpeechMs: 5000,
+        candidatePath: file, minSpeechMs: 5000, voicedMinSpeechMs: 5000,
         inference: async () => ({ endOfTurn: async () => 0.9, tone: async chunk => { toneCalls.push(chunk.length); return { arousal: 0.5, dominance: 0.5, valence: 0.5 }; }, close() {} }),
         onToneSample: sample => tones.push(sample),
       });
@@ -907,12 +908,13 @@ export default [
       const answer = metrics.answers[0];
       assert.equal(answer.speechMs, 5000, 'talk time from the measured prosody');
       assert.equal(answer.wordCount, 16);
-      assert.equal(answer.wordsPerMinute, Math.round((16 / 5000) * 60000 * 10) / 10);
+      assert.equal(answer.wordsPerMinute, 160, 'pace over the 6 s the line ran');
+      assert.equal(answer.articulationWpm, 192, 'the rate over its 5 s of voiced time');
       assert.equal(answer.pausesOver1s, 1);
       assert.equal(answer.responseLatencyMs, 2000, 'latency from transcript times');
       assert.equal(answer.pitchRangeDeltaSt, 2, 'compared with the synthetic baseline, not the microphone one');
       assert.equal(answer.loudnessDeltaDb, 2);
-      assert.equal(metrics.candidateTalkMs, 5000);
+      assert.equal(metrics.candidateTalkMs, 6000, 'the span of the line, the same basis as the interviewer');
       const voicedOnly = callMetrics({ transcript: transcript.slice(0, 2) });
       assert.equal(voicedOnly.typedOnly, false, 'a call answered only by voice is not typed-only');
       assert.equal(voicedOnly.typedAnswerCount, 0);
@@ -946,6 +948,90 @@ export default [
       ];
       const byEntry = prosodyByEntry(transcript, [{ startMs: 1000, endMs: 5000, speechMs: 3000 }, { startMs: 5900, endMs: 6100, speechMs: 100 }]);
       assert.deepEqual(Object.keys(byEntry), ['0']);
+    },
+  },
+
+  {
+    name: 'call metrics: pace is over wall-clock answer time less paused time; articulation rate is its own field',
+    run() {
+      const words = Array.from({ length: 100 }, () => 'word').join(' ');
+      const transcript = [{ speaker: 'candidate', text: words, startMs: 0, endMs: 60000 }];
+      const prosody = [{ startMs: 0, endMs: 30000, speechMs: 30000 }, { startMs: 31000, endMs: 60000, speechMs: 20000 }];
+      const plain = callMetrics({ transcript, candidateProsody: prosody }).answers[0];
+      assert.equal(plain.wordsPerMinute, 100);
+      assert.equal(plain.articulationWpm, 120);
+      const paused = callMetrics({ transcript, candidateProsody: prosody, pauseSpans: [{ startMs: 10000, endMs: 30000 }] }).answers[0];
+      assert.equal(paused.wordsPerMinute, 150);
+      assert.ok(paused.fastest20sWindowWpm >= paused.wordsPerMinute);
+    },
+  },
+
+  {
+    name: 'call metrics: talk ratio uses wall-clock spans for both sides, merged and without paused time',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'q', startMs: 0, endMs: 10000 },
+        { speaker: 'candidate', text: 'a b c', startMs: 10000, endMs: 30000 },
+        { speaker: 'candidate', text: 'd', startMs: 20000, endMs: 40000 },
+      ];
+      const metrics = callMetrics({ transcript, candidateProsody: [{ startMs: 10000, endMs: 12000, speechMs: 500 }] });
+      assert.equal(metrics.candidateTalkMs, 30000);
+      assert.equal(metrics.interviewerTalkMs, 10000);
+      assert.equal(metrics.talkRatio, 0.75);
+    },
+  },
+
+  {
+    name: 'call metrics: gaps between recogniser segments are pauses, except across a paused span or interviewer speech',
+    run() {
+      const transcript = [
+        { speaker: 'candidate', text: 'one two three four', startMs: 0, endMs: 20000 },
+        { speaker: 'interviewer', text: 'mm', startMs: 9000, endMs: 9500, overlay: true },
+      ];
+      const prosody = [
+        { startMs: 0, endMs: 3000, speechMs: 3000, pauses: [] },
+        { startMs: 3600, endMs: 6000, speechMs: 2400, pauses: [] },
+        { startMs: 6100, endMs: 8000, speechMs: 1900, pauses: [] },
+        { startMs: 10000, endMs: 12000, speechMs: 2000, pauses: [] },
+        { startMs: 13000, endMs: 15000, speechMs: 2000, pauses: [] },
+      ];
+      const answer = callMetrics({ transcript, candidateProsody: prosody, pauseSpans: [{ startMs: 12500, endMs: 12900 }] }).answers[0];
+      // 3.0-3.6 s counts; 6.0-6.1 s is too short; 8-10 s holds the interviewer; 12-13 s holds a paused span.
+      assert.equal(answer.pauseCount, 1);
+      assert.equal(answer.longestPauseMs, 600);
+    },
+  },
+
+  {
+    name: 'call metrics: cut-ins are counted by reason and a cut that fell in a gap is not one',
+    run() {
+      const cut = extra => ({ speaker: 'candidate', text: 'x', channel: 'chat', voiced: true, interrupted: true, cutOffBy: 'interviewer', startMs: 0, endMs: 1000, ...extra });
+      const metrics = callMetrics({ transcript: [cut({ cutInReason: 'rambling' }), cut({ cutInReason: 'rambling' }), cut({ cutInReason: 'off-topic' }), cut({ cutWhileSpeaking: false, cutInReason: 'rambling' }), cut({})] });
+      assert.equal(metrics.interviewerCutInCount, 4);
+      assert.deepEqual(metrics.interviewerCutInsByReason, { rambling: 2, 'off-topic': 1, unspecified: 1 });
+    },
+  },
+
+  {
+    name: 'call metrics: a voiced-only answer with no synthetic baseline is compared with its own voice, not left null',
+    run() {
+      const transcript = [{ speaker: 'candidate', text: 'a b', channel: 'chat', voiced: true, startMs: 0, endMs: 40000 }];
+      const prosody = [{ startMs: 0, endMs: 20000, speechMs: 20000, pitchRangeSt: 10, loudnessDb: -20 }, { startMs: 25000, endMs: 40000, speechMs: 15000, pitchRangeSt: 6, loudnessDb: -22 }];
+      const answer = callMetrics({ transcript, candidateProsody: prosody }).answers[0];
+      assert.equal(typeof answer.pitchRangeDeltaSt, 'number');
+      assert.equal(typeof answer.loudnessDeltaDb, 'number');
+    },
+  },
+
+  {
+    name: 'voice baseline: a single long pause never reads as more pauses, against a zero-pause baseline either',
+    run() {
+      const baseline = createVoiceBaseline({ minSpeechMs: 1000 });
+      baseline.add({ speechMs: 5000, wordsPerMinute: 150, pauses: [] });
+      const one = baseline.relative({ speechMs: 40000, wordsPerMinute: 150, pauses: [{ startMs: 0, endMs: 900 }] });
+      assert.equal(one.pauseRatio, null);
+      const two = baseline.relative({ speechMs: 40000, wordsPerMinute: 150, pauses: [{ startMs: 0, endMs: 900 }, { startMs: 5000, endMs: 5900 }] });
+      assert.ok(two.pauseRatio >= VOICE_NOTE_THRESHOLDS.pauseRatio);
     },
   },
 

@@ -1044,7 +1044,7 @@ test('injected: a cut-in already stale when it is ready is dropped, never held t
     return found ? { decision: 'cut-in', who: found[1], reason: found[2], when: found[3] === 'sentence-end' ? 'sentence-end' : 'now' } : { decision: 'listen', who: null, reason: null };
   };
   const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: watchParse,
-    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInYieldMs: 2500 } });
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 3, cutInStaleMs: -1, cutInStaleHardWords: 1000, cutInYieldMs: 2500 } });
   await greet(rig);
   const text = 'We moved every job onto one queue and then we sharded it by region. After that the retries became cheap.';
   rig.engine.typed(text, { chatId: 'm1' });
