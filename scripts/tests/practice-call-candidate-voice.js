@@ -611,6 +611,54 @@ test('injected: after a line heard whole the first look waits for the recogniser
   assert.equal(other.rig.sessions.opener.calls.length, 1, 'the wait is bounded');
 });
 
+test('injected: a listen on a line whose last words never settle is looked at again once the candidate stays quiet', async () => {
+  // As in call-mwr9jx18-o6dzw5: muted, the recogniser kept "I'd ask for a" open and the interviewer waited for more.
+  const { rig, voice } = await injectRig();
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await flush();
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(1300);
+  assert.equal(rig.sessions.opener.calls.length, 1, 'the bounded wait ends and the look runs on the open words');
+  rig.sessions.main.answer('<listen/>');
+  await flush();
+  await flush();
+  assert.equal(rig.engine.state().phase, 'listening');
+  await rig.clock.advance(3000);
+  assert.equal(rig.of('quiet-relook').length, 1, 'the open words get one more look');
+  assert.equal(rig.sessions.opener.calls.length, 2);
+  assert(lastOpener(rig).includes('The candidate has been quiet for'), lastOpener(rig));
+});
+
+test('injected: a listen on a line whose words settled waits for the candidate, with no quiet look', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.typed('I rebuilt the billing service in Go.', { chatId: 'm1' });
+  await flush();
+  const line = voice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'I rebuilt the billing service in Go.');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  micSettles(rig, 'I rebuilt the billing service in Go.');
+  await flush();
+  rig.h.inject(line.utteranceId, 'finished', 3000);
+  await flush();
+  await rig.clock.advance(700);
+  assert.equal(rig.sessions.opener.calls.length, 1);
+  rig.sessions.main.answer('<listen/>');
+  await flush();
+  await flush();
+  assert.equal(rig.engine.state().phase, 'listening');
+  await rig.clock.advance(4000);
+  assert.equal(rig.of('quiet-relook').length, 0);
+});
+
 test('injected: the end of the AI voice line is a sure finish, however the turn model scores it', async () => {
   const ear = { ...voicedEar(), endOfTurn: async () => 0.05 };
   const { rig, voice } = await injectRig({ ear });

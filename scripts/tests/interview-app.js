@@ -206,6 +206,12 @@ const tests = [
       assert.equal(config.mac.entitlements, 'build/entitlements.interview.plist'); assert.equal(config.mac.entitlementsInherit, 'build/entitlements.interview.plist');
       assert.deepEqual(config.mac.extraResources.map(item => item.to), ['practice-audio/Practice Audio Helper.app'], 'only the practice-audio helper ships');
       assert.deepEqual(Object.keys(config.mac.extendInfo).sort(), ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription']);
+      // Under the hardened runtime a usage string is not enough: without the entitlement macOS refuses the microphone
+      // (the helper's request is charged to the app) without ever asking.
+      const entitlements = read('build/entitlements.interview.plist');
+      for (const key of ['com.apple.security.device.audio-input', 'com.apple.security.device.camera']) {
+        assert.match(entitlements, new RegExp(`<key>${key.replaceAll('.', '\\.')}</key>\\s*<true/>`, 'u'), key);
+      }
       assert.doesNotMatch(read('scripts/build-macos.mjs'), /interview-audio|InterviewAudioHelper/u);
       assert.equal(pkg.main, 'dist-electron-interview/main.cjs');
       const viteConfig = read('vite.interview.config.js');

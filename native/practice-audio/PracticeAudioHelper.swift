@@ -782,13 +782,11 @@ final class MicProcessor: @unchecked Sendable {
         if mixing, let samples = mono.floatChannelData?[0] {
             mixInjected(into: samples, frames: frames, rate: rate, startSec: startSec)
         }
-        if muted, !mixing {
-            if vad.speaking { emitVad(false, atSec: startSec); vad.reset() }
-            analyzerNeedsStart = true
-            alignWav(to: timelineSec, samples: nil)
-            clock.publish(endSec: timelineSec, arrival: arrival)
-            return
-        }
+        // Muted with nothing injected: the zeroed signal still goes through to the analyzer. The recogniser only
+        // closes a segment once it hears the silence after it, so stopping the feed here left the last sentence of an
+        // AI-voice line unfinished until the mic was unmuted or the next line played, and the interviewer waited on it
+        // (found 2026-11-21). Zeros never trip the VAD, and transcripts outside an injected line are dropped while muted.
+        if muted, !mixing, vad.speaking { emitVad(false, atSec: startSec); vad.reset() }
         // Level and VAD in ~10 ms windows.
         if let samples = mono.floatChannelData?[0] {
             let windowFrames = max(1, Int(rate * PracticeVadTuning.windowMs / 1000))
@@ -1348,7 +1346,8 @@ final class SilentMic: @unchecked Sendable {
             }
         }
         parentTimer = timer; timer.resume()
-        writer.send(["type": "status", "state": "ready", "inject": true])
+        // microphone false: access was refused and a silent signal stands in, so the call can say so.
+        writer.send(["type": "status", "state": "ready", "inject": true, "microphone": hasMicrophone])
     }
 
     /// Speech recognition set-up, shared by both paths: on-device assets are checked and the

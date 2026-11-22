@@ -518,6 +518,12 @@ export default function InCall({ state, api }) {
         </section>}
       </div>}
     </div>
+    {/* macOS refused the microphone: the interviewer cannot hear the candidate, so the call says so the way a meeting app would. */}
+    {state?.microphoneUnavailable && <div role="alert" data-mic-unavailable="true" className="mx-auto mb-1 flex max-w-[640px] shrink-0 items-center gap-3 rounded-lg bg-[#3c4043] px-4 py-2 text-[13px] text-[#e8eaed]">
+      <MicOff size={16} aria-hidden="true" className="shrink-0 text-[#f28b82]" />
+      <span className="min-w-0 flex-1">Your microphone isn't available, so no one can hear you. Allow microphone access in System Settings, then rejoin.</span>
+      {typeof api?.openMicrophoneSettings === 'function' && <button type="button" onClick={() => { api.openMicrophoneSettings(); }} className="shrink-0 rounded-md px-2 py-1 font-medium text-[#8ab4f8] hover:bg-white/10">Open settings</button>}
+    </div>}
     <footer className="grid h-20 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 px-6">
       <p className="flex min-w-0 items-center gap-3 text-sm font-medium text-[#e8eaed]">
         <span role="timer" aria-label="Call timer" className="tabular-nums">{formatTime(state?.elapsedMs)}</span>

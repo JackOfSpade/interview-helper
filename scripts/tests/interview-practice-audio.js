@@ -595,6 +595,11 @@ export default [
       assert.equal(h.helper.canInject(), true);
       assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true });
       assert.deepEqual(h.events[0], { type: 'status', state: 'preparing' });
+      // A helper running on silence (macOS refused the microphone) says so on ready; anything but false is a microphone.
+      h.send({ type: 'status', state: 'ready', inject: true, microphone: false });
+      assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true, microphone: false });
+      h.send({ type: 'status', state: 'ready', inject: true, microphone: true });
+      assert.deepEqual(h.events.at(-1), { type: 'status', state: 'ready', inject: true });
       h.helper.stop();
       assert.equal(h.helper.canInject(), false);
     },

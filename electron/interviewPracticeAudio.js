@@ -42,8 +42,9 @@ function validateHelperEvent(value) {
   switch (value.type) {
     case 'status':
       // `inject: true` on ready: the helper can mix a line into the microphone signal. Anything else is no capability.
+      // `microphone: false` on ready: macOS refused the microphone and the helper runs on silence.
       return value.state === 'preparing' || value.state === 'ready'
-        ? { type: 'status', state: value.state, ...(value.state === 'ready' && value.inject === true ? { inject: true } : {}) } : null;
+        ? { type: 'status', state: value.state, ...(value.state === 'ready' && value.inject === true ? { inject: true } : {}), ...(value.state === 'ready' && value.microphone === false ? { microphone: false } : {}) } : null;
     case 'level':
       return typeof value.rms === 'number' && value.rms >= 0 && value.rms <= 1 && isMs(value.atMs)
         ? { type: 'level', rms: value.rms, atMs: value.atMs } : null;

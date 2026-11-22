@@ -168,6 +168,20 @@ export const presentingTests = [
     },
   },
   {
+    name: 'practice call render: a refused microphone is said on the call, with a way to the settings',
+    async run() {
+      const bundle = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, InCall } = bundle.module;
+        const html = (state, api = {}) => renderToStaticMarkup(React.createElement(InCall, { state, api }));
+        assert(!html(PRESENT_STATE).includes('data-mic-unavailable'), 'nothing shows while the microphone is heard');
+        const refused = html({ ...PRESENT_STATE, microphoneUnavailable: true }, { openMicrophoneSettings: () => true });
+        assert(refused.includes('data-mic-unavailable') && refused.includes('no one can hear you') && refused.includes('Open settings'), refused);
+        assert(!/Interview Helper|practice/iu.test(refused.match(/data-mic-unavailable[^]*?<\/div>/u)[0]), 'the notice never names the app');
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
     name: 'practice call render: the strip holds one to five interviewers',
     async run() {
       const bundle = await loadServerBundle();

@@ -316,7 +316,7 @@ export function stampInjectedLines(transcript, spans) {
 
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, level: 0, speaking: null, candidateSpeaking: false,
+    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, microphoneUnavailable: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '' },
@@ -960,6 +960,9 @@ export function createPracticeCallService(deps = {}) {
     // The recording's clock starts when capture starts, a few seconds after the helper is
     // launched. The newest helper time and when it arrived tell where that clock is now.
     if (Number.isFinite(event?.atMs)) self.helperClock = { atMs: event.atMs, at: clock.now() };
+    // The helper runs on silence when macOS refused the microphone: the call says so instead of failing quietly
+    // (found 2026-11-21: every call had run unheard and nothing on screen told the candidate).
+    if (event?.type === 'status' && event.state === 'ready') { state.microphoneUnavailable = event.microphone === false; publish(); }
     if (event?.type === 'level') { state.level = Math.max(0, Math.min(1, Number(event.rms) || 0)); publish(); }
     if (event?.type === 'vad') {
       self.candidateVad = !!event.speaking;

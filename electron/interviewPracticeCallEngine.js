@@ -572,7 +572,10 @@ export function createPracticeCallEngine({
 
   /** After an unfinished verdict: one more look once the candidate has been quiet quietRelookMs from the vad end. */
   function armQuietRelook() {
-    if (quietRelookUsed || injectTurn || !(th.quietRelookMs > 0)) return; // an injected line is known to be over: nothing to wait out
+    // An injected line heard whole is known to be over: nothing to wait out, unless the recogniser never settled its last
+    // words, which leaves the look on a cut-off sentence that only a later look can see past (found 2026-11-21: with
+    // the mic muted the final never came, and the interviewer waited until the wand was pressed again).
+    if (quietRelookUsed || (injectTurn && newestSegmentFinal()) || !(th.quietRelookMs > 0)) return;
     const since = Math.max(0, now() - (toClock(lastVadEndMs) ?? now()));
     arm('quietRelook', Math.max(th.quietRelookMinGapMs, th.quietRelookMs - since), onQuietRelook);
   }

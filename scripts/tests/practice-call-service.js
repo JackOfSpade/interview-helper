@@ -1855,6 +1855,23 @@ test('the interviewer playing lights the speaking marker and candidate voice act
   assert.equal(service.getState().speaking, 'candidate');
 });
 
+test('a helper running without the microphone is shown on the call; one with the microphone is not', async () => {
+  let helperEvent;
+  const { service } = await liveCall({ deps: {
+    helperFactory: ({ onEvent }) => {
+      helperEvent = onEvent;
+      return { start: async () => ({ ok: true }), play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, stop: async () => { onEvent({ type: 'recording', state: 'closed' }); } };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.equal(service.getState().microphoneUnavailable, false);
+  helperEvent({ type: 'status', state: 'ready', inject: true, microphone: false });
+  assert.equal(service.getState().microphoneUnavailable, true, 'macOS refused the microphone');
+  helperEvent({ type: 'status', state: 'ready', inject: true });
+  assert.equal(service.getState().microphoneUnavailable, false);
+});
+
 test('the candidate tile lights for their microphone and for a line in their AI voice, even over the interviewer', async () => {
   let helperEvent;
   const { service, engine } = await liveCall({ deps: {

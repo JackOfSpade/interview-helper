@@ -119,6 +119,7 @@ export default function PracticeCallApp() {
       setTyping: value => invoke('setTyping', value),
       setPaused: value => invoke('setPaused', value),
       updatePad: text => invoke('updatePad', text),
+      openMicrophoneSettings: () => invoke('openMicrophoneSettings'),
       // Testing aid: the button shows only when the bridge has the call.
       ...(typeof readApi()?.draftAnswer === 'function' ? { draftAnswer: () => invoke('draftAnswer') } : {}),
     }} />;
