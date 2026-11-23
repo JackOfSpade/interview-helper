@@ -1476,4 +1476,236 @@ export const gapTests = [
   },
 ];
 
-export default [...baseTests, ...overlayTests, ...cutInTests, ...gapTests];
+// A colleague taking the floor from another interviewer waits for the quiet it asked for (setSpeaker afterQuietMs),
+// less the quiet already released after the last speech. At 1000 Hz a 20 ms level window is 20 samples; speech is 100, quiet is 1.
+const LOUD = 100;
+const QUIET = 1;
+const handoverTests = [
+  {
+    name: 'panel voice hand-over: the quiet between two speakers is the asked quiet minus the trailing quiet already there',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h1' });
+      const log = collect(stream);
+      const spoken = []; const heard = [];
+      stream.onSpeaker(event => spoken.push(event));
+      stream.onWords(list => heard.push(...list));
+      stream.sendText('One.'); stream.setSpeaker('B', { afterQuietMs: 500 }); stream.sendText('Two.');
+      made[1].push(flat(60, 7)); made[1].say([{ word: 'Two', startMs: 10, endMs: 50 }]); made[1].end();
+      made[0].push(flat(100, LOUD)); made[0].push(flat(100, QUIET)); made[0].end();
+      await stream.finish();
+      const out = samples(log.all);
+      // 100 of speech, 100 of the segment's own trailing quiet, then only the 400 that are still missing, then the colleague.
+      assert.equal(out.length, 100 + 100 + 400 + 60);
+      assert.ok(hasOnly(out, 0, 100, LOUD) && hasOnly(out, 100, 200, QUIET) && hasOnly(out, 200, 600, 0) && hasOnly(out, 600, 660, 7));
+      assert.deepEqual(spoken, [{ speakerId: 'A', startMs: 0 }, { speakerId: null, startMs: 200 }, { speakerId: 'B', startMs: 600 }], 'nobody is shown through the added silence, and the tile rings at the first audio after it');
+      assert.deepEqual(heard.map(w => [w.word, w.startMs, w.endMs, w.speakerId]), [['Two', 610, 650, 'B']], 'word times shift with the silence');
+    },
+  },
+  {
+    name: 'panel voice hand-over: enough trailing quiet already means no silence is added; a loud window resets the count',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h2' });
+      const log = collect(stream);
+      stream.sendText('One.'); stream.setSpeaker('B', { afterQuietMs: 500 }); stream.sendText('Two.');
+      made[1].push(flat(40, 7)); made[1].end();
+      made[0].push(flat(100, LOUD)); made[0].push(flat(600, QUIET)); made[0].end();
+      await stream.finish();
+      assert.equal(samples(log.all).length, 100 + 600 + 40);
+      // Quiet in the middle of the first speaker's speech does not count: only what follows the last speech does.
+      const second = panel.open({ utteranceId: 'h2b' });
+      const log2 = collect(second);
+      second.sendText('One.'); second.setSpeaker('B', { afterQuietMs: 500 }); second.sendText('Two.');
+      made[3].push(flat(40, 7)); made[3].end();
+      made[2].push(flat(300, QUIET)); made[2].push(flat(100, LOUD)); made[2].push(flat(100, QUIET)); made[2].end();
+      await second.finish();
+      assert.equal(samples(log2.all).length, 300 + 100 + 100 + 400 + 40);
+    },
+  },
+  {
+    name: 'panel voice hand-over: nothing is added before the first speaker has spoken, or for a cut-in',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h3' });
+      const log = collect(stream);
+      // The lead never speaks: the reply starts with a colleague.
+      stream.setSpeaker('B', { afterQuietMs: 800 }); stream.sendText('Two.');
+      made[1].push(flat(60, 7)); made[1].end();
+      await stream.finish();
+      assert.equal(samples(log.all).length, 60, 'no one had spoken, so there is no one to wait for');
+      const cut = panel.open({ utteranceId: 'h3b' });
+      const cutLog = collect(cut);
+      cut.sendText('a --'); cut.setSpeaker('B', { cutIn: true, afterQuietMs: 800 }); cut.sendText('b');
+      made[2].push(flat(300, LOUD)); made[2].end();
+      made[3].push(flat(300, 9)); made[3].end();
+      await cut.finish();
+      const plain = panel.open({ utteranceId: 'h3c' });
+      const plainLog = collect(plain);
+      plain.sendText('a --'); plain.setSpeaker('B', { cutIn: true }); plain.sendText('b');
+      made[4].push(flat(300, LOUD)); made[4].end();
+      made[5].push(flat(300, 9)); made[5].end();
+      await plain.finish();
+      assert.equal(samples(cutLog.all).length, samples(plainLog.all).length, 'a cut-in overlaps: it never waits');
+    },
+  },
+  {
+    name: 'panel voice hand-over: a gap before the switch, or the colleague\'s own gap, counts toward the quiet and is never stacked on it',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h4' });
+      const log = collect(stream);
+      stream.sendText('One.'); stream.gap(300); stream.setSpeaker('B', { afterQuietMs: 500 }); stream.sendText('Two.');
+      made[0].push(flat(100, LOUD)); made[0].end();
+      made[1].push(flat(40, 7)); made[1].end();
+      await stream.finish();
+      let out = samples(log.all);
+      assert.equal(out.length, 100 + 300 + 200 + 40, 'a 300 ms gap plus the 200 still missing is 500 of quiet, not 800');
+      assert.ok(hasOnly(out, 100, 600, 0) && hasOnly(out, 600, 640, 7));
+      const own = panel.open({ utteranceId: 'h4b' });
+      const ownLog = collect(own);
+      own.sendText('One.'); own.setSpeaker('B', { afterQuietMs: 500 }); own.gap(300); own.sendText('Two.');
+      made[2].push(flat(100, LOUD)); made[2].end();
+      made[3].push(flat(40, 7)); made[3].end();
+      await own.finish();
+      out = samples(ownLog.all);
+      assert.equal(out.length, 100 + 300 + 200 + 40, 'the colleague\'s own gap is emitted first and counts as quiet already released');
+      assert.ok(hasOnly(out, 100, 600, 0) && hasOnly(out, 600, 640, 7));
+      const longer = panel.open({ utteranceId: 'h4c' });
+      const longerLog = collect(longer);
+      longer.sendText('One.'); longer.setSpeaker('B', { afterQuietMs: 500 }); longer.gap(900); longer.sendText('Two.');
+      made[4].push(flat(100, LOUD)); made[4].end();
+      made[5].push(flat(40, 7)); made[5].end();
+      await longer.finish();
+      assert.equal(samples(longerLog.all).length, 100 + 900 + 40, 'a gap longer than the quiet wanted needs nothing more');
+    },
+  },
+  {
+    name: 'panel voice hand-over: a speaker who never spoke causes no pause, and does not pass the quiet on to the next one',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h5' });
+      const log = collect(stream);
+      // B is switched to and away from without a word: A simply carries on, with no pause for a colleague who never spoke.
+      stream.sendText('One.'); stream.setSpeaker('B', { afterQuietMs: 500 }); stream.setSpeaker('A', { afterQuietMs: 500 }); stream.sendText('Again.');
+      made[0].push(flat(100, LOUD)); made[0].end();
+      made[1].push(flat(60, 5)); made[1].end();
+      await stream.finish();
+      assert.equal(samples(log.all).length, 160, 'A to A: no quiet');
+      const three = panel.open({ utteranceId: 'h5b' });
+      const threeLog = collect(three);
+      // B is dropped; C then speaks after A with one quiet, not two.
+      three.sendText('One.'); three.setSpeaker('B', { afterQuietMs: 500 }); three.setSpeaker('C', { afterQuietMs: 500 }); three.sendText('Three.');
+      made[2].push(flat(100, LOUD)); made[2].end();
+      made[3].push(flat(60, 5)); made[3].end();
+      await three.finish();
+      const out = samples(threeLog.all);
+      assert.equal(out.length, 100 + 500 + 60);
+      assert.ok(hasOnly(out, 100, 600, 0) && hasOnly(out, 600, 660, 5));
+    },
+  },
+  {
+    name: 'panel voice hand-over: a segment that was already releasing when its text came gets the quiet before its first audio',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h6' });
+      const log = collect(stream);
+      const spoken = []; const heard = [];
+      stream.onSpeaker(event => spoken.push(event));
+      stream.onWords(list => heard.push(...list));
+      stream.sendText('One.');
+      made[0].push(flat(100, LOUD)); made[0].push(flat(50, QUIET));
+      stream.setSpeaker('B', { afterQuietMs: 300 });
+      made[0].end();
+      await flush();
+      // B is the active segment with nothing said yet; its text arrives later.
+      stream.sendText('Two.');
+      made[1].push(flat(40, 7)); made[1].say([{ word: 'Two', startMs: 0, endMs: 30 }]); made[1].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out.length, 150 + 250 + 40, '300 wanted, 50 of it already there');
+      assert.ok(hasOnly(out, 150, 400, 0) && hasOnly(out, 400, 440, 7));
+      assert.deepEqual(spoken.map(e => [e.speakerId, e.startMs]), [['A', 0], [null, 150], ['B', 400]]);
+      assert.deepEqual(heard.map(w => [w.word, w.startMs, w.speakerId]), [['Two', 400, 'B']]);
+    },
+  },
+  {
+    // A quick reaction by one interviewer, then the reply for another arriving late: the reaction has played out and the
+    // real silence since then was already heard, so only what is still missing of the quiet is added.
+    name: 'panel voice hand-over: real silence already heard after everything released had played out counts toward the quiet',
+    async run() {
+      let nowMs = 1000;
+      const clock = { ...fakeClock(), now: () => nowMs };
+      const { panel, made } = setup({ clock });
+      const stream = panel.open({ utteranceId: 'h8' });
+      const log = collect(stream);
+      const spoken = [];
+      stream.onSpeaker(event => spoken.push(event));
+      stream.sendText('Right.');
+      made[0].push(flat(100, LOUD)); made[0].push(flat(50, QUIET));
+      stream.setSpeaker('B', { afterQuietMs: 500 });
+      made[0].end();
+      await flush();
+      nowMs += 150 + 200; // the 150 ms released have played, then 200 ms of nothing
+      stream.sendText('Two.');
+      made[1].push(flat(40, 7)); made[1].end();
+      await stream.finish();
+      const out = samples(log.all);
+      assert.equal(out.length, 150 + 250 + 40, '500 wanted: 50 of trailing quiet and 200 of real silence are already there');
+      assert.ok(hasOnly(out, 150, 400, 0) && hasOnly(out, 400, 440, 7));
+      assert.deepEqual(spoken.map(e => e.speakerId), ['A', null, 'B']);
+
+      // Long enough ago that the whole quiet has been heard: nothing is added and nobody's tile is cleared.
+      nowMs = 1000;
+      const late = panel.open({ utteranceId: 'h9' });
+      const lateLog = collect(late);
+      const lateSpoken = [];
+      late.onSpeaker(event => lateSpoken.push(event));
+      late.sendText('Right.');
+      made[2].push(flat(100, LOUD));
+      late.setSpeaker('B', { afterQuietMs: 500 });
+      made[2].end();
+      await flush();
+      nowMs += 100 + 2000;
+      late.sendText('Two.');
+      made[3].push(flat(40, 7)); made[3].end();
+      await late.finish();
+      assert.equal(samples(lateLog.all).length, 100 + 40);
+      assert.deepEqual(lateSpoken.map(e => e.speakerId), ['A', 'B']);
+    },
+  },
+  {
+    name: 'panel voice hand-over: a screen-share silence before the switch counts, and the switch back after a cut-in waits',
+    async run() {
+      const { panel, made } = setup();
+      const stream = panel.open({ utteranceId: 'h7' });
+      const log = collect(stream);
+      // The lead's words, a 1.2 s share wait (a gap), then a colleague asking for 500 ms: the wait already covers it.
+      stream.sendText('Sharing.'); stream.gap(1200); stream.setSpeaker('B', { afterQuietMs: 500 }); stream.sendText('Now.');
+      made[0].push(flat(100, LOUD)); made[0].end();
+      made[1].push(flat(40, 7)); made[1].end();
+      await stream.finish();
+      assert.equal(samples(log.all).length, 100 + 1200 + 40);
+      // A cut-in, then a plain switch back to the lead: the lead waits after the interrupter's own trailing quiet.
+      const back = panel.open({ utteranceId: 'h7b' });
+      const backLog = collect(back);
+      back.sendText('a --'); back.setSpeaker('B', { cutIn: true }); back.sendText('b'); back.setSpeaker('A', { afterQuietMs: 400 }); back.sendText('c');
+      made[2].push(flat(300, LOUD)); made[2].end();
+      made[3].push(flat(300, LOUD)); made[3].push(flat(100, QUIET)); made[3].end();
+      made[4].push(flat(50, LOUD)); made[4].end();
+      await back.finish();
+      const total = samples(backLog.all).length;
+      // The plain switch back to A waits 300 more after B's 100 of quiet: more audio than the same call with no quiet asked.
+      const same = panel.open({ utteranceId: 'h7c' });
+      const sameLog = collect(same);
+      same.sendText('a --'); same.setSpeaker('B', { cutIn: true }); same.sendText('b'); same.setSpeaker('A'); same.sendText('c');
+      made[5].push(flat(300, LOUD)); made[5].end();
+      made[6].push(flat(300, LOUD)); made[6].push(flat(100, QUIET)); made[6].end();
+      made[7].push(flat(50, LOUD)); made[7].end();
+      await same.finish();
+      assert.equal(total - samples(sameLog.all).length, 300, 'the lead waits for the 400 asked, 100 of it already quiet');
+    },
+  },
+];
+
+export default [...baseTests, ...overlayTests, ...cutInTests, ...gapTests, ...handoverTests];

@@ -61,6 +61,13 @@ const tests = [
       assert.equal('languages' in withLanguages('', []), false);
       assert(PLAN_SCHEMA.properties.problems.items.required.includes('languages') && !('enum' in PLAN_SCHEMA.properties.problems.items.properties.languages.items), 'no fixed list of languages');
       assert.match(buildPlanPrompt({ ...ctx, brief: { company: 'Acme', role: 'Widget Engineer' }, application: { resume: '', coverLetter: '' } }), /hired for more than one language[^.]*never pick one of them for the candidate/u);
+      // Call call-mwtb4q1v-9xcsen: a one-exercise call spent on the listed C/C++ subject, not the job's main language, and offered only C and C++.
+      const planPrompt = buildPlanPrompt({ ...ctx, brief: { company: 'Acme', role: 'Widget Engineer' }, application: { resume: '', coverLetter: '' } });
+      assert.match(planPrompt, /room for only one or two technical picks, spend them on what the role's work mainly is[^.]*before a subject the listing only lists among its requirements/u);
+      assert.match(planPrompt, /never about the candidate/u);
+      assert.match(planPrompt, /never narrows the languages silently[^]*really tests that language[^]*restricted to it and says so[^]*every language the role is hired for, the one the role's work is mainly done in included and listed first[^]*rather than in one language's syntax/u);
+      assert.match(planPrompt, /written in one main language and partly in others[^.]*is hired for more than one language; a query, shell or markup language the listing only mentions beside them is not one of these/u);
+      assert.match(PLAN_SCHEMA.properties.problems.items.properties.languages.description, /the work is mainly done in first/u);
     },
   },
   {

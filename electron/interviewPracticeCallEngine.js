@@ -55,6 +55,13 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   // acknowledgement still to play, since the pause starts a new voice segment that must connect in time.
   joinFlushLeadMs: 900,
   joinGapMinLeadMs: 900,
+  // The quiet a colleague leaves after another interviewer stops, before speaking (a plain speaker switch inside one reply):
+  // the same two waits the engine itself keeps before answering the candidate (commitMs for a sure end, unsureCommitMs for an
+  // unsure one), measured from the end of the other's speech. Drawn uniformly per switch. In call-mwtb4q1v-9xcsen every hand-over
+  // had only the segment's own 0.18 to 0.38 s of trailing near-silence, which the owner heard as one mind: nobody knows when a
+  // colleague will finish. A cut-in is not given it, an interruption overlaps.
+  handoverQuietMinMs: 1200,
+  handoverQuietMaxMs: 1800,
   // The candidate's voice (a sent chat message spoken on the call). Once this much of a line has been heard, the
   // interviewer is asked whether a real interviewer would cut in, and again every cutInEveryMs after that, while at
   // least cutInMinLeftMs of the line is still to come. A voice that has sent no audio by candidateVoiceStartMs (the
@@ -294,6 +301,7 @@ export function createPracticeCallEngine({
   // spoken line. `open({ utteranceId, text, signal })` → { sampleRate, onAudio, onWords, cancel, done }.
   candidateVoice = null,
   random = Math.random, // seam for tests: the candidate's reaction time before yielding to an interviewer
+  handoverRandom = Math.random, // seam for tests: the quiet between two interviewers (its own seam, so `random` draws stay where tests count on them)
   formatWatch = callPrompt.formatWatchMessage, // seams for tests: the watcher check message and the reading of its decision
   parseWatch = callPrompt.parseWatchDecision,
 }) {
@@ -954,7 +962,7 @@ export function createPracticeCallEngine({
       else if (text.flush) attempt(() => reply.stream.flush?.());
       else if (text.overlay) attempt(() => reply.stream.overlay?.(text.overlay));
       else if (text.gap !== undefined) attempt(() => reply.stream.gap?.(text.gap));
-      else attempt(() => (text.cutIn ? reply.stream.setSpeaker?.(text.speakerId, { cutIn: true }) : reply.stream.setSpeaker?.(text.speakerId)));
+      else attempt(() => reply.stream.setSpeaker?.(text.speakerId, text.options));
     }
     // Only the acknowledgement was waiting: speak it now (see runOpener).
     if (queued.length === 1 && queued[0] === reply.flushAfter) attempt(() => reply.stream.flush?.());
@@ -1040,15 +1048,25 @@ export function createPracticeCallEngine({
     if (!speakers) { reply.dropping = false; return; } // the lead's own tag in a solo call
     reply.dropping = false; // the voice never left the speaker before the dropped segment
     if (id === reply.writer) return;
+    const from = reply.writer;
     reply.writer = id;
     cancelJoinFlush(reply); // the segment that held the first sentence ends here and is voiced whole
     reply.heldTag = ''; // a delivery tag shapes only its own speaker's next words
     reply.segChars = 0;
     reply.openerInSegment = false; // the acknowledgement belongs to the segment that just ended
     // The switch travels with the texts, so it reaches the voice between the same sentences the model wrote it between.
-    // A cut-in flag is passed as a second argument only when set, so a voice that ignores it sees the old call shape.
-    if (reply.gateOpen) attempt(() => (cutIn ? reply.stream.setSpeaker?.(id, { cutIn: true }) : reply.stream.setSpeaker?.(id)));
-    else reply.voiceQueue.push(cutIn ? { speakerId: id, cutIn: true } : { speakerId: id });
+    // The second argument carries the cut-in flag, or for a plain switch the quiet the colleague waits (afterQuietMs); the voice
+    // adds only what is not already there, and nothing when no one has spoken yet. A voice that ignores it plays as before.
+    const options = cutIn ? { cutIn: true } : { afterQuietMs: handoverQuietMs() };
+    if (!cutIn) emit({ type: 'handover', speakerId: id, from: from ?? null, quietMs: options.afterQuietMs });
+    if (reply.gateOpen) attempt(() => reply.stream.setSpeaker?.(id, options));
+    else reply.voiceQueue.push({ speakerId: id, options });
+  }
+
+  /** The quiet a colleague leaves before speaking after another interviewer (handoverQuietMinMs..MaxMs), a whole number of ms. */
+  function handoverQuietMs() {
+    const span = Math.max(0, th.handoverQuietMaxMs - th.handoverQuietMinMs);
+    return Math.round(th.handoverQuietMinMs + clamp(Number(handoverRandom()) || 0, 0, 1) * span);
   }
 
   /** Consecutive parts by the same speaker, as { speakerId, text } segments. */

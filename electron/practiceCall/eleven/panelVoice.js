@@ -205,7 +205,33 @@ export function createPanelVoiceFactory({
         if (lv.n === lv.win) { lv.peak = Math.max(lv.peak, Math.sqrt(lv.sum / lv.n)); lv.sum = 0; lv.n = 0; }
       }
     }
+    // How much quiet has been released since the last speech of the utterance, measured on the same 20 ms windows and
+    // floor as the cut-in logic (a window at or above CUT_IN_SPEECH_FLOOR is speech and resets it). It grows with the
+    // quiet windows of released segment audio and with every emitSilence (a gap, a screen-share wait, a hand-over pause),
+    // so a colleague's wanted quiet (setSpeaker afterQuietMs) is only topped up by what is already there.
+    const qt = { sum: 0, n: 0, win: 0, rate: 0, odd: null };
+    let quietMs = 0;
+    let spokeAny = false; // some released window of this utterance was speech
+    let lastVoiced = null; // the interviewer whose segment last began (had text), so a silent one never makes a pause
+    function closeQuietWindow() {
+      if (!qt.n) return;
+      if (Math.sqrt(qt.sum / qt.n) >= CUT_IN_SPEECH_FLOOR) { quietMs = 0; spokeAny = true; } else quietMs += (qt.n / qt.rate) * 1000;
+      qt.sum = 0; qt.n = 0;
+    }
+    function trackQuiet(rate, buffer) {
+      if (qt.rate !== rate) { closeQuietWindow(); qt.rate = rate; qt.win = Math.max(1, msSamples(rate, CUT_IN_LEVEL_WINDOW_MS)); qt.odd = null; }
+      let data = qt.odd ? Buffer.concat([qt.odd, buffer]) : buffer;
+      qt.odd = null;
+      if (data.length & 1) { qt.odd = Buffer.from(data.subarray(data.length - 1)); data = data.subarray(0, data.length - 1); }
+      for (let i = 0; i < data.length; i += 2) {
+        const v = data.readInt16LE(i);
+        qt.sum += v * v;
+        qt.n += 1;
+        if (qt.n === qt.win) closeQuietWindow();
+      }
+    }
     const commitAudio = (segment, buffer) => {
+      trackQuiet(segment.stream.sampleRate, buffer);
       if (!segment.spoke) {
         segment.spoke = true;
         emit(speakerListeners, { speakerId: segment.speakerId, startMs: emittedMs });
@@ -307,6 +333,7 @@ export function createPanelVoiceFactory({
       return { full: pending, head: pending.subarray(0, start * 2), tail, dropped: pending.length - end * 2, rate };
     }
     function endSegment(segment) {
+      closeQuietWindow(); // the segment's last part window counts as it is: what follows starts a new one
       if (segment.lead) leadScan(segment, true); // an interrupter with no speech at all plays whole
       segment.odd = null; // half a sample cannot be summed or heard
       if (segment.mixHead && segment.mixHead.length) {
@@ -406,6 +433,7 @@ export function createPanelVoiceFactory({
     // Real silence between two separately synthesised segments: zero samples in the normal audio flow
     // (through processMain, so a remark can still mix into it), in small chunks, never one big buffer.
     function emitSilence(rate, ms) {
+      closeQuietWindow();
       let left = msSamples(rate, ms);
       const chunk = Math.max(1, msSamples(rate, SILENCE_CHUNK_MS));
       while (left > 0 && !cancelled) {
@@ -413,10 +441,36 @@ export function createPanelVoiceFactory({
         left -= count;
         emittedMs += pcmDurationMs(count * 2, rate);
         inBytes += count * 2;
+        quietMs += pcmDurationMs(count * 2, rate);
         processMain(Buffer.alloc(count * 2));
       }
     }
     const silenceRate = () => [...segments.slice(0, active)].reverse().find(item => item.stream)?.stream.sampleRate ?? segments[0].stream?.sampleRate;
+
+    // A segment with text begins: when a colleague takes the floor from someone who has actually spoken, the quiet the
+    // colleague wanted (afterQuietMs) is released first, less the quiet already out since the last speech, so the
+    // switch sounds like a person waiting to be sure the other has stopped. Nothing is added when no one has spoken yet
+    // in this utterance, for a cut-in (an interruption overlaps), when a withheld overlap tail is mixed (skipQuiet), or
+    // when the speaker who last began is the same one (a segment of an interviewer who never spoke was dropped between).
+    // A segment that never gets text is never here, so its wanted quiet cannot reach anyone.
+    function begin(segment, skipQuiet = false) {
+      if (segment.began || !segment.hasText) return false;
+      segment.began = true;
+      const same = lastVoiced === segment.speakerId;
+      lastVoiced = segment.speakerId;
+      if (skipQuiet || segment.cutIn || !(segment.afterQuietMs > 0) || !spokeAny || same) return false;
+      // Speech is released faster than it plays, but a reply that arrives late finds everything released already
+      // played out (a quick reaction by one interviewer, then the reply for another a second or two later): that real
+      // silence was heard too, so it counts, or the wait would be heard twice.
+      const rate = silenceRate();
+      const playedOutMs = firstOutAt === null || typeof clock.now !== 'function' || !rate ? 0 : Math.max(0, (clock.now() - firstOutAt) - pcmDurationMs(outBytes, rate));
+      const need = segment.afterQuietMs - quietMs - playedOutMs;
+      if (!(need > 0)) return false;
+      // Nobody is speaking through the wait: the tile of the one who stopped goes dark (speakerId null) until the next voice starts.
+      emit(speakerListeners, { speakerId: null, startMs: emittedMs });
+      emitSilence(rate, need);
+      return true;
+    }
 
     // Moves the release point past finished segments and plays what a waiting one held back.
     const pump = () => {
@@ -424,6 +478,7 @@ export function createPanelVoiceFactory({
         const segment = segments[active];
         if (!segment.activated) {
           const before = segments[active - 1];
+          const tailHeld = Boolean(before?.overlapTail);
           if (before?.overlapTail) {
             if (segment.cutIn && !segment.gapMs && !segment.done && !segment.heldAudio.length && !tailRateMismatch(segment, before)) {
               // Nothing of the interrupter yet: its first audio decides, but only a limited time.
@@ -434,6 +489,8 @@ export function createPanelVoiceFactory({
             settleTail(segment, before, segment.heldAudio.length > 0 && !segment.gapMs);
           }
           if (segment.gapMs) { emitSilence(silenceRate(), segment.gapMs); segment.gapMs = 0; }
+          if (cancelled) return;
+          begin(segment, tailHeld); // after its own gap, which has counted as quiet; before its first words and audio
           if (cancelled) return;
           segment.activated = true;
           segment.offsetMs = emittedMs;
@@ -462,9 +519,9 @@ export function createPanelVoiceFactory({
       pump();
     };
 
-    function startSegment(id, cutIn = false) {
+    function startSegment(id, cutIn = false, afterQuietMs = 0) {
       const segment = {
-        cutIn, holdTail: false, pending: Buffer.alloc(0), overlapTail: null, mixHead: null, odd: null,
+        cutIn, afterQuietMs, began: false, holdTail: false, pending: Buffer.alloc(0), overlapTail: null, mixHead: null, odd: null,
         rawBytes: 0, tailRate: undefined, waiting: false, lead: null, skipMs: 0,
         level: { sum: 0, n: 0, peak: 0, odd: null, win: 0 },
         speakerId: id, stream: null, hasText: false, done: false, activated: false, spoke: false,
@@ -518,7 +575,9 @@ export function createPanelVoiceFactory({
       // Only a segment that has text can be interrupted; its tail is kept back from here on.
       if (cutIn && current.hasText && !current.done) current.holdTail = true;
       closeSegment(current);
-      startSegment(id, cutIn);
+      // The quiet is asked for by a plain switch only; GAP_MAX_MS bounds it like a gap.
+      const quiet = cutIn ? 0 : Math.min(GAP_MAX_MS, Math.max(0, Number(options?.afterQuietMs) || 0));
+      startSegment(id, cutIn, quiet);
       pump();
       return true;
     }
@@ -557,6 +616,9 @@ export function createPanelVoiceFactory({
         }
       }
       current.hasText = true;
+      // A segment that was already releasing when its text came (the one before it had long ended): its quiet goes out now,
+      // ahead of any audio, and its words are timed after it.
+      if (current.activated && begin(current)) current.offsetMs = emittedMs;
       current.sent += value;
       return current.stream.sendText(value);
     }

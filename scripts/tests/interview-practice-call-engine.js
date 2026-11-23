@@ -61,7 +61,7 @@ export const HELPER_OFFSET = 5000;
 
 const bare = entry => { const rest = { ...entry }; delete rest.startMs; delete rest.endMs; return rest; };
 
-export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback, candidateVoice, inject = false, random, watcher = false, formatWatch, parseWatch } = {}) {
+export function makeRig({ autoOpener = false, thresholds, restartFails = false, ear = null, panel, speakerVoice = false, overlayVoice = speakerVoice, gapVoice = true, createParser, formatTurn, prepared, callback, candidateVoice, inject = false, random, handoverRandom = () => 0.5, watcher = false, formatWatch, parseWatch } = {}) {
   const clock = fakeClock();
   const events = [];
   const ops = [];
@@ -141,7 +141,7 @@ export function makeRig({ autoOpener = false, thresholds, restartFails = false, 
     onEvent: event => events.push(event), newId: () => `utt${++counter}`,
     ...(callback ? { callback } : {}),
     ...(candidateVoice ? { candidateVoice } : {}),
-    ...(random ? { random } : {}),
+    ...(random ? { random } : {}), handoverRandom, // the middle of the hand-over quiet range (1500 ms) unless a test draws its own
     ...(formatWatch ? { formatWatch } : {}), ...(parseWatch ? { parseWatch } : {}),
   });
   // The helper's clock is not the engine clock: helper atMs = clock ms - HELPER_OFFSET. Callers pass clock times.
@@ -205,7 +205,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
     smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
-    joinFlushLeadMs: 900, joinGapMinLeadMs: 900,
+    joinFlushLeadMs: 900, joinGapMinLeadMs: 900, handoverQuietMinMs: 1200, handoverQuietMaxMs: 1800,
     cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInStaleMs: 5000, cutInStaleHardWords: 30, watchVetoBackoffMs: 10000, watchVetoWords: 40, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
     candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
   });
@@ -2590,7 +2590,7 @@ test('panel: a speaker tag switches the voice between the same sentences, with s
   const rig = panelRig();
   await panelGreeting(rig);
   assert.deepEqual(rig.opens, [{ utteranceId: 'utt1', signal: rig.streams[0].signal, speakerId: 'A' }]);
-  assert.deepEqual(rig.streams[0].log, [{ text: 'Hello, I am Priya.' }, { speaker: 'B' }, { text: 'And I am John.' }], 'setSpeaker sits between the texts');
+  assert.deepEqual(rig.streams[0].log, [{ text: 'Hello, I am Priya.' }, { speaker: 'B', options: { afterQuietMs: 1500 } }, { text: 'And I am John.' }], 'setSpeaker sits between the texts');
   rig.h.playback('utt1', 'started');
   assert.deepEqual(rig.of('speaker'), [{ type: 'speaker', speakerId: 'A' }], 'the first segment is shown at playback start');
   rig.h.playback('utt1', 'position', 1000);
@@ -2635,14 +2635,64 @@ test('panel: a tag for an id that was never cast drops what follows it, from the
   assert.deepEqual(bare(rig.engine.state().transcript[0]), { speaker: 'interviewer', text: 'Hi.', speakerId: 'A' });
 });
 
-test('panel: a cut-in switch passes { cutIn: true } to setSpeaker, directly and through the queue; ordinary switches pass nothing', async () => {
+test('panel: a cut-in switch passes { cutIn: true } to setSpeaker, directly and through the queue; a plain switch passes { afterQuietMs }', async () => {
   const rig = panelRig({ createParser: tagParser });
   rig.engine.start();
   await flush();
   rig.sessions.main.answer('<speaker id="A"/>One. <speaker id="B" cut/>Two. <speaker id="A"/>Three.');
   await flush();
   assert.deepEqual(rig.streams[0].log, [
-    { text: 'One.' }, { speaker: 'B', options: { cutIn: true } }, { text: 'Two.' }, { speaker: 'A' }, { text: 'Three.' }]);
+    { text: 'One.' }, { speaker: 'B', options: { cutIn: true } }, { text: 'Two.' }, { speaker: 'A', options: { afterQuietMs: 1500 } }, { text: 'Three.' }]);
+});
+
+test('panel: a plain switch asks the voice for a quiet drawn from handoverQuietMinMs..MaxMs, and logs a handover event; a cut-in asks for none', async () => {
+  const draws = [0, 1, 0.25];
+  let randomCalls = 0;
+  const rig = panelRig({ createParser: tagParser, handoverRandom: () => draws.shift(), random: () => { randomCalls += 1; return 0; } });
+  rig.engine.start();
+  await flush();
+  rig.sessions.main.answer('<speaker id="A"/>One. <speaker id="B"/>Two. <speaker id="A"/>Three. <speaker id="B" cut/>Four. <speaker id="A"/>Five.');
+  await flush();
+  // The cut-in neither draws nor is given a quiet, so the third plain switch takes the third draw.
+  assert.deepEqual(rig.streams[0].log, [
+    { text: 'One.' }, { speaker: 'B', options: { afterQuietMs: 1200 } }, { text: 'Two.' }, { speaker: 'A', options: { afterQuietMs: 1800 } }, { text: 'Three.' },
+    { speaker: 'B', options: { cutIn: true } }, { text: 'Four.' }, { speaker: 'A', options: { afterQuietMs: 1350 } }, { text: 'Five.' }]);
+  assert.deepEqual(rig.of('handover'), [
+    { type: 'handover', speakerId: 'B', from: 'A', quietMs: 1200 }, { type: 'handover', speakerId: 'A', from: 'B', quietMs: 1800 }, { type: 'handover', speakerId: 'A', from: 'B', quietMs: 1350 }]);
+  assert.equal(randomCalls, 0, 'the hand-over draw never takes one from the candidate-yield seam');
+});
+
+test('panel: a queued plain switch keeps its quiet through the silence gate', async () => {
+  const rig = panelRig({ autoOpener: true, createParser: tagParser, handoverRandom: () => 0.5 });
+  await greet(rig);
+  await speak(rig, 'I built a scheduler', 'a');
+  await rig.clock.advance(600);
+  rig.sessions.main.answer('Fine. <speaker id="B"/>Why?');
+  await flush();
+  assert.deepEqual(rig.streams[1].log, []);
+  await rig.clock.advance(700);
+  assert.deepEqual(rig.streams[1].log, [{ text: 'Fine.' }, { speaker: 'B', options: { afterQuietMs: 1500 } }, { text: 'Why?' }]);
+  assert.deepEqual(rig.of('handover').map(item => [item.speakerId, item.from, item.quietMs]), [['B', 'A', 1500]]);
+});
+
+test('panel: a voice whose setSpeaker ignores a second argument still works with a plain switch, and a solo call asks for no quiet', async () => {
+  const rig = panelRig({ createParser: tagParser });
+  rig.engine.start();
+  await flush();
+  const stream = rig.streams[0];
+  const seen = [];
+  stream.setSpeaker = id => { seen.push(id); return true; };
+  rig.sessions.main.answer('<speaker id="A"/>One. <speaker id="B"/>Two.');
+  await flush();
+  assert.deepEqual(seen, ['B']);
+  assert.deepEqual(stream.texts, ['One.', 'Two.']);
+  const solo = makeRig({ speakerVoice: true });
+  solo.engine.start();
+  await flush();
+  solo.sessions.main.answer('Just me.');
+  await flush();
+  assert.deepEqual(solo.of('handover'), []);
+  assert.deepEqual(solo.streams[0].log, [{ text: 'Just me.' }]);
 });
 
 test('panel: a queued cut-in switch keeps its flag', async () => {
@@ -2675,7 +2725,7 @@ test('panel: a repeated tag for the speaker already talking does not call setSpe
   await flush();
   rig.sessions.main.answer('<speaker id="A"/>One. <speaker id="B"/>Two. <speaker id="B"/>Three.');
   await flush();
-  assert.deepEqual(rig.streams[0].log, [{ text: 'One.' }, { speaker: 'B' }, { text: 'Two.' }, { text: 'Three.' }]);
+  assert.deepEqual(rig.streams[0].log, [{ text: 'One.' }, { speaker: 'B', options: { afterQuietMs: 1500 } }, { text: 'Two.' }, { text: 'Three.' }]);
 });
 
 test('panel: with a gated voice the speaker switch is queued in order with the texts', async () => {
@@ -2687,7 +2737,7 @@ test('panel: with a gated voice the speaker switch is queued in order with the t
   await flush();
   assert.deepEqual(rig.streams[1].log, [], 'nothing reaches the voice before the gate opens');
   await rig.clock.advance(700);
-  assert.deepEqual(rig.streams[1].log, [{ text: 'Fine.' }, { speaker: 'B' }, { text: 'Why?' }]);
+  assert.deepEqual(rig.streams[1].log, [{ text: 'Fine.' }, { speaker: 'B', options: { afterQuietMs: 1500 } }, { text: 'Why?' }]);
 });
 
 test('panel: participantJoined adds one marker to the next opener and main messages only, and never starts a turn', async () => {
@@ -2732,7 +2782,7 @@ test('panel: a colleague who joined can then speak, and the marker survives a re
   const stream = rig.streams[rig.streams.length - 1];
   stream.audio(640);
   await rig.clock.advance(1300);
-  assert.deepEqual(stream.log.filter(item => item.speaker), [{ speaker: 'C' }], 'Mei may speak now');
+  assert.deepEqual(stream.log.filter(item => item.speaker), [{ speaker: 'C', options: { afterQuietMs: 1500 } }], 'Mei may speak now');
 });
 
 test('panel: the floor carries to the next reply and opens its voice stream', async () => {
@@ -5213,7 +5263,7 @@ test('cut-in: a sentence that ends in a dash before a speaker switch is spoken, 
   const rig = panelRig({ createParser: tagParser });
   await overGreeting(rig, 'So the main thing we look for is\u2014<speaker id="B"/>Sorry, one quick thing.<speaker id="A"/>As I was saying, the main thing is ownership.');
   assert.deepEqual(rig.streams[0].log, [
-    { text: 'So the main thing we look for is\u2014' }, { speaker: 'B' }, { text: 'Sorry, one quick thing.' }, { speaker: 'A' },
+    { text: 'So the main thing we look for is\u2014' }, { speaker: 'B', options: { afterQuietMs: 1500 } }, { text: 'Sorry, one quick thing.' }, { speaker: 'A', options: { afterQuietMs: 1500 } },
     { text: 'As I was saying, the main thing is ownership.' },
   ]);
   const entry = rig.engine.state().transcript[0];
