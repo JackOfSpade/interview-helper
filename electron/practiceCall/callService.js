@@ -228,8 +228,41 @@ export const DEFAULT_MAIN_REPLY_MODEL = 'opus';
 export function technicalTopicQuestion(topic) {
   return `[Technical topic, not a fixed question] ${String(topic || '').trim()}. If you pick this, make up your own question or hands-on exercise on this topic, different from one you would have asked on an earlier call.`;
 }
+// `notes` are what earlier calls asked under a technical topic (oldest first), so a planner or interviewer making up
+// a question on it can choose a different one; only a topic carries them.
 function poolOf(plan) {
-  return (Array.isArray(plan) ? plan : []).map((card, at) => ({ number: at + 1, id: card.id, question: card.question, timesAsked: card.timesAsked }));
+  return (Array.isArray(plan) ? plan : []).map((card, at) => ({
+    number: at + 1, id: card.id, question: card.question, timesAsked: card.timesAsked,
+    ...(Array.isArray(card.notes) && card.notes.length ? { notes: card.notes } : {}),
+  }));
+}
+/**
+ * The pool as the interviewer sessions see it. What earlier calls asked under a topic is only for a question the
+ * interviewer still has to make up: a picked topic with no prepared problem. A topic whose exercise the planner already
+ * wrote must be asked as written (shown its earlier exercises, the interviewer is told to differ from the very problem
+ * it was handed, above all on an interview held again), and an unpicked topic is not asked at all.
+ */
+function interviewerPoolOf(self) {
+  const picked = new Set(Array.isArray(self?.picked) ? self.picked : []);
+  const prepared = new Set((self?.settledPlan?.problems || []).map(problem => problem?.question));
+  return poolOf(self?.plan).map(item => {
+    if (!item.notes || (!self?.repeat && picked.has(item.number) && !prepared.has(item.number))) return item;
+    const { notes: _notes, ...rest } = item;
+    return rest;
+  });
+}
+/** The sentences of a spoken reply that ask something (the reaction and small talk around them dropped); the whole reply when none does. */
+function spokenQuestion(said) {
+  const text = String(said ?? '').replace(/\s+/gu, ' ').trim();
+  const asking = text.split(/(?<=[.!?])\s+/u).filter(sentence => sentence.includes('?'));
+  return asking.length ? asking.join(' ') : text;
+}
+/** What a prepared problem is, for the notes: its part titles, then the start of the first part. */
+function problemNote(problem, { withContent = true } = {}) {
+  const parts = Array.isArray(problem?.parts) ? problem.parts : [];
+  const titles = parts.map(part => String(part?.title ?? '').trim()).filter(Boolean).join(' / ');
+  const first = String(parts[0]?.content ?? '').replace(/\s+/gu, ' ').trim();
+  return withContent && titles && first ? `${titles}: ${first}` : titles;
 }
 
 /** The prepared brief flattened into the prompt module's brief shape. */
@@ -879,22 +912,31 @@ export function createPracticeCallService(deps = {}) {
     // questions are counted across every job, the rest per posting.
     const countsKey = await postingCountsKey(args.nodeId);
     let counts = {}; let generalCounts = {};
+    // What those calls asked under a topic and the planner's own questions; a history without them reads as none.
+    let askedNotes = {}; let earlierOwnQuestions = [];
     try {
       const history = await questionHistory();
       const [own, general] = await Promise.all([history.counts(countsKey), history.counts(GENERAL_COUNTS_KEY)]);
       if (own && typeof own === 'object') counts = own;
       if (general && typeof general === 'object') generalCounts = general;
+      if (typeof history.notes === 'function') {
+        const notes = await history.notes(countsKey);
+        if (notes?.asked && typeof notes.asked === 'object') askedNotes = notes.asked;
+        if (Array.isArray(notes?.own)) earlierOwnQuestions = notes.own.filter(item => typeof item === 'string' && item.trim());
+      }
     } catch (error) {
       warn(`[PracticeCall] question history unavailable: ${error?.message || error}`);
     }
+    const notesOf = id => (Array.isArray(askedNotes[id]) ? askedNotes[id].filter(item => typeof item === 'string' && item.trim()) : []);
     const timesAskedOf = (id, scope) => { const n = Number((scope === 'foundation' ? generalCounts : counts)[id]); return Number.isInteger(n) && n > 0 ? n : 0; };
     return {
       brief,
       plan: [
         ...ordered.map(card => ({ id: card.id, question: card.question, answer: preparedAnswerText(card), timesAsked: timesAskedOf(card.id, card.scope), scope: card.scope === 'foundation' ? 'foundation' : 'company' })),
-        ...topics.map(topic => ({ id: topic.id, question: technicalTopicQuestion(topic.text), answer: '', timesAsked: timesAskedOf(topic.id, 'company'), scope: 'company', topic: true })),
+        ...topics.map(topic => ({ id: topic.id, question: technicalTopicQuestion(topic.text), answer: '', timesAsked: timesAskedOf(topic.id, 'company'), scope: 'company', topic: true, notes: notesOf(topic.id) })),
       ],
       countsKey,
+      earlierOwnQuestions,
       candidateName: await candidateName,
       application: await application,
     };
@@ -1431,6 +1473,7 @@ export function createPracticeCallService(deps = {}) {
       result = await planCall({
         callText: text, brief: self.promptBrief,
         pool: poolOf(self.plan),
+        earlierOwnQuestions: self.earlierOwnQuestions || [],
         application: self.application,
         voices: drawnVoices.map(voiceView), targetMinutes, steering: self.steering,
         ...(self.candidateName ? { candidateName: self.candidateName } : {}),
@@ -1740,6 +1783,31 @@ export function createPracticeCallService(deps = {}) {
         edgeCases: [...(problem.edgeCases || [])], hints: [...(problem.hints || [])],
       })),
     };
+  }
+
+  /**
+   * What this call asked, for the next call's choice: `{ asked: { [topic id]: text }, own }`, or null when there is nothing.
+   * A topic asked and answered is noted by its prepared problem when it had one, else by the interviewer's own words
+   * (engine `askedTexts`); with neither it gets nothing, never a placeholder. The planner's own question is noted when asked
+   * at all (answered or not), with its problem's part titles. Fixed questions need none: their wording never changes.
+   */
+  function askedNotesOf(self, engineState, answered, unprepared) {
+    const problems = self.settledPlan?.problems || [];
+    const spoken = engineState.askedTexts && typeof engineState.askedTexts === 'object' ? engineState.askedTexts : {};
+    const asked = {};
+    for (const n of answered) {
+      const entry = self.plan?.[n - 1];
+      if (!entry?.topic || typeof entry.id !== 'string' || !entry.id || entry.scope === 'foundation') continue;
+      const problem = problems.find(item => item?.question === n);
+      const text = (problem && problemNote(problem)) || spokenQuestion(spoken[n]);
+      if (text) asked[entry.id] = text;
+    }
+    let own = '';
+    if (unprepared?.text && Object.hasOwn(spoken, 0)) {
+      const titles = problemNote(problems.find(item => item?.question === 0), { withContent: false });
+      own = titles ? `${unprepared.text} (${titles})` : unprepared.text;
+    }
+    return Object.keys(asked).length || own ? { asked, own } : null;
   }
 
   /** The one question that is not from the pool, with whoever asks it now (a colleague who dropped out hands it to the lead). */
@@ -2086,7 +2154,7 @@ export function createPracticeCallService(deps = {}) {
       persona: {
         name: self.persona.name, role: self.persona.role, team: self.persona.team, temperament: self.persona.temperament, interrupting: self.persona.interrupting ?? '', voice: self.persona.voice,
       },
-      brief: self.promptBrief, plan: poolOf(self.plan), application: self.application, targetMinutes: self.targetMinutes, steering: self.steering,
+      brief: self.promptBrief, plan: interviewerPoolOf(self), application: self.application, targetMinutes: self.targetMinutes, steering: self.steering,
       ...(self.candidateName ? { candidateName: self.candidateName } : {}),
       // The cast, the questions and the problems were settled by the planning step; no session chooses any of it.
       panel: (self.panel || []).map(entry => ({ id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, interrupting: entry.interrupting ?? '', joins: entry.joins, ...(entry.joined && entry.joins === 'late' ? { joined: true } : {}), voice: entry.voice })),
@@ -2702,14 +2770,17 @@ export function createPracticeCallService(deps = {}) {
       if (asks && wantsAnalysis) { delete record.feedbackSkipped; await store.writeRecord(self.callId, record); }
       // What was asked and answered feeds the next call's choice, whether or not feedback was requested.
       // It costs no AI call and a failure here never fails the hang-up.
-      if (answered.length) {
+      if (answered.length || Object.hasOwn(engineState.askedTexts || {}, 0)) {
         try {
           const history = await questionHistory();
           const askedEntries = answered.map(n => self.plan[n - 1]).filter(entry => typeof entry?.id === 'string' && entry.id);
           const general = askedEntries.filter(entry => entry.scope === 'foundation').map(entry => entry.id);
           const own = askedEntries.filter(entry => entry.scope !== 'foundation').map(entry => entry.id);
           if (general.length) await history.record(GENERAL_COUNTS_KEY, general);
-          if (own.length) await history.record(self.countsKey || self.args.nodeId, own);
+          // What a topic's made-up question or exercise was, and the planner's own question, for the job only. Never stops the wrap-up.
+          let notes = null;
+          try { notes = typeof history.notes === 'function' ? askedNotesOf(self, engineState, answered, unprepared) : null; } catch (error) { warn(`[PracticeCall] question notes not kept: ${error?.message || error}`); }
+          if (own.length || notes) await history.record(self.countsKey || self.args.nodeId, own, ...(notes ? [notes] : []));
         } catch (error) {
           warn(`[PracticeCall] question history not saved: ${error?.message || error}`);
         }
@@ -3138,6 +3209,7 @@ export function createPracticeCallService(deps = {}) {
         self.brief = loaded.brief;
         self.plan = loaded.plan;
         self.countsKey = loaded.countsKey;
+        self.earlierOwnQuestions = loaded.earlierOwnQuestions || [];
         self.application = loaded.application || { resume: '', coverLetter: '' };
         self.candidateName = loaded.candidateName || '';
         const modelStore = (deps.modelStore ?? await DEFAULTS.modelStore())({ rootDir: path.join(userDataPath, 'practice-models'), fetch: deps.fetch, fs, unzip: deps.unzip });

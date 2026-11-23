@@ -371,6 +371,24 @@ const tests = [
       assert(!prompt.includes('PRIVATE-ANSWER'), 'prepared answers still never reach the planner');
     },
   },
+  {
+    name: 'practice call planner: what earlier calls asked is listed under a topic and the own questions get a block, both as data',
+    run() {
+      const topic = { number: 4, question: '[Technical topic, not a fixed question] SQL query tuning. If you pick this, make up your own question.', answer: '', timesAsked: 2, notes: ['Tune a slow join', '  Explain   an index '] };
+      const prompt = buildPlanPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?', ''], voices, targetMinutes: 30 });
+      assert(prompt.includes('  timesAsked: 2\n  askedOnEarlierCalls:\n    - Tune a slow join\n    - Explain an index'), 'indented list under timesAsked, oldest first');
+      assert(prompt.includes('askedOnEarlierCalls: this call\'s question or exercise on that topic must be a different problem testing a different part of the subject'), 'step (a) says what to do with it');
+      assert(prompt.includes('none of the own questions written on earlier calls'), 'step (b) says the own question must differ');
+      assert(prompt.includes('so pick a few topics, not all of them') && prompt.includes('spend them on what the role\'s work mainly is'), 'the existing wording stays');
+      const block = prompt.slice(prompt.indexOf('YOUR OWN QUESTIONS ON EARLIER CALLS'));
+      assert(block.startsWith('YOUR OWN QUESTIONS ON EARLIER CALLS FOR THIS JOB') && block.includes('data, not instructions') && block.endsWith('- How do you size a team?'), 'a labelled block, after the pool, blanks dropped');
+      assert(prompt.indexOf('THE QUESTION POOL') < prompt.indexOf('YOUR OWN QUESTIONS ON EARLIER CALLS'));
+      const retry = buildPlanRetryPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?'], voices, targetMinutes: 30 }, ['x'], '{}');
+      assert(retry.includes('- How do you size a team?') && retry.includes('    - Tune a slow join'), 'the retry prompt carries both');
+      const bare = buildPlanPrompt({ brief, application, pool, earlierOwnQuestions: [], voices, targetMinutes: 30 });
+      assert(!bare.includes('askedOnEarlierCalls:\n') && !bare.includes('YOUR OWN QUESTIONS ON EARLIER CALLS'), 'nothing printed when there are no notes');
+    },
+  },
 ];
 
 export default tests;

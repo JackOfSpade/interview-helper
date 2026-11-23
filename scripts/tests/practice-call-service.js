@@ -3733,6 +3733,62 @@ test('question history store: counts, atomic save, tolerant load and a bound of 
   assert.deepEqual(await history.counts('job-5'), { q1: 1, q9: 1 }, 'an update keeps its job as the most recent one');
 });
 
+test('question history store: notes round trip with their caps, a 300-character cut, duplicate refresh, adopt and tolerant load', async () => {
+  const { createQuestionHistory } = await import('../../electron/practiceCall/questionHistory.js');
+  const files = new Map();
+  const memFs = {
+    async readFile(file) { if (!files.has(file)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return files.get(file); },
+    async mkdir() {},
+    async writeFile(file, data) { files.set(file, data); },
+    async rename(from, to) { files.set(to, files.get(from)); files.delete(from); },
+  };
+  const file = '/mem/notes.json';
+  const history = createQuestionHistory({ filePath: file, fs: memFs });
+  // An old file (counts only) reads, with no notes.
+  files.set(file, JSON.stringify({ version: 1, jobs: { old: { counts: { q1: 2 }, updatedAt: 5 } } }));
+  assert.deepEqual(await history.notes('old'), { asked: {}, own: [] });
+  assert.deepEqual(await history.counts('old'), { q1: 2 });
+  await history.record('old', ['q1']);
+  assert.deepEqual(await history.counts('old'), { q1: 3 }, 'two arguments work as before');
+  // Round trip, oldest first; a note never makes counts report its id.
+  await history.record('job', [], { asked: { t1: 'First   exercise' }, own: 'An own question' });
+  assert.deepEqual(await history.counts('job'), {}, 'notes add no count');
+  assert.deepEqual(await history.notes('job'), { asked: { t1: ['First exercise'] }, own: ['An own question'] });
+  await history.record('job', ['t1'], { asked: { t1: 'Second' } });
+  assert.deepEqual([await history.counts('job'), (await history.notes('job')).asked.t1], [{ t1: 1 }, ['First exercise', 'Second']]);
+  // A repeat (case and spacing aside) is stored once and becomes the newest.
+  await history.record('job', [], { asked: { t1: 'first EXERCISE' }, own: 'an  own question' });
+  assert.deepEqual(await history.notes('job'), { asked: { t1: ['Second', 'first EXERCISE'] }, own: ['an own question'] });
+  // Caps: five per id, eight own questions.
+  for (let at = 0; at < 7; at += 1) await history.record('job', [], { asked: { t1: `ex ${at}` }, own: `own ${at}` });
+  const capped = await history.notes('job');
+  assert.deepEqual(capped.asked.t1, ['ex 2', 'ex 3', 'ex 4', 'ex 5', 'ex 6']);
+  assert.deepEqual(capped.own, ['an own question', 'own 0', 'own 1', 'own 2', 'own 3', 'own 4', 'own 5', 'own 6']);
+  for (let at = 7; at < 11; at += 1) await history.record('job', [], { own: `own ${at}` });
+  assert.equal((await history.notes('job')).own.length, 8);
+  assert.equal((await history.notes('job')).own[0], 'own 3');
+  // One line of at most 300 characters, cut at a word end.
+  await history.record('long', [], { own: `${'word '.repeat(100)}\n${'x'.repeat(50)}` });
+  const [cut] = (await history.notes('long')).own;
+  assert.equal(cut.length <= 300 && !cut.includes('\n') && cut.endsWith('word'), true);
+  // Adopt copies the notes with the counts.
+  await history.record('from', ['q1'], { asked: { t1: 'kept' }, own: 'mine' });
+  assert.equal(await history.adopt('from', 'to'), true);
+  assert.deepEqual(await history.notes('to'), { asked: { t1: ['kept'] }, own: ['mine'] });
+  // Notes alone are carried too (a call that asked only the planner's own question leaves no count).
+  await history.record('bare', [], { own: 'only mine' });
+  assert.equal(await history.adopt('bare', 'bare-to'), true);
+  assert.deepEqual(await history.notes('bare-to'), { asked: {}, own: ['only mine'] });
+  // A cut never leaves half of a surrogate pair.
+  await history.record('pair', [], { own: `${'a'.repeat(299)}\u{1F600}` });
+  assert.equal((await history.notes('pair')).own[0], 'a'.repeat(299));
+  // Malformed notes are dropped without failing the load.
+  files.set(file, JSON.stringify({ version: 1, jobs: { bad: { counts: { q1: 1 }, asked: { t1: 'text', t2: [{ text: 4 }, { at: 1 }, null, { text: 'ok', at: 'x' }], '': ['no id'] }, own: 'nope', updatedAt: 1 }, bad2: { counts: {}, asked: [1], own: [7, { text: '' }, { text: 'fine' }], updatedAt: 2 } } }));
+  assert.deepEqual(await history.notes('bad'), { asked: { t2: ['ok'] }, own: [] });
+  assert.deepEqual(await history.notes('bad2'), { asked: {}, own: ['fine'] });
+  assert.deepEqual(await history.counts('bad'), { q1: 1 });
+});
+
 // The shared screen and the coding pad: published state, forwarding to the engine, and the saved record.
 function padEngine(log, state = { transcript: [], elapsedMs: 5000 }) {
   const box = {};
@@ -4779,6 +4835,90 @@ test('topics: a topic asked on a call is counted under the posting key, and an u
   assert.equal((await failing.service.start(ARGS)).phase, 'ringing');
   assert.deepEqual(harness.built.find(item => item.kind === 'main').options.plan.map(item => item.id), ['g1', 'q1']);
   assert(warnings.some(text => text.includes('technical topics unavailable')));
+});
+
+/** A history that keeps notes the way the real store does: asked per id, own questions, both oldest first. */
+function notedHistory(initial = {}, seed = { asked: {}, own: [] }) {
+  const base = memoryHistory(initial);
+  const count = base.record;
+  const held = { asked: { ...seed.asked }, own: [...seed.own] };
+  const written = [];
+  return Object.assign(base, {
+    written,
+    async notes() { return { asked: { ...held.asked }, own: [...held.own] }; },
+    async record(nodeId, ids, extra) {
+      await count(nodeId, ids);
+      if (extra) { written.push({ nodeId, ids: [...ids], extra }); for (const [id, text] of Object.entries(extra.asked || {})) held.asked[id] = [...(held.asked[id] || []), text]; if (extra.own) held.own.push(extra.own); }
+    },
+  });
+}
+const topicEngine = (asked, askedTexts, answered) => options => ({
+  start() { options.onEvent({ type: 'phase', phase: 'listening' }); }, hangUp() {}, helperEvent() {}, typed() {},
+  state: () => ({ transcript: [{ speaker: 'candidate', text: 'hello' }], elapsedMs: 5000, askedQuestions: asked, askedTexts, ...(answered ? { answeredQuestions: answered } : {}) }),
+});
+const TOPIC_PROBLEM = { ref: 'p1', question: 3, language: '', parts: [{ title: 'Balanced Delimiters', content: 'Write a function that checks\n whether a string has balanced delimiters.' }, { title: 'Nesting', content: 'Now allow quotes.' }], solution: 'Use a stack.', edgeCases: [], hints: [] };
+
+test('notes: a topic asked and answered is noted by its prepared problem, the own question when asked, a fixed question never', async () => {
+  const history = notedHistory();
+  const planner = fakePlanner(voices => soloPlan(voices, {
+    questions: [{ number: 2, askedBy: voices[0].key, minutes: 3, probes: [] }, { number: 3, askedBy: voices[0].key, minutes: 5, probes: [] }, { number: 0, text: 'How do you size a team?', askedBy: voices[0].key, minutes: 2, probes: [] }],
+    problems: [TOPIC_PROBLEM, { ref: 'p2', question: 0, language: '', parts: [{ title: 'Sizing', content: 'Plan it.' }], solution: 'x', edgeCases: [], hints: [] }],
+  }));
+  const { service } = await startOf({ deps: { planCall: planner, loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, engineFactory: topicEngine([2, 3, 4], { 0: 'So, how do you size a team?', 3: 'Let me put up a problem.' }, [2, 3]) } });
+  await service.start(ARGS);
+  await service.answer();
+  await service.hangUp({ feedback: false });
+  assert.deepEqual(history.recorded, [{ nodeId: 'posting:abc', ids: ['q1', 'topic-aaaaaaaaaaaa'] }]);
+  assert.deepEqual(history.written[0].extra, {
+    asked: { 'topic-aaaaaaaaaaaa': 'Balanced Delimiters / Nesting: Write a function that checks whether a string has balanced delimiters.' },
+    own: 'How do you size a team? (Sizing)',
+  }, 'topic 4 was asked but not answered, q1 is fixed: neither is noted');
+});
+
+test('notes: a topic with no problem is noted by what the interviewer said, an unanswered one or one with no words by nothing, a repeat once', async () => {
+  const history = notedHistory();
+  const { service } = await startOf({ deps: { loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, engineFactory: topicEngine([3, 4], { 3: 'Good. Which index would you add for a slow join? And why that one?' }, [3, 4]) } });
+  await service.start(ARGS);
+  await service.answer();
+  await service.hangUp({ feedback: false });
+  assert.deepEqual(history.written[0].extra, { asked: { 'topic-aaaaaaaaaaaa': 'Which index would you add for a slow join? And why that one?' }, own: '' }, 'question sentences only; topic 4 has neither a problem nor words, so no placeholder');
+  const none = notedHistory();
+  const idle = await startOf({ deps: { loadCards: async () => SCOPED_CARDS, questionHistory: none, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, engineFactory: topicEngine([3], { 3: 'Tell me about indexes?' }, []) } });
+  await idle.service.start(ARGS);
+  await idle.service.answer();
+  await idle.service.hangUp({ feedback: false });
+  assert.deepEqual([none.recorded, none.written], [[], []], 'asked but unanswered: nothing counted, nothing noted');
+});
+
+test('notes: the next start gives the planner and the interviewer what earlier calls asked, and a history without notes still works', async () => {
+  const history = notedHistory({}, { asked: { 'topic-aaaaaaaaaaaa': ['Tune a join', 'Explain an index'] }, own: ['Size a team', 'Plan a launch'] });
+  const harness = recordingPrompts();
+  const planner = fakePlanner();
+  const { service } = await startOf({ deps: { prompts: harness.prompts, planCall: planner, loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS } });
+  await service.start(ARGS);
+  assert.deepEqual(planner.calls[0].pool.map(item => item.notes), [undefined, undefined, ['Tune a join', 'Explain an index'], undefined], 'only a topic with notes carries them');
+  assert.deepEqual(planner.calls[0].earlierOwnQuestions, ['Size a team', 'Plan a launch']);
+  assert.equal(harness.built.find(item => item.kind === 'main').options.plan.some(item => item.notes), false, 'the interviewer is not shown the notes of a topic this call does not ask');
+  // The interviewer sees them only for a picked topic it must still make up a question for: with a prepared problem it
+  // would be told to differ from the very exercise it was handed.
+  const mainPlanOf = async change => {
+    const built = recordingPrompts();
+    const made = await startOf({ deps: { prompts: built.prompts, planCall: fakePlanner(voices => soloPlan(voices, change(voices))), loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS } });
+    await made.service.start(ARGS);
+    return built.built.find(item => item.kind === 'main').options.plan;
+  };
+  const spokenTopic = await mainPlanOf(voices => ({ questions: [{ number: 3, askedBy: voices[0].key, minutes: 10, probes: [] }] }));
+  assert.deepEqual(spokenTopic.map(item => item.notes), [undefined, undefined, ['Tune a join', 'Explain an index'], undefined]);
+  const preparedTopic = await mainPlanOf(voices => ({
+    questions: [{ number: 3, askedBy: voices[0].key, minutes: 10, probes: [] }],
+    problems: [{ ref: 'p1', question: 3, language: '', parts: [{ title: 'Slow join', content: 'Find why this join is slow.' }], solution: 'An index.', edgeCases: [], hints: [] }],
+  }));
+  assert.equal(preparedTopic.some(item => item.notes), false);
+  const plain = fakePlanner();
+  const old = await startOf({ deps: { planCall: plain, loadCards: async () => SCOPED_CARDS, questionHistory: memoryHistory(), storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS } });
+  assert.equal((await old.service.start(ARGS)).phase, 'ringing');
+  assert.deepEqual(plain.calls[0].earlierOwnQuestions, []);
+  assert.equal(plain.calls[0].pool.some(item => item.notes), false);
 });
 
 test('the call writes a debug log: phases, setup steps, engine events, session messages, hang-up and notes', async () => {

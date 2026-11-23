@@ -4958,6 +4958,36 @@ async function askedReply(rig, text) {
   await rig.clock.advance(700);
 }
 
+test('asked marker: the words of the reply that first asked each number are kept for the service, the interviewer\'s own question (0) included', async () => {
+  const rig = makeRig({ createParser: askedParser });
+  await greet(rig);
+  assert.deepEqual(rig.engine.state().askedTexts, {});
+  await askedReply(rig, '<asked n="3"/>Tell me about a scheduler you built.');
+  const id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  await askedReply(rig, '<asked n="3"/>Again. <asked n="0"/>And how would you size a team?');
+  assert.deepEqual(rig.engine.state().askedTexts, { 3: 'Right. Tell me about a scheduler you built.', 0: 'Again. And how would you size a team?' }, 'the first words stay, and 0 is kept though it is not an asked question');
+  assert.deepEqual(rig.engine.state().askedQuestions, [3]);
+  // A reply still streaming when it is committed: the question sentence arrives after the first audio and is kept too
+  // (the text was once fixed at commit, so a slow reply was noted by its lead-in alone).
+  const slow = makeRig({ createParser: askedParser });
+  await greet(slow);
+  await speak(slow, 'I built a scheduler', 'a');
+  await slow.clock.advance(600);
+  slow.sessions.opener.answer('Right.');
+  await flush();
+  slow.sessions.main.calls.at(-1).onDelta('<asked n="5"/>Thanks for that. ');
+  slow.streams[slow.streams.length - 1].audio(1000);
+  await flush();
+  await slow.clock.advance(700);
+  assert.deepEqual(slow.engine.state().askedQuestions, [5]);
+  slow.sessions.main.answer('x', { chunks: ['How would you find out why a queue drops jobs?'] });
+  await flush();
+  assert.match(slow.engine.state().askedTexts[5], /Thanks for that\. How would you find out why a queue drops jobs\?$/u);
+});
+
 test('asked marker: counted when the reply is delivered, once per number, in first-asked order', async () => {
   const rig = makeRig({ createParser: askedParser });
   await greet(rig);

@@ -361,6 +361,9 @@ export function createPracticeCallEngine({
   let notSpoken = false;
   const askedQuestions = []; // plan numbers in first-asked order
   const answeredQuestions = []; // asked questions the candidate went on to answer
+  // What the interviewer said in the reply that first asked each plan number (0: its own question), delivery tags stripped.
+  // Only the service reads it, to note what a topic's made-up question was for the next call's choice.
+  const askedTexts = {};
   let openQuestions = []; // the questions asked last, still waiting for an answer
   // What the interviewer's latest line was, for the watcher: the plan number it asked (0 for the interviewer's own
   // question), or null when it asked nothing from the plan (a follow-up, small talk, the closing). Seen 2026-11-22:
@@ -1964,8 +1967,21 @@ export function createPracticeCallEngine({
     return [...answeredQuestions, ...open.filter(number => !answeredQuestions.includes(number))];
   }
 
+  /** What the reply that first asked each plan number said, as it stands now (whole once finished, the heard part if cut). */
+  function askedTextsNow() {
+    const out = {};
+    for (const [number, reply] of Object.entries(askedTexts)) {
+      const said = stripAudioTags(String(reply.entry?.text ?? reply.heardText ?? reply.parts.join(' '))).replace(/\s+/gu, ' ').trim();
+      if (said) out[number] = said;
+    }
+    return out;
+  }
+
   function noteAsked(reply) {
     const fresh = [];
+    // The reply itself is kept, not its text so far: this runs at commit, when a slow reply has only its first sentences
+    // (a lead-in before the question), and an interruption later cuts the text to what was heard. Read in askedTextsNow.
+    for (const number of reply.asked) if (Number.isInteger(number) && number >= 0 && !Object.hasOwn(askedTexts, number)) askedTexts[number] = reply;
     for (const number of reply.asked) {
       if (!Number.isInteger(number) || number < 1 || askedQuestions.includes(number)) continue;
       askedQuestions.push(number);
@@ -4059,7 +4075,7 @@ export function createPracticeCallEngine({
       joinedQueue.push(member.name);
     },
     hangUp() { end('candidate'); },
-    state: () => ({ phase, transcript: transcript.map(entry => ({ ...entry })), elapsedMs: elapsed(), paused, pausedMs: currentPauseMs(), askedQuestions: [...askedQuestions], answeredQuestions: answeredNow(),
+    state: () => ({ phase, transcript: transcript.map(entry => ({ ...entry })), elapsedMs: elapsed(), paused, pausedMs: currentPauseMs(), askedQuestions: [...askedQuestions], askedTexts: askedTextsNow(), answeredQuestions: answeredNow(),
       screen: screenShown ? { ...screenShown } : null, pad: { ...padState } }),
   };
 }

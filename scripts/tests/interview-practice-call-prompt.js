@@ -1121,6 +1121,20 @@ export default [
     },
   },
   {
+    name: 'interview practice prompt: a topic carries what earlier calls asked, as private bookkeeping',
+    run() {
+      const plan = [{ question: 'Synthetic fixed?', answer: 'a1', timesAsked: 1 }, { question: '[Technical topic, not a fixed question] Synthetic topic.', answer: '', timesAsked: 2, notes: ['Earlier exercise one', ' ', 'Earlier exercise two'] }];
+      const text = buildInterviewerInstructions({ persona, brief, plan });
+      const planText = text.slice(text.indexOf('[\n  {\n    "number": 1'));
+      const items = JSON.parse(planText.slice(0, planText.indexOf('\n]') + 2));
+      assert.equal(items[0].askedOnEarlierCalls, undefined);
+      assert.deepEqual(items[1].askedOnEarlierCalls, ['Earlier exercise one', 'Earlier exercise two']);
+      assert(text.includes('askedOnEarlierCalls is the same kind of bookkeeping') && text.includes('must differ from those') && text.includes('neither list is ever mentioned to the candidate'));
+      assert(text.includes('Never refer to earlier calls or sessions with them'), 'the rule against mentioning earlier calls stays');
+      assert(!buildInterviewerInstructions({ persona, brief, plan: ['Synthetic string question?'] }).includes('"askedOnEarlierCalls": ['), 'no notes, no field');
+    },
+  },
+  {
     name: 'interview practice prompt: a restart keeps the call plan and the history and asks for nothing but READY',
     run() {
       const text = buildInterviewerInstructions({ persona, brief, plan, callPlan: { ...callPlan, people: callPlan.people.map(item => item.id === 'C' ? { ...item, joined: true } : item) }, history: 'Interviewer: hi' });
