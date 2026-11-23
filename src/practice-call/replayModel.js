@@ -360,7 +360,12 @@ function askerOf(replay, chapter, transcript) {
     turn = list.find(item => !isCandidate(item) && !item?.overlay && startOf(item) !== null && startOf(item) >= chapter.startMs && startOf(item) < chapter.endMs) || null;
   }
   if (!turn) return null;
-  const id = turn.speakerId || turn.segments?.[0]?.speakerId || '';
+  // A turn several interviewers spoke in is asked by whoever put the question: the last of them to ask something,
+  // else the last to speak (a lead who hands over, then the colleague who sets the exercise). The turn's own id is
+  // only who spoke first.
+  const parts = Array.isArray(turn.segments) ? turn.segments.filter(item => item?.speakerId && item.text) : [];
+  const asked = parts.length > 1 ? ([...parts].reverse().find(item => /\?/u.test(item.text)) || parts.at(-1)) : null;
+  const id = asked?.speakerId || turn.speakerId || turn.segments?.[0]?.speakerId || '';
   const panel = Array.isArray(replay?.panel) ? replay.panel : [];
   const person = panel.find(item => item?.id === id) || (replay?.persona && (!id || id === 'A' || !panel.length) ? replay.persona : null);
   return { id, name: replaySpeakerName(replay, id), role: String(person?.role || '') };

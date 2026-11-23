@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
-import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
+import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, PRACTICE_FEEDBACK_LIMITS, newPracticeCode, orderPracticeQuestions, practiceCodeHash, trimPracticeFeedback, trimPracticeText, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
 import { listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
 
@@ -272,5 +272,40 @@ export default [
   { name: 'practice plan order: saved order first, then any card the plan does not know yet', async run() {
     const ordered = orderPracticeQuestions([{ question: 'B?' }, { question: 'A?' }, { question: 'a?' }, { question: 'C?' }], ['A?', 'Missing?', 'C?']);
     assert.deepEqual(ordered.map(card => card.question), ['A?', 'C?', 'B?']);
+  } },
+  { name: 'practice feedback: a planned question is the plan\'s own text and may be longer than a model-written field', async run() {
+    const question = `${'Why do you want this role? '.repeat(12)}`.trim();
+    assert.ok(question.length > 300 && question.length <= PRACTICE_FEEDBACK_LIMITS.question);
+    assert.equal(validatePracticeFeedback({ ...feedbackPayload('c'), planned: [{ question, asked: false }] }).planned[0].question, question);
+    assert.equal(INTERVIEW_PRACTICE_FEEDBACK_SCHEMA.properties.planned.items.properties.question.maxLength, PRACTICE_FEEDBACK_LIMITS.question);
+  } },
+  { name: 'practice feedback: validation can collect every violation instead of stopping at the first', async run() {
+    const bad = { ...feedbackPayload('c'), overall: { score: 5, summary: 'x'.repeat(1501) }, priorities: ['y'.repeat(301)], moments: [{ kind: 'rant', prompt: 'p' }] };
+    assert.throws(() => validatePracticeFeedback(bad), error => !error.issues && /overall\.summary/u.test(error.message) && !/priorities/u.test(error.message), 'the default stops at the first');
+    try { validatePracticeFeedback(bad, { all: true }); assert.fail('must throw'); } catch (error) {
+      assert.equal(error.issues.length, 3);
+      assert.match(error.message, /overall\.summary.*moments\[0\]\.kind.*priorities\[0\]/u);
+    }
+  } },
+  { name: 'practice feedback: over-long model text is cut at a sentence end or a word, and over-long lists lose their tail', async run() {
+    const sentence = 'This is a sentence of moderate length that says something. ';
+    const long = sentence.repeat(40);
+    const cutSentence = trimPracticeText(long, 600);
+    assert.ok(cutSentence.length <= 600 && cutSentence.endsWith('something.'), 'ends on a sentence end inside the limit');
+    const noStops = trimPracticeText('word '.repeat(200), 100);
+    assert.ok(noStops.length <= 100 && noStops.endsWith('\u2026') && !/\s\u2026$/u.test(noStops), 'a word boundary and an ellipsis');
+    assert.equal(trimPracticeText('short', 100), 'short');
+    assert.ok(trimPracticeText(`Ok. ${'word '.repeat(200)}`, 100).endsWith('\u2026'), 'an early sentence end that would gut the text is not used');
+    const input = { ...feedbackPayload('c'), overall: { score: 5, summary: long }, priorities: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+      planned: [{ question: 'Q?', asked: true, score: 4, covered: long }], communication: { pace: 'p'.repeat(400) }, delivery: { summary: 'd'.repeat(1600), fillerCount: 'many' } };
+    const { feedback, trimmed } = trimPracticeFeedback(input);
+    assert.equal(input.overall.summary, long, 'the input is not changed');
+    assert.deepEqual(trimmed.map(item => item.path).sort(), ['communication.pace', 'delivery.summary', 'overall.summary', 'planned[0].covered', 'priorities'].sort());
+    assert.deepEqual(trimmed.find(item => item.path === 'priorities'), { path: 'priorities', length: 7, limit: 5 });
+    assert.equal(trimmed.find(item => item.path === 'overall.summary').length, long.length);
+    assert.equal(feedback.delivery.fillerCount, 'many', 'a wrong type is left for the validator');
+    assert.throws(() => validatePracticeFeedback(feedback), /delivery\.fillerCount/u);
+    const fixed = validatePracticeFeedback({ ...feedback, delivery: { summary: feedback.delivery.summary } });
+    assert.ok(fixed.overall.summary.length <= 1500 && fixed.priorities.length === 5);
   } },
 ];

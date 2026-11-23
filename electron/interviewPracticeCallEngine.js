@@ -496,7 +496,13 @@ export function createPracticeCallEngine({
   const lastSpoken = () => {
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
       const entry = transcript[index];
-      if (entry.speaker === 'interviewer' && entry.channel !== 'chat' && !entry.overlay && entry.text) return stripAudioTags(entry.text);
+      if (!(entry.speaker === 'interviewer' && entry.channel !== 'chat' && !entry.overlay && entry.text)) continue;
+      // A reply several interviewers spoke in is given by speaker: as one quote it read as one person's words, and the
+      // reaction that follows may be voiced by any of them.
+      if (speakers && Array.isArray(entry.segments) && entry.segments.length > 1) {
+        return entry.segments.map(item => ({ name: castMember(item.speakerId)?.name || 'Interviewer', text: stripAudioTags(item.text) }));
+      }
+      return stripAudioTags(entry.text);
     }
     return undefined;
   };
@@ -779,7 +785,7 @@ export function createPracticeCallEngine({
       reply.pausedAck = pausedAck;
       reply.messages = {
         // The short opening reaction never needs the pad's code or the unheard rest of a cut-off reply, so only the main message carries them.
-        ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint, recentReactions: recentReactions.slice() }) } : {}),
+        ...(withOpener ? { opener: formatTurn({ ...base, ...(base.interruption ? { interruption: { heardText: base.interruption.heardText } } : {}), padText: undefined, unknownScreen: undefined, lastSpoken: lastSpoken(), audioHint: hint, recentReactions: recentReactions.slice(), ...(speakers && floor !== leadId && castMember(floor) ? { reactingAs: { name: castMember(floor).name, role: castMember(floor).role } } : {}) }) } : {}),
       };
       if (!withOpener) reply.openerSettled = true;
     }
@@ -876,6 +882,7 @@ export function createPracticeCallEngine({
     if (reply.turnBase) {
       reply.messages.main = reply.mainPrefix + formatTurn({
         ...reply.turnBase, pausedAck: reply.pausedAck, ...(reply.voiceNote ? { voiceNote: reply.voiceNote } : {}), ...(reply.ackText ? { acknowledgement: reply.ackText } : {}),
+        ...(reply.ackText && speakers && castMember(reply.openSpeaker) ? { ackSpeaker: { id: reply.openSpeaker, name: castMember(reply.openSpeaker).name } } : {}),
       });
     }
     runMain(reply);
@@ -1547,8 +1554,12 @@ export function createPracticeCallEngine({
     const recent = count ? recentReactions.slice(-count) : [];
     if (!recent.length) return false;
     const words = line => wordKey(stripAudioTags(line)).split(' ').filter(Boolean);
-    const warm = line => /\b(thank you|thanks|lovely)\b/iu.test(line);
-    if (warm(written) && recent.some(item => warm(item.text))) return true;
+    // "Right after one that did": the reaction just before, or the same warm word in any of the last few. Heard
+    // 2026-11-23 (call-mwsvsqmu): "Right, thanks for walking me through that." was dropped for a "lovely to meet you"
+    // said three reactions and 283 s earlier, and the first sound came 3.9 s after the answer.
+    const warmWords = line => new Set((String(line).toLowerCase().match(/\b(thank you|thanks|lovely)\b/gu) || []).map(word => (word === 'thank you' ? 'thanks' : word)));
+    const mine = warmWords(written);
+    if (mine.size && (warmWords(recent.at(-1).text).size || recent.some(item => [...warmWords(item.text)].some(word => mine.has(word))))) return true;
     const head = words(written).slice(0, 2).join(' ');
     if (head !== '' && recent.some(item => words(item.text).slice(0, 2).join(' ') === head)) return true;
     // Heard 2026-11-22: "all followed", "I followed all of that", "I followed that" in three reactions running, and

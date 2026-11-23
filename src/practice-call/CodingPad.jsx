@@ -7,6 +7,9 @@ import { PAD_LANGUAGES } from './padLanguages.js';
 export const PAD_TYPING_REFRESH_MS = 3000;
 export const PAD_TYPING_IDLE_MS = 4000;
 export const PAD_SEND_DEBOUNCE_MS = 400;
+// While the wand types, the debounce never fires (keys come faster than it), so the pad is sent at least this often: the
+// interviewers and the record see it a second behind at most. Each send is a pad update the engine treats as activity.
+export const PAD_TYPING_FLUSH_MS = 1000;
 const NEAR_CAP = 18000;
 // Where a word ends: the wand giving way stops here, never in the middle of a name.
 const WORD_END = /[\s.,;:()[\]{}]/u;
@@ -76,13 +79,22 @@ export default function CodingPad({ lang = '', choice = '', onChooseLanguage, in
     beat();
   };
   const editRef = useRef(edit);
-  useEffect(() => { editRef.current = edit; });
+  const flushRef = useRef(flush);
+  useEffect(() => { editRef.current = edit; flushRef.current = flush; });
   useEffect(() => {
     if (!typerRef || readOnly) return undefined;
     let alive = true;
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     typerRef.current = {
-      async typeTo(target, { stopped = () => false, paused = () => false, yielding = () => false } = {}) {
+      async typeTo(target, options = {}) {
+        // Whatever way typing ends (done, stopped, given way), the last keys go out at once, not after the debounce.
+        try { return await typeKeys(target, options); } finally { flushRef.current(); }
+      },
+    };
+    // `pace` stretches (above 1) or tightens (below 1) every key's delay: hands that keep with a line being said.
+    const typeKeys = async (target, { stopped = () => false, paused = () => false, yielding = () => false, pace = 1 } = {}) => {
+        const rate = Number.isFinite(pace) && pace > 0 ? pace : 1;
+        let flushedAt = Date.now();
         const goal = String(target ?? '').slice(0, PAD_TEXT_MAX);
         const step = async ms => {
           await sleep(ms);
@@ -92,6 +104,7 @@ export default function CodingPad({ lang = '', choice = '', onChooseLanguage, in
         // Worked out again before every key, so an edit by the person in between is respected, not overwritten blindly.
         let previous = '';
         for (;;) {
+          if (Date.now() - flushedAt >= PAD_TYPING_FLUSH_MS) { flushRef.current(); flushedAt = Date.now(); }
           const { at, remove, insert } = padEdit(textRef.current, goal);
           if (!remove && !insert) return true;
           if (remove) {
@@ -106,13 +119,12 @@ export default function CodingPad({ lang = '', choice = '', onChooseLanguage, in
           const char = insert[0];
           // Giving way: the word being typed is finished, then the hands stop.
           if (yielding() && (!previous || WORD_END.test(previous) || WORD_END.test(char))) return false;
-          if (!(await step(keyDelayMs(char, previous)))) return false;
+          if (!(await step(keyDelayMs(char, previous) * rate))) return false;
           previous = char;
           const now = textRef.current;
           cursorRef.current = at + 1;
           editRef.current(`${now.slice(0, at)}${char}${now.slice(at)}`);
         }
-      },
     };
     return () => { alive = false; if (typerRef.current) typerRef.current = null; };
   }, [typerRef, readOnly]);

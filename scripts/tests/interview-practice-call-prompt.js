@@ -1069,7 +1069,7 @@ export default [
       assert(!section.includes('running a few minutes late') && !section.includes('Never speak as them or to them until'));
       assert(section.includes('has joined the call and is listening') && section.includes('never cutting the candidate off') && section.includes('catch them up'));
       assert(section.includes('do not repeat questions already asked') && section.includes('first name') && section.includes('talk over each other the way real colleagues do'));
-      assert(section.includes('How many interviewers speak in a reply is your call') && section.includes('farewell is said by you'));
+      assert(section.includes('How many interviewers speak in a reply is your call') && section.includes('The close is yours as the lead') && section.includes('There is no default number and no default order') && section.includes('under its own speaker\'s tag'));
       assert(text.endsWith('Reply only READY now.'));
       const opener = buildOpenerInstructions({ persona, brief, plan, panel: callPlan.people.slice(1) });
       assert(!opener.includes('\nPANEL\n') && opener.includes('Never write a speaker tag.') && opener.includes('listening sounds of an interviewer'));
@@ -1343,10 +1343,25 @@ export default [
       assert.match(rule, /your next words never react again: no second acknowledgement, agreement, thanks, sympathy or reassurance/u);
       assert.match(rule, /Go straight to the substance/u);
       assert.match(rule, /your first sentence carries no delivery tag, so it is heard in the same mood/u, 'the first sentence has no tag and keeps the tone');
-      assert.match(rule, /in a panel, in the voice of whoever holds the floor/u);
+      assert.match(rule, /In a panel the note names whose voice said them/u);
+      assert.match(rule, /write that person's speaker tag first/u);
       assert.match(rule, /A message without that note has nothing spoken ahead of it/u);
       assert.match(rule, /interruption rule above comes first/u, 'the interruption rule keeps precedence');
       assert.doesNotMatch(rule, /already playing/u);
+    },
+  },
+  {
+    name: 'interview practice prompt: the interviewer prompt holds no example line to say, only descriptions, things never to say and tag formats',
+    run() {
+      // Heard 2026-11-23: a colleague took a question with the prompt's own example words, and the candidate aid closed
+      // an exercise with its prompt's example sentence. A line the prompt quotes as something to say gets said, call
+      // after call, so those are described instead. Lines that must never be said, and how tags are written, stay.
+      const prompt = buildInterviewerInstructions({ persona, brief, plan, callPlan });
+      for (const line of ['over to you', 'I can take that one', 'To add to what', 'As I was saying', 'what we are really after', 'bear with me', 'nearly there', 'as you can see in the photo', 'That makes sense, thanks', 'how big was the team', 'no worries at all', 'I tried you a few minutes ago', 'better question for the recruiter', 'would not want to guess', 'Last I checked', 'nice to meet you']) {
+        assert(!prompt.toLowerCase().includes(line.toLowerCase()), `an example line to say is back in the prompt: ${line}`);
+      }
+      assert(prompt.includes('never confirm it against your own') && prompt.includes('spot on'), 'lines never to say are still named');
+      assert(prompt.includes('<speaker id="B"/>') && prompt.includes('<screen title="Short title" delay="4">'), 'tag formats are still shown');
     },
   },
   {
@@ -1355,7 +1370,7 @@ export default [
       const solo = buildOpenerInstructions({ persona, brief, plan });
       const panel = buildOpenerInstructions({ persona, brief, plan, panel: [{ id: 'B', name: 'John' }] });
       assert(!solo.includes('Other interviewers share this call'));
-      assert(panel.includes('Other interviewers share this call, and your reaction is spoken in the voice of whichever of them holds the floor. Never write a speaker tag.'));
+      assert(panel.includes('Other interviewers share this call, and your reaction is spoken in the voice of whichever of them holds the floor.') && panel.includes('Never write a speaker tag.'));
     },
   },
   {

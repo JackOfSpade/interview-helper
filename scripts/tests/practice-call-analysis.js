@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeCall, checkReview, fillerTotals, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
+import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
 import { buildChapters } from '../../electron/practiceCall/analysis/chapters.js';
-import { REVIEW_SCHEMA, buildReviewPrompt } from '../../electron/practiceCall/analysis/reviewPrompt.js';
+import { PRACTICE_FEEDBACK_LIMITS } from '../../electron/ipc/interviewQaPractice.js';
+import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, lengthLimits } from '../../electron/practiceCall/analysis/reviewPrompt.js';
 
 // Synthetic call: small talk, two questions, a typed answer, then the farewell.
 const transcript = [
@@ -651,4 +652,103 @@ export default [
       } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
     },
   },
+  (() => {
+    const longQuestion = 'What do you assume an attacker can do in the boot path, and where do you draw the line between the platform and your own code? '.repeat(3).trim();
+    const picked = [
+      { number: 5, question: 'Alpha?', asked: true, unprepared: false }, { number: 0, question: longQuestion, asked: null, unprepared: true },
+    ];
+    const sentences = 'A sentence that says something useful about the answer. '.repeat(40);
+    const base = { overall: { score: 6, summary: sentences }, moments: [], communication: {}, priorities: [] };
+    const entry = (question, extra = {}) => ({ question, asked: true, score: 5, covered: 'c', ...extra });
+    const reply = planned => ({ feedback: { ...base, planned }, chapters: [{ questionTurnIndex: 2, title: 'T'.repeat(130) }], moments: [] });
+    return {
+      name: 'practice call analysis: the host fills the planned questions from the picked cards and over-long model text is trimmed, not rejected',
+      async run() {
+        assert.ok(longQuestion.length > 300);
+        // The model copied the plan's question wrongly (cut short) but the counts agree: position decides.
+        const result = checkReview(reply([entry('Alpha?', { improve: sentences }), entry(longQuestion.slice(0, 120))]), transcript, picked);
+        assert.equal(result.error, undefined, 'a mangled copy of a long question never fails validation');
+        const planned = result.review.feedback.planned;
+        assert.equal(planned[1].question, longQuestion, 'the plan\'s own question, whole');
+        assert.ok(planned[0].improve.length <= PRACTICE_FEEDBACK_LIMITS.text && planned[0].improve.endsWith('.'), 'cut at a sentence end');
+        assert.ok(result.review.feedback.overall.summary.length <= PRACTICE_FEEDBACK_LIMITS.long);
+        assert.ok(result.review.chapters[0].title.length <= REVIEW_LIMITS.chapterTitle, 'chapter titles are cut too');
+        assert.deepEqual(result.trimmed.map(item => item.path).sort(), ['chapters[0].title', 'overall.summary', 'planned[0].improve']);
+        assert.deepEqual(result.trimmed.find(item => item.path === 'overall.summary'), { path: 'overall.summary', length: sentences.length, limit: PRACTICE_FEEDBACK_LIMITS.long });
+        // Counts that differ leave the existing matching alone: an exact copy still matches by text.
+        assert.equal(fillPlannedFromPicked([entry(longQuestion)], picked)[0].question, longQuestion);
+        const stray = fillPlannedFromPicked([entry('Something else')], picked);
+        assert.equal(stray[0].question, 'Something else', 'counts differ and nothing matches: left as it is');
+        // A reordered reply is not guessed at: the mangled entry stays unmatched, so the reply is rejected and corrected
+        // instead of one card's feedback being filed under another.
+        const swapped = fillPlannedFromPicked([entry(longQuestion), entry('Al?')], picked);
+        assert.deepEqual(swapped.map(item => item.question), [longQuestion, 'Al?']);
+        // In plan order, a mangled copy takes the card at its own position.
+        const mangled = fillPlannedFromPicked([entry('Al?'), entry(longQuestion)], picked);
+        assert.deepEqual(mangled.map(item => item.question), ['Alpha?', longQuestion]);
+        // Structural errors are still rejected, and every one is reported.
+        const bad = checkReview({ feedback: { ...base, planned: [entry('Alpha?'), entry(longQuestion)], priorities: 'none' }, chapters: [{ questionTurnIndex: 99, title: 'x' }], moments: [{ turnIndex: 2, label: 'l', kind: 'nope' }] }, transcript, picked);
+        assert.match(bad.error, /priorities.*chapters: 99 is not a transcript turn index.*moments: kind must be one of/u);
+        assert.equal(checkReview({ feedback: base, chapters: 'x', moments: [] }, transcript).error.includes('chapters must be an array'), true);
+      },
+    };
+  })(),
+  { name: 'practice call analysis: a rejected reply is logged in full with its field lengths, and the correction names every violation', async run() {
+    const dir = await tempDir();
+    try {
+      const prompts = [];
+      const events = [];
+      const huge = 'long words here '.repeat(500);
+      const bad = { ...review, feedback: { ...reviewFeedback, overall: { score: 5, summary: huge }, priorities: 'none' }, chapters: [{ questionTurnIndex: 99, title: 'Nowhere' }], moments: [{ turnIndex: 3, label: 'x', kind: 'nope' }] };
+      const replies = [bad, review];
+      const result = await analyzeCall({ callDir: dir, callRecord, plan, brief, deps: {
+        transcribe: () => ({ words }), metrics: () => metrics, onEvent: (name, fields) => events.push({ name, fields }),
+        callText: request => { prompts.push(request.prompt); return replies.shift(); },
+      } });
+      assert.equal(result.analysis.status, 'ready');
+      assert.match(prompts[1], /priorities[\s\S]*chapters: 99 is not a transcript turn index[\s\S]*moments: kind must be one of/u);
+      const rejected = events.find(event => event.name === 'review-reply' && event.fields.outcome === 'rejected').fields;
+      assert.equal(rejected.fieldLengths['feedback.overall.summary'], huge.length);
+      assert.equal(rejected.replyText.join('') + events.filter(event => event.name === 'review-reply-text').flatMap(event => event.fields.replyText).join(''), JSON.stringify(bad), 'the whole reply, in pieces');
+      assert.ok(rejected.replyText.every(piece => piece.length <= 1900));
+      assert.ok(rejected.trimmed.some(item => item.path === 'overall.summary'), 'what was trimmed is logged even on a rejected reply');
+      const accepted = events.find(event => event.name === 'review-reply' && event.fields.outcome === 'accepted').fields;
+      assert.equal(accepted.replyText.join(''), JSON.stringify(review));
+    } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+  } },
+  { name: 'practice call analysis: the length sentence of the prompt is generated from the validator limits', async run() {
+    const sentence = lengthLimits();
+    for (const limit of [PRACTICE_FEEDBACK_LIMITS.long, PRACTICE_FEEDBACK_LIMITS.text, PRACTICE_FEEDBACK_LIMITS.short, PRACTICE_FEEDBACK_LIMITS.priorities, PRACTICE_FEEDBACK_LIMITS.moments, REVIEW_LIMITS.chapterTitle, REVIEW_LIMITS.momentLabel, REVIEW_LIMITS.chapters]) assert.ok(sentence.includes(String(limit)), `the sentence states ${limit}`);
+    assert.ok(buildReviewPrompt({ callRecord, plan, brief, metrics }).includes(sentence));
+    assert.equal(REVIEW_SCHEMA.properties.chapters.items.properties.title.maxLength, REVIEW_LIMITS.chapterTitle);
+    assert.doesNotMatch(sentence, /rejected whole/u);
+  } },
+  { name: 'practice call analysis: a re-run without the recording skips transcription, says so, and plans from the retry context; a failed run keeps that context', async run() {
+    const dir = await tempDir();
+    try {
+      const prompts = [];
+      const events = [];
+      let transcribed = 0;
+      const record = { ...callRecord, pickedQuestions: [18], askedQuestions: [18], answeredQuestions: [18], setup: { plan: { questions: [{ number: 18, probes: [] }] } } };
+      const context = retryContext([{ number: 18, question: 'Q18?', unprepared: false, card: { question: 'Q18?', headline: 'Head 18' } }, { number: 0, question: 'U?', unprepared: true, card: null }], brief);
+      assert.deepEqual(context, { role: { title: 'Product engineer', company: 'Discord' }, pool: { 18: { question: 'Q18?', headline: 'Head 18' } } });
+      const plan18 = planFromRetryContext(context);
+      assert.equal(plan18.length, 18); assert.deepEqual(plan18[17], { question: 'Q18?', headline: 'Head 18' }); assert.deepEqual(plan18[0], {});
+      const failed = await analyzeCall({ callDir: dir, callRecord: record, retry: context, deps: {
+        audioAvailable: false, transcribe: undefined, metrics: () => metrics, onEvent: (name, fields) => events.push({ name, fields }),
+        callText: request => { prompts.push(request.prompt); return { nothing: true }; },
+      } });
+      assert.equal(transcribed, 0);
+      assert.deepEqual(events.find(event => event.name === 'transcription').fields, { skipped: 'no-audio' });
+      assert.match(prompts[0], /TRANSCRIPTION NOTE[\s\S]*no longer kept/u);
+      assert.match(prompts[0], /card 18: Q18\?[\s\S]*headline: Head 18/u, 'the card comes from the retry context');
+      assert.match(prompts[0], /role: Product engineer at Discord/u);
+      assert.equal(failed.analysis.status, 'failed');
+      assert.deepEqual(failed.analysis.retry, context, 'a failed review keeps what a re-run needs');
+      assert.equal((await readAnalysis(dir)).retry.pool[18].headline, 'Head 18');
+      const ok = await analyzeCall({ callDir: dir, callRecord: record, retry: context, deps: { audioAvailable: false, metrics: () => metrics, callText: () => review } });
+      assert.equal(ok.analysis.status, 'ready');
+      assert.equal('retry' in ok.analysis, false, 'a ready analysis carries no retry context');
+    } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+  } },
 ];

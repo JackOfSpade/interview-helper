@@ -4,6 +4,8 @@ import ChatPanel, { CHAT_MAX_LENGTH, TYPING_REFRESH_MS } from './ChatPanel.jsx';
 import Avatar from './Avatar.jsx';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
+import { logEvent } from './callEventLog.js';
+import { padEdit, padTypingMs, typingPace } from './padTyping.js';
 import MoreOptions from './MoreOptions.jsx';
 import { DEFAULT_PAD_LANGUAGE, padLanguageName } from './padLanguages.js';
 import { clampScreen } from './screenMarkup.js';
@@ -28,6 +30,7 @@ const VOICE_WAIT_MAX_MS = 60000;
 // The wand working an exercise: how often it looks at the call, and the longest it waits on one line (paused time not counted).
 const WORK_POLL_MS = 150;
 const WORK_STEP_MAX_MS = 120000;
+const AFTER_TYPING_SETTLE_MS = 1500; // between the last key of a piece typed in silence and the line that explains it
 // How long a tile that just left takes to fade out before it is removed (matches .pc-leave).
 const LEAVE_MS = 300;
 // The candidate's last pick of pad language, kept for the next exercise and the next call.
@@ -133,8 +136,10 @@ export default function InCall({ state, api }) {
     return entry ? entry.id : null;
   };
   // The wand working an exercise in the pad: each step's line is said and its code typed into the pad at a person's
-  // pace, through the pad's own edits, so the interviewers see it exactly as typing: after the line, or while it is
-  // being said when the step chose to (`together`). When an
+  // pace, through the pad's own edits, so the interviewers see it exactly as typing. Each step chose when its line is
+  // said (`order`): before the typing, during it (the two start together and the keys are paced to the line), or
+  // after it (typed in silence, then explained). A step never starts before the last one's line and typing both
+  // ended, so the words are always about the piece being typed, just typed or about to be. When an
   // interviewer starts speaking it gives way exactly as a spoken answer does: a voice line is cut by the engine, and
   // typing stops after the same reaction time (the service's `floor`, from the engine), at the end of the word being
   // typed. Whatever is in the pad stays; the wand pressed again answers and carries on from there. Pressing it while it
@@ -169,47 +174,94 @@ export default function InCall({ state, api }) {
     workRef.current = run;
     setWorking(true);
     const entryOf = id => (liveRef.current?.chat || []).find(item => item?.id === id);
-    const typeStep = (code, cutLine = () => false) => {
+    // The run is written to the call's debug log (full content stays in the draft-answer event), so a step's words and
+    // its typing can be compared by their timings: the lines are short, well under the bridge's per-line cap.
+    const total = steps.length;
+    let index = 0;
+    let why = 'all steps done';
+    // The pad as the earlier steps left it (the service's copy can lag a second behind the keys).
+    let padNow = liveRef.current?.pad?.text ?? '';
+    const note = (...parts) => logEvent('work', ...parts);
+    const typeStep = (code, cutLine = () => false, pace = 1) => {
       if (!liveRef.current?.pad?.open || !typerRef.current) return Promise.resolve(false);
+      const began = Date.now();
+      note(`step ${index + 1}/${total} type start`);
       // An interviewer who starts speaking is given way to mid-piece, at the end of the word being typed; a line cut
       // off under it stops the hands with it (talking and typing give way together).
       return typerRef.current.typeTo(code, {
         stopped: () => run.stop || !mountedRef.current || !liveRef.current?.pad?.open || cutLine(),
         paused: () => !!liveRef.current?.paused,
         yielding: () => gaveWay(run),
-      });
+        pace,
+      }).then(done => { if (done) padNow = code; note(`step ${index + 1}/${total} type end after ${Date.now() - began}ms`, done ? 'completed' : 'not completed'); return done; });
     };
+    note(`run begin ${total} steps`);
     try {
-      for (const step of steps) {
-        if (run.stop || !mountedRef.current || floorTaken(run)) break;
+      for (; index < total; index += 1) {
+        const step = steps[index];
+        const label = `step ${index + 1}/${total}`;
+        if (run.stop || !mountedRef.current || floorTaken(run)) { why = `${label} not started: ${run.stop ? 'run replaced or stopped' : !mountedRef.current ? 'call screen closed' : 'an interviewer took the floor'}`; break; }
         const hasCode = step.code !== null && step.code !== undefined;
+        const edit = hasCode ? padEdit(padNow, step.code) : null;
+        // When the line is said against the typing; it only means something with both a line and code.
+        const order = hasCode && step.say ? (['before', 'during', 'after'].includes(step.order) ? step.order : step.together ? 'during' : 'before') : 'before';
+        const typeEstimate = hasCode ? padTypingMs(padNow, step.code) : 0;
+        const pace = order === 'during' ? typingPace(step.say, typeEstimate) : 1;
+        note(`${label} begin`, `explain=${order}`, `say ${step.say.length} chars`, hasCode ? `code +${edit.insert.length}/-${edit.remove} chars, estimated typing ${typeEstimate}ms${order === 'during' ? `, paced x${pace.toFixed(2)} to the line` : ''}` : 'no code');
         let typing = null;
+        let typedFirst = false;
+        if (order === 'after') {
+          // Written in silence first; the line that looks back at it is said only once the piece is in the pad.
+          // As before a line, an interviewer already speaking is left to finish.
+          await waitUntil(() => liveRef.current?.speaking !== 'interviewer', run, 30000);
+          if (run.stop || floorTaken(run)) { why = `${label} typing not started: ${run.stop ? 'run replaced or stopped' : 'an interviewer took the floor'}`; break; }
+          if (!(await typeStep(step.code))) { why = `${label} typing stopped before it finished`; break; }
+          typedFirst = true;
+          // A beat to look the piece over, as a person does before speaking about it. It also lets the pad settle: a
+          // line that starts the instant the last key lands reads to the interviewers as said while still typing.
+          const settledAt = Date.now() + AFTER_TYPING_SETTLE_MS;
+          await waitUntil(() => Date.now() >= settledAt, run, AFTER_TYPING_SETTLE_MS * 4);
+          if (run.stop || floorTaken(run)) { why = `${label} line not sent: ${run.stop ? 'run replaced or stopped' : 'an interviewer took the floor'}`; break; }
+        }
         if (step.say) {
           // A person lets the interviewer finish before going on (one already speaking as the run began).
           await waitUntil(() => liveRef.current?.speaking !== 'interviewer', run, 30000);
-          if (run.stop || floorTaken(run)) break;
+          if (run.stop || floorTaken(run)) { why = `${label} line not sent: ${run.stop ? 'run replaced or stopped' : 'an interviewer took the floor'}`; break; }
+          const lineAt = Date.now();
           const id = await deliverReply(step.say);
-          if (!id) break;
+          if (!id) { why = `${label} line not sent: ${!mountedRef.current ? 'call screen closed' : 'refused (paused, muted or no chat entry)'}`; break; }
           const cutLine = () => { const entry = entryOf(id); return !!entry && (entry.cutOff || entry.unsaid || entry.voice === 'failed'); };
-          if (hasCode && step.together) {
+          let typingAt = 0;
+          let typeMs = 0;
+          if (order === 'during') {
             // Typing while talking: the hands start once the voice does (or at once, on a call without a voice).
             const started = await waitUntil(() => { const entry = entryOf(id); return !!entry && (!entry.voice || ['playing', 'heard'].includes(entry.voice) || cutLine()); }, run);
-            if (!started || cutLine()) break;
-            typing = typeStep(step.code, cutLine);
+            if (!started || cutLine()) { why = `${label} voice did not start: ${cutLine() ? `line cut or failed (voice ${entryOf(id)?.voice ?? '?'})` : 'gave way, stopped or timed out'}`; break; }
+            typingAt = Date.now();
+            typing = typeStep(step.code, cutLine, pace).then(done => { typeMs = Date.now() - typingAt; return done; });
           }
           const heard = await waitUntil(() => { const entry = entryOf(id); return !!entry && (!entry.voice || entry.voice === 'heard' || cutLine()); }, run);
+          const heardAt = Date.now();
           const entry = entryOf(id);
           // Cut off or lost: the interviewer has the floor. A call without a voice has the line as typed, at once.
           const lineOk = heard && entry && !cutLine() && (!entry.voice || entry.voice === 'heard');
-          if (typing) { if (!(await typing)) break; }
-          if (!lineOk) break;
+          note(`${label} line heard after ${heardAt - lineAt}ms`, lineOk ? 'completed' : `not completed (voice ${entry?.voice ?? '?'}${entry?.cutOff ? ', cut off' : ''}${entry?.unsaid ? ', unsaid' : ''})`);
+          if (typing) {
+            const typed = await typing;
+            // How far apart the two ended, both measured from when the hands and the voice started together.
+            const lineMs = heardAt - typingAt;
+            if (typed && lineOk && Math.abs(typeMs - lineMs) > 3000) note(`${label} ${typeMs > lineMs ? 'typing outlasted the line' : 'line outlasted the typing'} by ${Math.abs(typeMs - lineMs)}ms`, `(typing ${typeMs}ms, line ${lineMs}ms)`);
+            if (!typed) { why = `${label} typing stopped before it finished`; break; }
+          }
+          if (!lineOk) { why = `${label} line not completed: ${!heard ? 'gave way, stopped or timed out' : `voice ${entry?.voice ?? 'lost'}${entry?.cutOff ? ', cut off' : ''}${entry?.unsaid ? ', unsaid' : ''}`}`; break; }
         }
-        if (hasCode && !typing) {
-          if (gaveWay(run)) break;
-          if (!(await typeStep(step.code))) break;
+        if (hasCode && !typing && !typedFirst) {
+          if (gaveWay(run)) { why = `${label} typing not started: an interviewer took the floor`; break; }
+          if (!(await typeStep(step.code))) { why = `${label} typing stopped before it finished`; break; }
         }
       }
     } finally {
+      note(`run end: ${why}`);
       if (workRef.current === run) workRef.current = null;
       if (mountedRef.current) setWorking(false);
       finished();
@@ -375,7 +427,7 @@ export default function InCall({ state, api }) {
     reportTyping(false);
     if (result?.muted) return; // muted while it was being written: dropped, never spoken
     const steps = Array.isArray(result?.steps) ? result.steps.filter(step => step && (typeof step.say === 'string' || typeof step.code === 'string')) : [];
-    if (steps.length) { await runWork(steps.map(step => ({ say: String(step.say || '').trim().slice(0, CHAT_MAX_LENGTH), code: typeof step.code === 'string' ? step.code : null, together: step.together === true }))); return; }
+    if (steps.length) { await runWork(steps.map(step => ({ say: String(step.say || '').trim().slice(0, CHAT_MAX_LENGTH), code: typeof step.code === 'string' ? step.code : null, order: step.order, together: step.together === true }))); return; }
     if (!text) { setSuggestError(typeof result?.error === 'string' && result.error ? result.error : 'Could not suggest a reply. Try again.'); return; }
     // Sent even while paused: the voice makes the line now and holds it for the resume (a call that cannot hold it
     // refuses, and the window keeps the text until the resume instead).

@@ -136,7 +136,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     }
     if (entry?.speaker !== 'candidate') { group = null; return; }
     if (entry.acknowledgement) return;
-    if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0, voicedOnly: true }; groups.push(group); }
+    if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0, voicedOnly: true, startsGenerated: entry.generated === true }; groups.push(group); }
     if (entry.voiced !== true) group.voicedOnly = false;
     group.turnIndexes.push(index);
     group.startMs = Math.min(group.startMs, entry.startMs);
@@ -162,7 +162,9 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
   }
 
   const answers = groups.map((answer, answerIndex) => {
-    const prosody = answer.turnIndexes.flatMap(index => prosodyFor(prosodyMap, index));
+    // Prosody of a line the Suggest a reply aid wrote: the gap between two such lines is the aid's delivery, not the candidate's pause.
+    const generatedItems = new Set();
+    const prosody = answer.turnIndexes.flatMap(index => prosodyFor(prosodyMap, index).map(item => { if (entries[index]?.generated === true) generatedItems.add(item); return item; }));
     const pauses = prosody.flatMap(item => item.pauses ?? []);
     // Each recogniser segment is measured alone, so the silence between two segments of one answer is a pause no
     // segment saw. It counts unless the call was paused through it or an interviewer spoke in it.
@@ -171,6 +173,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
       const fromMs = ordered[i - 1].endMs;
       const toMs = ordered[i].startMs;
       if (toMs - fromMs < PAUSE_MIN_MS) continue;
+      if (generatedItems.has(ordered[i - 1]) && generatedItems.has(ordered[i])) continue;
       if (pausedOverlapMs(pauseSpans, fromMs, toMs) > 0) continue;
       if (entries.some(other => other?.speaker === 'interviewer' && other.channel !== 'chat' && finite(other.startMs) && finite(other.endMs) && other.startMs < toMs && other.endMs > fromMs)) continue;
       pauses.push({ startMs: fromMs, endMs: toMs });
@@ -198,7 +201,8 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
       else if (before?.speaker === 'candidate' && before.acknowledgement) continue;
       else if (questionEndMs !== null || before?.speaker === 'candidate') break;
     }
-    const responseLatencyMs = finite(questionEndMs) && !askedNothing
+    // A line the aid wrote is not the candidate's own response time either: the wait is the aid's.
+    const responseLatencyMs = finite(questionEndMs) && !askedNothing && !answer.startsGenerated
       ? Math.max(0, answer.startMs - questionEndMs - pausedOverlapMs(pauseSpans, questionEndMs, answer.startMs)) : null;
     return {
       index: answerIndex,

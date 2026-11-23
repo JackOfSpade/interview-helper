@@ -393,6 +393,8 @@ export function createPracticeCallService(deps = {}) {
   let call = null;
   let starting = false;
   let finishing = false;
+  // The call whose failed review is being run again, and the step it is on (retryAnalysis).
+  let retrying = null;
   let elapsedTimer = null;
   const stateListeners = new Set();
   const eventListeners = new Set();
@@ -564,6 +566,19 @@ export function createPracticeCallService(deps = {}) {
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
     if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); }
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
+    // The record marks when the pad came up and went away, so the replay shows it from its opening (empty at first)
+    // and takes it down again; before, it appeared at the first text that reached an interviewer and never closed.
+    if (self.padRecord) {
+      const marks = self.padRecord.snapshots;
+      const markAt = Math.round(Number.isFinite(event.atMs) ? event.atMs : callMs(self));
+      const closed = marks.at(-1)?.closed === true;
+      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text }); }
+      else if (!event.open && marks.length && !closed) {
+        // What was typed since the pad last reached an interviewer is recorded first, so the close holds the final text.
+        snapshotPad(self, state.pad.text, markAt);
+        marks.push({ atMs: markAt, text: self.padRecord.lastText, closed: true });
+      }
+    }
     emitEvent(event);
   }
   /** Drops a share that is still coming up. A pad open held back for it is released, so it is not lost. */
@@ -573,7 +588,7 @@ export function createPracticeCallService(deps = {}) {
     state.sharing = null;
     const held = self.pendingPad;
     self.pendingPad = null;
-    if (held && !self.finished) applyPadEvent(self, held);
+    if (held && !self.finished) applyPadEvent(self, { ...held, atMs: undefined }); // marked when it comes up, not when it was asked for
   }
   /** Puts the content on the stage, closing the entry it replaces; the record's atMs is when it appeared. */
   function showScreen(self, { title, content, speakerId, visualId }, atMs) {
@@ -1295,6 +1310,7 @@ export function createPracticeCallService(deps = {}) {
     self.planAbort = new AbortController();
     state.notice = { ...PLANNING_NOTICE };
     setSetupStep('plan');
+    let attemptsSeen = 0;
     const startedAt = clock.now();
     let result;
     try {
@@ -1309,7 +1325,8 @@ export function createPracticeCallService(deps = {}) {
         voices: drawnVoices.map(voiceView), targetMinutes, steering: self.steering,
         ...(self.candidateName ? { candidateName: self.candidateName } : {}),
         signal: self.planAbort.signal, logger: deps.logger,
-        onAttempt: attempt => { if (call === self && !self.finished && state.phase === 'precheck') setSetupStep('plan', Number(attempt) || 1); },
+        // The first attempt is the step itself, already set above (it was logged twice).
+        onAttempt: attempt => { attemptsSeen += 1; if (attemptsSeen > 1 && call === self && !self.finished && state.phase === 'precheck') setSetupStep('plan', Number(attempt) || 1); },
       });
       if (!result?.plan || typeof result.plan !== 'object') throw new Error('the planner returned no plan');
     } catch (error) {
@@ -1368,14 +1385,24 @@ export function createPracticeCallService(deps = {}) {
         ...(leadRoom === null ? {} : { roomAmount: leadRoom }),
       };
       const factory = voiceFactory({ key: self.key, voiceId: persona.voiceId, tier, stability: persona.stability });
+      // Lateness fits the call. In a five-minute screen (call-mwsvsqmu, 2026-11-23) the colleague who owned the only
+      // exercise was drawn to join at 2:52, so the lead filled three minutes and the exercise got two of its four.
+      // Whoever asks the plan's first question is there from the start, and nobody arrives later than a quarter of
+      // the way through the planned questions.
+      const planQuestions = Array.isArray(plan.questions) ? plan.questions : [];
+      const plannedMs = planQuestions.reduce((sum, question) => sum + (Number(question?.minutes) > 0 ? Number(question.minutes) : 0), 0) * 60000;
+      const lateMaxMs = plannedMs > 0 ? Math.min(LATE_JOIN_MAX_MS, plannedMs / 4) : LATE_JOIN_MAX_MS;
+      const lateMinMs = Math.min(LATE_JOIN_MIN_MS, lateMaxMs / 2); // a short plan still has a spread
       const panel = (Array.isArray(plan.panel) ? plan.panel : []).slice(0, COLLEAGUE_IDS.length).map((member, at) => {
         const voice = byKey.get(member.voice);
         if (!voice) throw new Error(`the plan names a voice that was not drawn: ${member.voice}`);
         // Each colleague joins late with the same chance as before, drawn in plan order. A held-again
         // interview brings its own draws, so everyone joins as they did the first time.
         const saved = joinDraws?.[at];
-        const joins = saved ? (saved.joins === 'late' ? 'late' : 'start') : random() < LATE_JOIN_CHANCE ? 'late' : 'start';
-        const joinDelayMs = saved && Number.isFinite(saved.joinDelayMs) ? Math.round(saved.joinDelayMs) : Math.round(LATE_JOIN_MIN_MS + random() * (LATE_JOIN_MAX_MS - LATE_JOIN_MIN_MS));
+        // The chance is drawn even for whoever asks first, so the other colleagues' draws do not depend on it.
+        const asksFirst = planQuestions[0]?.askedBy === member.voice;
+        const joins = saved ? (saved.joins === 'late' ? 'late' : 'start') : random() < LATE_JOIN_CHANCE && !asksFirst ? 'late' : 'start';
+        const joinDelayMs = saved && Number.isFinite(saved.joinDelayMs) ? Math.round(saved.joinDelayMs) : Math.round(lateMinMs + random() * (lateMaxMs - lateMinMs));
         const roomAmount = Number.isFinite(member.room) ? member.room : null;
         tools.setAmount(voice.voiceId, roomAmount);
         const stability = stabilityOr(member.stability);
@@ -2156,7 +2183,7 @@ export function createPracticeCallService(deps = {}) {
           showScreen(self, item, callMs(self));
           const held = self.pendingPad;
           self.pendingPad = null;
-          if (held) applyPadEvent(self, held);
+          if (held) applyPadEvent(self, { ...held, atMs: undefined });
           publish();
         }, delayMs);
         publish();
@@ -2388,7 +2415,7 @@ export function createPracticeCallService(deps = {}) {
         ...(candidateVoice ? { candidateVoice } : {}),
         // A returned call: the interviewer is told the first ring was missed, and how long ago.
         ...(self.missedCall ? { callback: { how: self.missedCall.how, agoMs: Math.max(0, clock.now() - self.missedCall.at) } } : {}),
-        ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, present: entry.joined, joined: entry.joined }))] } } : {}),
+        ...(panel.length ? { panel: { leadId: 'A', speakers: [{ id: 'A', name: self.persona.name, role: self.persona.role || '', present: true, joined: true }, ...panel.map(entry => ({ id: entry.id, name: entry.name, role: entry.role || '', present: entry.joined, joined: entry.joined }))] } } : {}),
         ...(deps.thresholds ? { thresholds: deps.thresholds } : {}),
       });
       if (state.muted) { try { self.engine.setMuted?.(true); } catch { /* engine already ended */ } } // muted before the call connected
@@ -2503,7 +2530,7 @@ export function createPracticeCallService(deps = {}) {
       // pause, so the end of the call on the audio timeline is elapsed plus paused.
       const endOnTimelineMs = leadMs + ((engineState.elapsedMs + (Number(engineState.pausedMs) || 0)) || durationMs);
       closeScreenEntry(self, endOnTimelineMs);
-      snapshotPad(self, undefined, endOnTimelineMs);
+      if (!self.padRecord?.snapshots.at(-1)?.closed) snapshotPad(self, undefined, endOnTimelineMs); // a closed pad already holds its last text
       const onCallClock = value => shiftTimes(value, trimmedMs);
       // Plan numbers the engine counted as asked (a missing value reads as none), and the question ids behind them.
       const asked = [...new Set((Array.isArray(engineState.askedQuestions) ? engineState.askedQuestions : []).filter(n => Number.isInteger(n) && n >= 1 && n <= (self.plan?.length || 0)))];
@@ -2627,15 +2654,7 @@ export function createPracticeCallService(deps = {}) {
           deps: {
             ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage,
             clock: () => clock.now(),
-            // Each analysis step lands in debug.jsonl; failures and rejected reviews also go to the app log.
-            onEvent: (name, fields) => {
-              dbg(`analysis-${name}`, fields);
-              if (fields?.failed || fields?.outcome === 'rejected' || fields?.outcome === 'call-failed') {
-                logWarn(deps.logger, `[PracticeCall] analysis ${name}${fields.attempt ? ` attempt ${fields.attempt}` : ''}: ${fields.outcome || 'failed'} after ${fields.ms ?? '?'} ms: ${fields.error || 'no detail'}`);
-              } else if (name === 'done' || name === 'review-reply') {
-                logNote(deps.logger, `analysis ${name}: ${fields?.status || fields?.outcome || 'ok'} in ${fields?.ms ?? '?'} ms`);
-              }
-            },
+            onEvent: analysisEvent,
           },
         });
         const report = produced?.analysis && typeof produced.analysis === 'object' ? produced.analysis : produced;
@@ -2661,48 +2680,12 @@ export function createPracticeCallService(deps = {}) {
       dbg('analysis-saved', { status: stored.status, written: analysisWritten });
       self.analysis = stored;
       if (feedback) {
-        try {
-          const registry = deps.registry;
-          if (registry && typeof registry.arm === 'function' && typeof registry.finish === 'function') {
-            const armRequest = {
-              nodeId: self.args?.nodeId ?? null, company: String(self.brief?.role?.company || ''),
-              role: String(self.brief?.role?.title || ''), questionCount: Array.isArray(self.plan) ? self.plan.length : 0,
-            };
-            const arm = async () => {
-              try {
-                const armed = await registry.arm(armRequest);
-                return typeof armed === 'string' && armed ? armed : null;
-              } catch (error) {
-                if (error?.code !== 'already_armed') throw error;
-                return null;
-              }
-            };
-            let code = await arm();
-            const firstArmed = !!code;
-            if (!code) {
-              // The call is the only thing that arms a session, so one still armed was left by an
-              // earlier call whose feedback was never stored. It is closed to make room for this one.
-              if (typeof registry.cancel === 'function') await registry.cancel(armRequest.nodeId);
-              code = await arm();
-            }
-            if (!code) throw new Error('the practice registry did not arm a session');
-            const result = await registry.finish(code, feedback);
-            dbg('history-registry', { status: result?.status ?? null, rearmed: !firstArmed });
-            if (!['accepted', 'duplicate'].includes(result?.status)) {
-              // Never leave this call's own session armed: it would block the next call's history.
-              try { if (typeof registry.cancel === 'function') await registry.cancel(armRequest.nodeId); } catch { /* the next call clears it */ }
-              throw new Error(result?.note || result?.status || 'rejected');
-            }
-          }
-          else dbg('history-registry', { status: 'skipped', hadRegistry: false });
-        } catch (error) {
-          warn(`[PracticeCall] practice history not updated: ${error?.message || error}`);
-          emitEvent({ type: 'feedback-error', message: 'Your call history could not be updated.' });
-        }
+        await recordHistory({ nodeId: self.args?.nodeId ?? null, company: String(self.brief?.role?.company || ''), role: String(self.brief?.role?.title || ''), questionCount: Array.isArray(self.plan) ? self.plan.length : 0 }, feedback);
       }
       }
       // R9: keep the WAV sources only when the mixdown exists and the review was stored.
-      if (audio && (analysisWritten || !wantsAnalysis)) {
+      // A failed review keeps them too, so "Try again" can transcribe the call (a successful retry deletes them).
+      if (audio && (analysisWritten || !wantsAnalysis) && !(wantsAnalysis && analysis.status === 'failed')) {
         for (const name of ['candidate.wav', 'interviewer.wav']) {
           const file = path.join(self.dir, name);
           try {
@@ -2733,6 +2716,171 @@ export function createPracticeCallService(deps = {}) {
     }
   }
 
+  /** Each analysis step lands in debug.jsonl; failures and rejected reviews also go to the app log. */
+  function analysisEvent(name, fields) {
+    dbg(`analysis-${name}`, fields);
+    if (fields?.failed || fields?.outcome === 'rejected' || fields?.outcome === 'call-failed') {
+      logWarn(deps.logger, `[PracticeCall] analysis ${name}${fields.attempt ? ` attempt ${fields.attempt}` : ''}: ${fields.outcome || 'failed'} after ${fields.ms ?? '?'} ms: ${fields.error || 'no detail'}`);
+    } else if (name === 'done' || name === 'review-reply') {
+      logNote(deps.logger, `analysis ${name}: ${fields?.status || fields?.outcome || 'ok'} in ${fields?.ms ?? '?'} ms`);
+    }
+  }
+
+  /**
+   * What a re-run of a failed review needs that the call record lacks: the role and company and the picked pool
+   * cards, as { role, pool } (see retryContext in analyzeCall). From the failed analysis when it kept them, else
+   * from the interview saved from this call; with neither the review runs on the transcript alone.
+   */
+  async function reviewContextFor(record, prior) {
+    if (prior?.retry && typeof prior.retry === 'object') return { source: 'analysis', retry: prior.retry };
+    try {
+      for (const item of await savedInterviews.list(await postingCountsKey(record.nodeId))) {
+        const saved = await savedInterviews.read(item.id);
+        if (saved?.fromCallId !== record.callId) continue;
+        const pool = {};
+        for (const card of Array.isArray(saved.questions) ? saved.questions : []) if (Number.isInteger(card?.number) && card.number >= 1) pool[card.number] = card;
+        return { source: 'saved-interview', retry: { role: { title: String(saved.role || ''), company: String(saved.company || '') }, pool } };
+      }
+    } catch { /* the review then runs without the plan */ }
+    return { source: 'none', retry: null };
+  }
+
+  /**
+   * Runs a failed review again from the saved call record. The raw tracks are used when they are still there (a failed
+   * review keeps them); without them the review goes without the word-level transcript. Returns { status, error? } or { error }.
+   */
+  async function retryAnalysis(callId) {
+    const target = typeof callId === 'string' && callId ? callId : state.callId;
+    if (!target) return { error: 'There is no call to review.' };
+    // Off unless the app passes the review's AI in: a unit suite must never call it.
+    if (typeof deps.callText !== 'function') return { error: 'The feedback review is not available.' };
+    // A call being held or wrapped up, or another review, owns the service: it is the same guard as a new call's.
+    if (starting || finishing || (call && !call.finished)) return { error: 'Another call is in progress.' };
+    finishing = true;
+    const previousDebug = debug;
+    let rerunLog = null;
+    try {
+      const record = await store.readRecord(target);
+      const prior = await store.readAnalysis(target);
+      if (!record) return { error: 'This call can no longer be reviewed.' };
+      if (prior?.status !== 'failed') return { error: 'Only a failed review can be run again.' };
+      const dir = await store.callDir(target);
+      if (!dir) return { error: 'This call can no longer be reviewed.' };
+      rerunLog = createCallDebugLog({ fs: deps.debugFs ?? fs, dir, now: () => clock.now() });
+      debug = rerunLog;
+      const startedAt = clock.now();
+      retrying = { callId: target, stage: 'starting' };
+      const showProgress = () => { getReplay(target).then(emitReplay).catch(() => {}); };
+      showProgress();
+      const context = await reviewContextFor(record, prior);
+      const candidateWav = await fs.lstat(path.join(dir, 'candidate.wav')).catch(() => null);
+      let audioAvailable = !!candidateWav && candidateWav.isFile() && !candidateWav.isSymbolicLink();
+      let key = null;
+      if (audioAvailable) {
+        try { key = await (await resolve('readKey'))(); } catch (error) { dbg('analysis-retry-key', { error: error?.message ?? String(error) }); }
+        if (typeof key !== 'string' || !key) audioAvailable = false;
+      }
+      dbg('analysis-retry', { priorError: prior.error ?? null, audioAvailable, contextFrom: context.source, poolCards: Object.keys(context.retry?.pool ?? {}).length });
+      const setStage = stage => { dbg('analysis-stage', { stage, ms: Math.round(clock.now() - startedAt) }); retrying.stage = stage; showProgress(); };
+      let analysis;
+      let feedback = null;
+      try {
+        const analyze = await resolve('analyze');
+        const transcribe = async request => {
+          const extra = request && typeof request === 'object' ? request : {};
+          const options = { ...extra, path: typeof request === 'string' ? request : extra.path, key };
+          if (typeof deps.transcribe === 'function') return deps.transcribe(options);
+          return (await resolve('transcribeVerbatim'))(options);
+        };
+        const produced = await analyze({
+          callDir: dir, callRecord: record, retry: context.retry,
+          deps: { callText: deps.callText, ...(audioAvailable ? { transcribe } : { audioAvailable: false }), onStage: setStage, clock: () => clock.now(), onEvent: analysisEvent },
+        });
+        const report = produced?.analysis && typeof produced.analysis === 'object' ? produced.analysis : produced;
+        const raw = produced?.feedback ?? null;
+        feedback = raw && typeof raw === 'object' ? { ...raw, callId: raw.callId || target } : null;
+        analysis = report && typeof report === 'object'
+          ? { ...report, ...(feedback ? { feedback } : {}), status: report.status === 'failed' ? 'failed' : 'ready' }
+          : { status: 'failed', error: 'The call review could not be written.' };
+      } catch (error) {
+        warn(`[PracticeCall] analysis-retry-failed: ${error?.message || error}`);
+        analysis = { ...prior, status: 'failed', error: 'The call review could not be written.' };
+      }
+      setStage('saving');
+      const stored = { callId: target, createdAt: Date.now(), ...analysis };
+      let written = false;
+      try { await store.writeAnalysis(target, stored); written = true; } catch (error) {
+        dbg('analysis-write-failed', { error: error?.message ?? String(error), code: error?.code ?? null });
+        warn(`[PracticeCall] analysis-write-failed: ${error?.message || error}`);
+      }
+      dbg('analysis-saved', { status: stored.status, written });
+      if (written && stored.status === 'ready' && feedback) {
+        await recordHistory({ nodeId: record.nodeId ?? null, company: context.retry?.role?.company ?? '', role: context.retry?.role?.title ?? '', questionCount: Array.isArray(record.setup?.plan?.questions) ? record.setup.plan.questions.length : 0 }, feedback);
+        // The review is stored: the raw tracks are not needed again once the recording exists. A run that could not use
+        // them (no transcription key just now) leaves them for another try.
+        if (audioAvailable && await store.hasAudio(target)) await store.deleteRawAudio(target, ['candidate.wav', 'interviewer.wav', 'call.wav']).catch(() => {});
+      }
+      dbg('analysis-retry-done', { status: stored.status, written, ms: Math.round(clock.now() - startedAt), error: stored.error ?? null });
+      return written ? { status: stored.status, ...(stored.error ? { error: stored.error } : {}) } : { error: 'The review could not be saved.' };
+    } catch (error) {
+      dbg('analysis-retry-failed', { error: error?.message ?? String(error), code: error?.code ?? null });
+      warn(`[PracticeCall] analysis retry failed: ${error?.message || error}`);
+      return { error: 'The review could not be run again.' };
+    } finally {
+      retrying = null;
+      finishing = false;
+      try { await rerunLog?.close(); } catch { /* logging is best effort */ }
+      if (debug === rerunLog) debug = previousDebug;
+      getReplay(target).then(emitReplay).catch(() => {});
+    }
+  }
+
+  /**
+   * Files a stored review in the practice history: arms a session for the job (closing one a call left armed) and
+   * finishes it with the feedback. `source` is { nodeId, company, role, questionCount }. A failure is logged and
+   * shown as a notice, never thrown.
+   */
+  async function recordHistory(source, feedback) {
+    try {
+      const registry = deps.registry;
+      if (registry && typeof registry.arm === 'function' && typeof registry.finish === 'function') {
+        const armRequest = {
+          nodeId: source.nodeId ?? null, company: source.company,
+          role: source.role, questionCount: source.questionCount,
+        };
+        const arm = async () => {
+          try {
+            const armed = await registry.arm(armRequest);
+            return typeof armed === 'string' && armed ? armed : null;
+          } catch (error) {
+            if (error?.code !== 'already_armed') throw error;
+            return null;
+          }
+        };
+        let code = await arm();
+        const firstArmed = !!code;
+        if (!code) {
+          // The call is the only thing that arms a session, so one still armed was left by an
+          // earlier call whose feedback was never stored. It is closed to make room for this one.
+          if (typeof registry.cancel === 'function') await registry.cancel(armRequest.nodeId);
+          code = await arm();
+        }
+        if (!code) throw new Error('the practice registry did not arm a session');
+        const result = await registry.finish(code, feedback);
+        dbg('history-registry', { status: result?.status ?? null, rearmed: !firstArmed });
+        if (!['accepted', 'duplicate'].includes(result?.status)) {
+          // Never leave this call's own session armed: it would block the next call's history.
+          try { if (typeof registry.cancel === 'function') await registry.cancel(armRequest.nodeId); } catch { /* the next call clears it */ }
+          throw new Error(result?.note || result?.status || 'rejected');
+        }
+      }
+      else dbg('history-registry', { status: 'skipped', hadRegistry: false });
+    } catch (error) {
+      warn(`[PracticeCall] practice history not updated: ${error?.message || error}`);
+      emitEvent({ type: 'feedback-error', message: 'Your call history could not be updated.' });
+    }
+  }
+
   /**
    * Raw audio (the two tracks recorded during a call and their uncompressed mix, about 60 to 150 MB each for a
    * 30-minute call) is left behind when a review failed or the app quit during a call or its review. Nothing reads it
@@ -2754,6 +2902,8 @@ export function createPracticeCallService(deps = {}) {
       if (call && call.callId === item.callId) continue; // a call that started meanwhile is recording into it
       const names = item.raw.map(entry => entry.name);
       const rescue = !item.hasRecording && item.hasRecord && recent.has(item.callId);
+      // The raw tracks of a recent call whose review failed are kept for a retry (retryAnalysis deletes them once it succeeds).
+      if (!rescue && item.hasRecord && recent.has(item.callId) && (await store.readAnalysis?.(item.callId).catch(() => null))?.status === 'failed') continue;
       try {
         if (rescue) {
           const mixedPath = path.join(item.dir, 'call.wav');
@@ -2803,7 +2953,9 @@ export function createPracticeCallService(deps = {}) {
     if (!record) return null;
     const analysis = call?.callId === callId && call.analysis ? call.analysis : await store.readAnalysis(callId);
     const hasAudio = await store.hasAudio(callId);
-    const status = analysis?.status === 'ready' || analysis?.status === 'failed' ? analysis.status : 'missing';
+    // A review being run again reads as running, with the step it is on.
+    const rerun = retrying?.callId === callId ? retrying : null;
+    const status = rerun ? 'analyzing' : analysis?.status === 'ready' || analysis?.status === 'failed' ? analysis.status : 'missing';
     return {
       callId,
       audioUrl: hasAudio ? `practice-call://${callId}/call.m4a` : null,
@@ -2824,7 +2976,7 @@ export function createPracticeCallService(deps = {}) {
       screens: Array.isArray(record.screens) ? record.screens : [],
       pad: record.pad && typeof record.pad === 'object' ? record.pad : { lang: '', snapshots: [] },
       feedback: analysis?.feedback ?? null,
-      analysis: { status, ...(analysis?.error ? { error: analysis.error } : {}), ...(analysis?.tooShort ? { tooShort: true } : {}), ...(analysis?.metrics?.typedOnly === true ? { metrics: { typedOnly: true } } : {}) },
+      analysis: { status, ...(rerun?.stage ? { stage: rerun.stage } : {}), ...(analysis?.error && !rerun ? { error: analysis.error } : {}), ...(analysis?.tooShort ? { tooShort: true } : {}), ...(analysis?.metrics?.typedOnly === true ? { metrics: { typedOnly: true } } : {}) },
     };
   }
 
@@ -3100,12 +3252,12 @@ export function createPracticeCallService(deps = {}) {
           pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),
         });
         if (working) {
-          dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0) });
+          dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0), plan: result.map((step, at) => ({ step: at + 1, order: step.order || (step.together === true ? 'during' : 'before'), say: step.say, code: step.code === null ? null : (step.code.match(/[\s\S]{1,1900}/gu) ?? ['']) })) }); // the debug log caps a string at 2000 characters, so a step's code goes in pieces to be joined
           if (call !== self || self.finished) return { error: 'The call has ended.' };
           if (state.muted) return { muted: true };
           // The window says the steps one after another: their delivery tags are written now, so no line waits for its own.
           try { self.candidateVoice?.prepare?.(result.map(step => step.say).filter(Boolean)); } catch { /* tagging ahead is best effort */ }
-          return { steps: result.map(step => ({ say: step.say, code: step.code, together: step.together === true })) };
+          return { steps: result.map(step => ({ say: step.say, code: step.code, order: ['before', 'during', 'after'].includes(step.order) ? step.order : step.together === true ? 'during' : 'before', together: step.order ? step.order === 'during' : step.together === true })) };
         }
         const text = result;
         dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });
@@ -3134,6 +3286,7 @@ export function createPracticeCallService(deps = {}) {
     },
     getPreparedCards: () => (call?.plan || []).map(card => ({ ...card })),
     getReplay,
+    retryAnalysis,
     deleteRecording: async callId => {
       const target = typeof callId === 'string' && callId ? callId : state.callId;
       if (!target) return null;

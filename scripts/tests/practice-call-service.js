@@ -686,6 +686,89 @@ test('the call timer freezes while paused and does not jump afterwards', async (
   assert.equal(service.getState().elapsedMs, 12000);
 });
 
+/** A finished call whose review failed, with both raw tracks written, and a service able to run the review again. */
+async function failedReviewCall({ withCallText = true } = {}) {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-retry-'));
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: { afconvert: async args => { await nodeFs.writeFile(args.at(-1), 'm4a'); } } });
+  const analyses = [];
+  let next = () => ({ status: 'failed', error: 'feedback: overall.summary must be a string of at most 1500 characters.', retry: { role: { title: 'Engineer', company: 'Acme' }, pool: { 1: { question: 'Tell me about a launch.' } } } });
+  deps.fs = nodeFs;
+  deps.analyze = async input => { analyses.push(input); return next(input); };
+  if (withCallText) deps.callText = async () => ({});
+  const service = createPracticeCallService(deps);
+  await service.start(ARGS);
+  await service.answer();
+  const callDir = path.join(tmp, 'practice-calls', 'call-1');
+  await nodeFs.writeFile(path.join(callDir, 'candidate.wav'), 'candidate');
+  await nodeFs.writeFile(path.join(callDir, 'interviewer.wav'), 'interviewer');
+  await service.hangUp();
+  return { tmp, deps, service, callDir, analyses, setNext: fn => { next = fn; } };
+}
+const exists = async file => nodeFs.lstat(file).then(() => true, () => false);
+
+test('a failed review keeps the raw tracks for a retry, and the leftover tidy leaves them alone', async () => {
+  const { service, callDir, deps } = await failedReviewCall();
+  assert.equal((await deps.store.readAnalysis('call-1')).status, 'failed');
+  assert.equal(await exists(path.join(callDir, 'candidate.wav')) && await exists(path.join(callDir, 'interviewer.wav')), true, 'both tracks are kept');
+  await service.tidyLeftoverAudio();
+  assert.equal(await exists(path.join(callDir, 'candidate.wav')), true, 'the tidy keeps the tracks of a recent call with a failed review');
+  const replay = await service.getReplay('call-1');
+  assert.equal(replay.analysis.status, 'failed');
+});
+
+test('retryAnalysis runs the review again from the saved record, shows progress, files the result, and deletes the raw tracks once it is stored', async () => {
+  const { service, callDir, deps, analyses, setNext } = await failedReviewCall();
+  const seen = [];
+  service.onReplayUpdated(replay => seen.push(replay?.analysis?.status));
+  setNext(input => { input.deps.onStage?.('review'); input.deps.onEvent?.('begin', { transcriptEntries: 1 }); return { status: 'ready', chapters: [], feedback: { summary: 'fixed', callId: null } }; });
+  const result = await service.retryAnalysis('call-1');
+  assert.deepEqual(result, { status: 'ready' });
+  const input = analyses.at(-1);
+  assert.equal(input.callDir, callDir);
+  assert.equal(input.callRecord.callId, 'call-1', 'the saved record is reviewed');
+  assert.deepEqual(input.retry, { role: { title: 'Engineer', company: 'Acme' }, pool: { 1: { question: 'Tell me about a launch.' } } }, 'the plan comes from what the failed review kept');
+  assert.equal(typeof input.deps.transcribe, 'function', 'the tracks are there, so the answers are transcribed again');
+  assert.equal(input.deps.callText, deps.callText);
+  assert.equal(seen.includes('analyzing'), true, 'the replay reports the review running');
+  const stored = await deps.store.readAnalysis('call-1');
+  assert.equal(stored.status, 'ready');
+  assert.equal((await service.getReplay('call-1')).analysis.status, 'ready');
+  assert.equal(await exists(path.join(callDir, 'candidate.wav')) || await exists(path.join(callDir, 'interviewer.wav')), false, 'the tracks go once the review is stored');
+  assert.equal(await exists(path.join(callDir, 'call.m4a')), true);
+  const log = (await nodeFs.readFile(path.join(callDir, 'debug.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const at = log.findIndex(line => line.event === 'analysis-retry');
+  assert.ok(at >= 0 && log.slice(at).some(line => line.event === 'analysis-begin') && log.slice(at).some(line => line.event === 'analysis-retry-done'), 'the retry is logged like the first run');
+  assert.deepEqual((await service.retryAnalysis('call-1')).error, 'Only a failed review can be run again.');
+});
+
+test('retryAnalysis without the raw tracks reviews without transcription, and a failing run stays retryable', async () => {
+  const { service, callDir, deps, analyses, setNext } = await failedReviewCall();
+  await nodeFs.unlink(path.join(callDir, 'candidate.wav'));
+  setNext(() => ({ status: 'failed', error: 'feedback: still wrong', retry: { role: {}, pool: {} } }));
+  const failed = await service.retryAnalysis('call-1');
+  assert.deepEqual(failed, { status: 'failed', error: 'feedback: still wrong' });
+  const input = analyses.at(-1);
+  assert.equal(input.deps.transcribe, undefined);
+  assert.equal(input.deps.audioAvailable, false);
+  assert.equal((await deps.store.readAnalysis('call-1')).error, 'feedback: still wrong');
+  assert.equal(await exists(path.join(callDir, 'interviewer.wav')), true, 'a failed retry deletes nothing');
+  const replay = await service.getReplay('call-1');
+  assert.equal(replay.analysis.status, 'failed');
+  assert.equal(replay.analysis.error, 'feedback: still wrong');
+  setNext(() => { throw new Error('boom'); });
+  assert.equal((await service.retryAnalysis('call-1')).status, 'failed', 'a thrown analysis is a failed review, not a thrown retry');
+  setNext(() => ({ status: 'ready', chapters: [], feedback: { summary: 'ok' } }));
+  assert.equal((await service.retryAnalysis('call-1')).status, 'ready');
+});
+
+test('retryAnalysis is refused by a service built without the review AI, and for a call that is not there', async () => {
+  const bare = await failedReviewCall({ withCallText: false });
+  assert.deepEqual(await bare.service.retryAnalysis('call-1'), { error: 'The feedback review is not available.' });
+  assert.equal(bare.analyses.length, 1, 'only the first run analysed');
+  const { service } = await failedReviewCall();
+  assert.equal((await service.retryAnalysis('call-nope')).error, 'This call can no longer be reviewed.');
+});
+
 export default cases;
 
 // --- guards against the real modules the service now imports on demand -----
@@ -2499,7 +2582,7 @@ test('panel: a plan with colleagues builds the panel voice and tells the engine 
   assert.equal(options.voice.panelOf.factories.B.options.voiceId, 'lib-2');
   assert.equal(options.voice.panelOf.factories.C.options.voiceId, 'lib-3');
   assert.deepEqual(options.panel, { leadId: 'A', speakers: [
-    { id: 'A', name: 'Nora Lead', present: true, joined: true }, { id: 'B', name: 'Ben Specialist', present: true, joined: true }, { id: 'C', name: 'Cara Second', present: true, joined: true },
+    { id: 'A', name: 'Nora Lead', role: 'Hiring Manager', present: true, joined: true }, { id: 'B', name: 'Ben Specialist', role: 'Engineer', present: true, joined: true }, { id: 'C', name: 'Cara Second', role: 'Director', present: true, joined: true },
   ] });
   await service.hangUp();
 });
@@ -2590,6 +2673,26 @@ test('panel: a fixed temperament still wins over the plan and the plan\'s collea
   assert.equal(opener.options.panel.length, 1, 'the colleagues were seated although the temperament was fixed');
 });
 
+test('panel: whoever asks the plan\'s first question is on the call from the start, and lateness is capped at a quarter of the planned minutes', async () => {
+  const member = { voice: 'V2', role: 'Senior Engineer', focus: 'register work', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.' };
+  const own = key => ({ number: 0, text: 'What do you assume an attacker can do?', askedBy: key, minutes: 1, probes: [] });
+  // random 0.1 draws "late" for everyone; the colleague who opens the questions is there anyway (call-mwsvsqmu: the
+  // owner of the only exercise of a five-minute screen joined at 2:52).
+  const first = panelHarness({ random: () => 0.1, plan: drawn => soloPlan(drawn, { panel: [member], questions: [{ number: 1, askedBy: 'V2', minutes: 4, probes: [] }, own(drawn[0].key)] }) });
+  const started = await panelStart(first);
+  await started.service.answer();
+  assert.equal(first.clock.pending().filter(timer => timer.ms >= 10000 && timer.ms <= 210000).length, 0, 'no join timer for the colleague who asks first');
+  assert.deepEqual(started.service.getState().participants.map(item => item.id), ['A', 'B']);
+  await started.service.hangUp({ feedback: false });
+  // The lead asks first: the colleague may be late, but within a quarter of the five planned minutes (75 s).
+  const short = panelHarness({ random: () => 0.1, plan: drawn => soloPlan(drawn, { panel: [member], questions: [own(drawn[0].key), { number: 1, askedBy: 'V2', minutes: 4, probes: [] }] }) });
+  const late = await panelStart(short);
+  await late.service.answer();
+  assert.deepEqual(late.service.getState().participants.map(item => item.id), ['A']);
+  assert.deepEqual(short.clock.lateTimers().map(timer => timer.ms), [41250], 'a tenth of the way from 37.5 s to 75 s');
+  await late.service.hangUp({ feedback: false });
+});
+
 test('panel: a late colleague joins when the timer fires, once, and the record keeps the time', async () => {
   const setup = panelHarness({ random: () => 0.1 });
   const { service, deps } = await panelStart(setup);
@@ -2601,9 +2704,9 @@ test('panel: a late colleague joins when the timer fires, once, and the record k
   const late = setup.clock.lateTimers();
   assert.equal(late.length, 1, 'one timer for the one late colleague');
   assert.equal(late[0].ms >= 40000 && late[0].ms <= 210000, true);
-  assert.equal(late[0].ms, 57000, 'uniform between 40 s and 210 s from the random draw');
+  assert.equal(late[0].ms, 51000, 'uniform from 40 s up to a quarter of the planned ten minutes (150 s), from the random draw');
   assert.deepEqual(service.getState().participants.map(item => item.id), ['A']);
-  setup.clock.setNow(1000 + 57000);
+  setup.clock.setNow(1000 + 51000);
   setup.clock.fire(late[0]);
   setup.clock.fire(late[0]);
   assert.deepEqual(service.getState().participants.map(item => [item.id, item.name, item.role, item.focus, item.status]), [
@@ -2614,7 +2717,7 @@ test('panel: a late colleague joins when the timer fires, once, and the record k
   assert.equal(states.some(item => item.participants.length === 2), true, 'the join is published');
   await service.hangUp();
   const record = await deps.store.readRecord('call-1');
-  assert.deepEqual(record.panel, [{ id: 'B', name: 'Ben Specialist', role: 'Senior Engineer', focus: 'system design', interrupting: 'Rarely cuts in.', joins: 'late', joinedAtMs: 57000, voiceId: 'lib-2', room: { seed: 'lib-2', rt60Ms: 300 }, roomAmount: 0.4, stability: 0.3 }]);
+  assert.deepEqual(record.panel, [{ id: 'B', name: 'Ben Specialist', role: 'Senior Engineer', focus: 'system design', interrupting: 'Rarely cuts in.', joins: 'late', joinedAtMs: 51000, voiceId: 'lib-2', room: { seed: 'lib-2', rt60Ms: 300 }, roomAmount: 0.4, stability: 0.3 }]);
   assert.equal(record.persona.name, 'Nora Lead');
 });
 
@@ -2646,7 +2749,7 @@ test('panel: a pause holds a late colleague\'s wait on the call clock, and the r
   await built.service.answer();
   const engine = setup.engineOptions[0].onEvent;
   const [first] = setup.clock.lateTimers();
-  assert.equal(first.ms, 57000);
+  assert.equal(first.ms, 51000);
   setup.clock.setNow(1000 + 20000);
   engine({ type: 'paused', paused: true });
   assert.equal(first.cleared, true, 'the pause stops the wait');
@@ -2655,14 +2758,14 @@ test('panel: a pause holds a late colleague\'s wait on the call clock, and the r
   first.cleared = false;
   setup.clock.fire(first);
   assert.deepEqual(built.service.getState().participants.map(item => item.id), ['A'], 'nobody joins a paused call');
-  assert.equal(setup.clock.pending().filter(timer => timer !== first && timer.ms === 37000).length, 0, 'no wait is armed while paused');
+  assert.equal(setup.clock.pending().filter(timer => timer !== first && timer.ms === 31000).length, 0, 'no wait is armed while paused');
   engine({ type: 'paused', paused: false });
-  const resumed = setup.clock.pending().filter(timer => timer.ms === 37000);
-  assert.equal(resumed.length, 1, 'the resume waits for the 37 s left of the 57 s');
+  const resumed = setup.clock.pending().filter(timer => timer.ms === 31000);
+  assert.equal(resumed.length, 1, 'the resume waits for the 31 s left of the 51 s');
   // A second resume event, or a pause state set to what it already is, arms nothing more.
   engine({ type: 'paused', paused: false });
-  assert.equal(setup.clock.pending().filter(timer => timer.ms === 37000).length, 1);
-  setup.clock.setNow(setup.clock.now() + 37000);
+  assert.equal(setup.clock.pending().filter(timer => timer.ms === 31000).length, 1);
+  setup.clock.setNow(setup.clock.now() + 31000);
   setup.clock.fire(resumed[0]);
   assert.deepEqual(built.service.getState().participants.map(item => item.id), ['A', 'B'], 'the colleague joins 57 s into the call as its clock counts it');
   assert.deepEqual(setup.engineCalls, ['joined:B']);
@@ -2852,7 +2955,7 @@ test('saved interviews: an answered call is kept, and a repeat for the same job 
   await first.service.start(ARGS);
   const persona = first.service.getState().persona.name;
   await first.service.answer();
-  assert.equal(first.setup.clock.lateTimers()[0].ms, 57000);
+  assert.equal(first.setup.clock.lateTimers()[0].ms, 51000);
   await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'the interview is kept');
   await first.service.hangUp();
   const [kept] = await first.service.listSaved('node-1');
@@ -2875,7 +2978,7 @@ test('saved interviews: an answered call is kept, and a repeat for the same job 
   await again.service.answer();
   const late = again.setup.clock.lateTimers();
   assert.equal(late.length, 1, 'the colleague joins late again');
-  assert.equal(late[0].ms, 57000, 'at the same moment as the first time');
+  assert.equal(late[0].ms, 51000, 'at the same moment as the first time');
   await waitFor(async () => (await again.service.listSaved('node-1'))[0]?.timesUsed === 2, 'the repeat is counted');
   await again.service.hangUp();
   const record = await again.deps.store.readRecord('call-1');
@@ -3626,6 +3729,7 @@ test('the record holds screens and pad snapshots on the call clock, closed at re
   service.sendChat('again');
   service.updatePad('def f(): return 1');
   box.emit({ type: 'pad-sent', atMs: 9000 });
+  box.emit({ type: 'pad', open: false, atMs: 9500 });
   now = 19000;
   await service.hangUp();
   const record = await deps.store.readRecord('call-1');
@@ -3633,7 +3737,10 @@ test('the record holds screens and pad snapshots on the call clock, closed at re
   assert.deepEqual(record.screens.map(item => [item.title, item.atMs, item.endMs]), [['One', 1000, 3000], ['Two', 3000, 5000]], 'shifted by the trimmed lead; the last closes at hang-up');
   assert.equal(record.screens[0].speakerId, 'A');
   assert.equal(record.pad.lang, 'python');
-  assert.deepEqual(record.pad.snapshots.map(item => item.text), ['def f(): pass', 'def f(): return 1'], 'one snapshot per change');
+  assert.deepEqual(record.pad.snapshots.map(item => item.text), ['', 'def f(): pass', 'def f(): return 1', 'def f(): return 1'], 'the pad as it opened (empty), one snapshot per change, then the close');
+  assert.equal(record.pad.snapshots[0].atMs, 1100, 'the opening is marked when the pad came up, on the call clock');
+  assert.deepEqual(record.pad.snapshots.map(item => item.closed === true), [false, false, false, true], 'only the last entry marks the pad going away');
+  assert.equal(record.pad.snapshots.at(-1).atMs, 5500, 'at the moment the interviewer closed it');
   assert.ok(record.pad.snapshots.every(item => Number.isFinite(item.atMs) && item.atMs >= 0));
   const replay = await service.getReplay('call-1');
   assert.deepEqual(replay.screens, record.screens);
@@ -4966,13 +5073,13 @@ test('draftAnswer: with the coding pad open the wand works the exercise as steps
     engineFactory, draftText: async () => 'unused', draftWorkText: async () => 'unused',
     loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
     draftAnswer: async () => 'Just talking.',
-    draftWork: async request => { seen.push(request); return [{ say: 'First the signature.', code: 'def f():\n', together: true }, { say: 'Done.', code: null, together: false }]; },
+    draftWork: async request => { seen.push(request); return [{ say: 'First the signature.', code: 'def f():\n', order: 'during', together: true }, { say: 'Now the body.', code: 'def f():\n    pass\n', order: 'after', together: false }, { say: 'Done.', code: null, together: false }]; },
   } });
   await service.start(ARGS);
   await service.answer();
   assert.deepEqual(await service.draftAnswer(), { text: 'Just talking.' }, 'no pad: a spoken reply');
   emit({ type: 'pad', open: true, lang: 'python', atMs: 1000 });
-  assert.deepEqual(await service.draftAnswer(), { steps: [{ say: 'First the signature.', code: 'def f():\n', together: true }, { say: 'Done.', code: null, together: false }] });
+  assert.deepEqual(await service.draftAnswer(), { steps: [{ say: 'First the signature.', code: 'def f():\n', order: 'during', together: true }, { say: 'Now the body.', code: 'def f():\n    pass\n', order: 'after', together: false }, { say: 'Done.', code: null, order: 'before', together: false }] }, 'each step keeps when its line is said: before, during or after its typing');
   assert.equal(seen[0].pad.open, true);
   assert.equal(typeof seen[0].callText, 'function');
   await service.hangUp({ feedback: false });

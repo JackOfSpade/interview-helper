@@ -1,5 +1,8 @@
-import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA } from '../../ipc/interviewQaPractice.js';
+import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_FEEDBACK_LIMITS as LIMITS } from '../../ipc/interviewQaPractice.js';
 import { prosodyByEntry } from '../audio/callMetrics.js';
+
+/** Limits of the chapters and moments lists, shared by the schema, the prompt and the trimming in analyzeCall. */
+export const REVIEW_LIMITS = Object.freeze({ chapters: 40, moments: 40, chapterTitle: 120, momentLabel: 200 });
 
 /** Kinds the reviewer may flag; `filler` marks a counted filler moment. */
 export const REVIEW_MOMENT_KINDS = Object.freeze(['moment', 'filler']);
@@ -19,22 +22,22 @@ export const REVIEW_SCHEMA = Object.freeze({
   properties: {
     feedback: reviewFeedbackSchema,
     chapters: {
-      type: 'array', maxItems: 40,
+      type: 'array', maxItems: REVIEW_LIMITS.chapters,
       items: {
         type: 'object', additionalProperties: false, required: ['questionTurnIndex', 'title'],
         properties: {
           questionTurnIndex: { type: 'integer', minimum: 0, description: 'Index of the interviewer turn that asked the question.' },
-          title: { type: 'string', maxLength: 120, description: 'Short chapter title for that question, in the candidate\'s own domain words.' },
+          title: { type: 'string', maxLength: REVIEW_LIMITS.chapterTitle, description: 'Short chapter title for that question, in the candidate\'s own domain words.' },
         },
       },
     },
     moments: {
-      type: 'array', maxItems: 40,
+      type: 'array', maxItems: REVIEW_LIMITS.moments,
       items: {
         type: 'object', additionalProperties: false, required: ['turnIndex', 'label', 'kind'],
         properties: {
           turnIndex: { type: 'integer', minimum: 0, description: 'Index of the transcript turn where the moment happened.' },
-          label: { type: 'string', maxLength: 200 },
+          label: { type: 'string', maxLength: REVIEW_LIMITS.momentLabel },
           kind: { type: 'string', enum: REVIEW_MOMENT_KINDS },
         },
       },
@@ -230,11 +233,15 @@ function formatMetrics(metrics) {
   }
 }
 
+/** The length and count limits as one rule, generated from the constants the validator and the schema use. */
+export function lengthLimits() {
+  return `Length limits are hard, and text over a limit is cut off where it stands: overall.summary and delivery.summary at most ${LIMITS.long} characters; each planned question's covered, adapted, improve and extension, and each moment's note, at most ${LIMITS.text} characters (about ${Math.round(LIMITS.text / 6.5)} words, so aim for ${Math.round(LIMITS.text * 0.65 / 50) * 50} to ${Math.round(LIMITS.text * 0.85 / 50) * 50}); chapter titles at most ${REVIEW_LIMITS.chapterTitle} and moment labels at most ${REVIEW_LIMITS.momentLabel}; every other text field, such as askedAs, a moment's prompt, a communication note, a priority and a delivery note, at most ${LIMITS.short}. At most ${LIMITS.priorities} priorities, ${LIMITS.moments} moments in the feedback, ${REVIEW_LIMITS.chapters} chapters and ${REVIEW_LIMITS.moments} flagged moments. Pick the points that matter most rather than listing everything.`;
+}
+
 const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
-  // Two of six reviews up to 2026-11-22 were rejected for a 610-character "covered" and cost a minute's retry: the
-  // schema's maxLength is not enforced on the model's side, so the limits are stated here.
-  '- Length limits are hard, and a reply over any of them is rejected whole: overall.summary and delivery.summary at most 1500 characters; each planned question\'s covered, adapted, improve and extension, and each moment\'s note, at most 600 characters (about 90 words, so aim for 400 to 500); chapter titles at most 120 and moment labels at most 200; every other text field at most 300 characters. Pick the points that matter most rather than listing everything.',
+  // The schema's maxLength is not enforced on the model's side, so the limits are stated here, from the numbers the validator enforces.
+  `- ${lengthLimits()}`,
   'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',

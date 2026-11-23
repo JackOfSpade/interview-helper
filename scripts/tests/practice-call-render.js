@@ -420,6 +420,10 @@ export const presentingTests = [
         const screenOnly = renderToStaticMarkup(React.createElement(Replay, { replay: { ...replay, pad: { lang: '', snapshots: [] } }, api: {}, initialPositionMs: 200_000 }));
         assert(screenOnly.includes('Problem one') && !screenOnly.includes('data-coding-pad'), 'the coding pad shows only when the call had pad snapshots');
         assert(screenMarkup.screenAt([{ atMs: 0, endMs: 10 }], 10) === null, 'a screen ended at the time is gone');
+        // The pad's record marks its opening (empty) and its closing: nothing before the first, nothing from a close until it reopens.
+        const marks = { snapshots: [{ atMs: 100, text: '' }, { atMs: 200, text: 'a' }, { atMs: 300, text: 'a', closed: true }, { atMs: 400, text: 'ab' }] };
+        assert(screenMarkup.padSnapshotAt(marks, 50) === null && screenMarkup.padSnapshotAt(marks, 150).text === '' && screenMarkup.padSnapshotAt(marks, 250).text === 'a', 'shown from its opening');
+        assert(screenMarkup.padSnapshotAt(marks, 350) === null && screenMarkup.padSnapshotAt(marks, 450).text === 'ab', 'gone once closed, back when reopened');
         // Pad keys: Tab writes two spaces, Enter keeps the indentation of the line it leaves.
         assert(screenMarkup.padKeyInsert('Tab', 'x') === '  ', 'tab is two spaces');
         assert(screenMarkup.padKeyInsert('Enter', 'def f():\n    if x:') === '\n    ', 'enter keeps four spaces');
@@ -1605,6 +1609,146 @@ export default [
     },
   },
   {
+    name: 'practice call render: the typing estimate counts deletions and keys, and is zero when the pad already reads the target',
+    async run() {
+      const { padTypingMs } = await import('../../src/practice-call/padTyping.js');
+      strict.equal(padTypingMs('abc', 'abc'), 0);
+      const typed = padTypingMs('', 'x = 1\n');
+      assert(typed > 300 && typed < 1200, `six keys take a few hundred ms: ${typed}`);
+      assert(padTypingMs('abcd', 'ab') > 0 && padTypingMs('abcd', 'ab') < typed, 'two deletions are quick');
+    },
+  },
+  {
+    name: 'practice call render: typing paced to a spoken line stays within what a person does',
+    async run() {
+      const { typingPace, SPEECH_MS_PER_WORD } = await import('../../src/practice-call/padTyping.js');
+      strict.equal(typingPace('', 4000), 1, 'no line: the usual pace');
+      strict.equal(typingPace('four words are said', 0), 1, 'nothing to type');
+      strict.equal(typingPace('four words are said', 4 * SPEECH_MS_PER_WORD), 1, 'equal lengths need no change');
+      strict.equal(typingPace('ten words take about four seconds to say out loud', 3200), 1.25, 'the hands slow to a longer line');
+      strict.equal(typingPace('two words', 40000), 0.75, 'a long piece is hurried only a little');
+      strict.equal(typingPace('a very long line '.repeat(20), 500), 1.8, 'and never slowed to a crawl');
+    },
+  },
+  {
+    name: 'practice call render: a step explained after its code is typed in silence first, its line is sent only once the piece is in the pad, and a step explained during is paced to its line',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          const logged = [];
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor: null, paused: false, pad: { open: true, lang: 'python', text: '' } });
+          const first = 'x = 1\n';
+          const second = `${first}y = 2\n`;
+          const padAtSend = [];
+          let padSent = ''; // the pad as the interviewers have it
+          const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            sendChat: async (text, options) => { padAtSend.push(padSent); sent.push({ text, options }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 2000, voice: 'waiting' }]; setTimeout(() => pushState?.(current()), 0); return current(); },
+            updatePad: async text => { padSent = text; return current(); },
+            setTyping: async () => {},
+            logEvent: async line => { logged.push(line); },
+            draftAnswer: async () => ({ steps: [{ say: 'That is the first value set.', code: first, order: 'after' }, { say: 'And the second goes in beside it now.', code: second, order: 'during' }] }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
+          const voice = async (id, value) => { chat = chat.map(item => (item.id === id ? { ...item, voice: value } : item)); await act(() => pushState?.(current())); };
+          const until = async (check, label) => { for (let i = 0; i < 600; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} pad=${JSON.stringify(pad())}`); };
+          const work = () => logged.filter(line => /\] work /u.test(line)).map(line => line.replace(/^\[[^\]]*\] work /u, ''));
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => window.document.querySelector('[aria-label="Suggest a reply"]').click());
+            await until(() => sent.length === 1, 'the line that looks back');
+            strict.equal(padAtSend[0], first, 'explained after: the whole piece was in the pad before its line was sent');
+            await voice('m1', 'heard');
+            await until(() => sent.length === 2, 'the next step waits for that line to be heard');
+            strict.equal(padAtSend[1], first, 'explained during: nothing of the piece is typed before its line is sent');
+            await settle(60);
+            strict.equal(pad(), first, 'and the hands wait for the voice to start');
+            await voice('m2', 'playing');
+            await until(() => pad() === second, 'typed while the line plays');
+            await voice('m2', 'heard');
+            await until(() => work().some(line => line.startsWith('run end')), 'run ends');
+            const lines = work();
+            const at = pattern => lines.findIndex(line => pattern.test(line));
+            assert(at(/^step 1\/2 begin explain=after /u) >= 0 && at(/^step 2\/2 begin explain=during .*paced x\d\.\d\d to the line$/u) >= 0, lines.join('\n'));
+            assert(at(/^step 1\/2 type end after \d+ms completed$/u) < at(/^step 1\/2 line heard /u), `typed, then said: ${lines.join(' | ')}`);
+            assert(at(/^step 1\/2 line heard /u) < at(/^step 2\/2 begin /u), 'a step starts only when the one before is typed and heard');
+            strict.equal(lines.at(-1), 'run end: all steps done');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'practice call render: the wand logs each step (sizes, timings, why a run stops) and sends the pad while it types and the moment typing ends',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
+        try {
+          const sent = [];
+          const padUpdates = [];
+          const logged = [];
+          let pushState = null;
+          let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor: null, paused: false, pad: { open: true, lang: 'python', text: '' } });
+          const code = `x = ${'1 + '.repeat(12)}1\n`;
+          let plan = [{ say: 'First piece.', code, together: false }, { say: 'Second piece.', code: `${code}y = 2\n`, together: false }];
+          window.practiceCallAPI = {
+            getState: async () => current(),
+            onState: listener => { pushState = listener; return () => {}; },
+            onEvent: () => () => {},
+            sendChat: async (text, options) => { sent.push({ text, options }); chat = [...chat, { id: `m${sent.length}`, from: 'candidate', text, atMs: 2000, voice: 'waiting' }]; setTimeout(() => pushState?.(current()), 0); return current(); },
+            updatePad: async text => { padUpdates.push(text); return current(); },
+            setTyping: async () => {},
+            logEvent: async line => { logged.push(line); },
+            draftAnswer: async () => ({ steps: plan }),
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
+          const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
+          const voice = async (id, value) => { chat = chat.map(item => (item.id === id ? { ...item, voice: value } : item)); await act(() => pushState?.(current())); };
+          const until = async (check, label) => { for (let i = 0; i < 600; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} pad=${JSON.stringify(pad())}`); };
+          const work = () => logged.filter(line => /\] work /u.test(line)).map(line => line.replace(/^\[[^\]]*\] work /u, ''));
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
+            await act(() => byLabel('Suggest a reply').click());
+            await until(() => sent.length === 1, 'first line');
+            await voice('m1', 'heard');
+            await until(() => pad().length > 5, 'typing');
+            // While it types, the pad goes out about once a second, not only after the debounce that never fires mid-typing.
+            await until(() => padUpdates.length > 0 && padUpdates.at(-1).length < code.length, 'an update before the piece is finished');
+            await until(() => pad() === code, 'first piece typed');
+            // The last keys of the piece are in the update at once, with no wait for the debounce.
+            strict.equal(padUpdates.at(-1), code, 'the pad is sent when typing ends');
+            await until(() => sent.length === 2, 'second line');
+            await voice('m2', 'failed');
+            await until(() => work().some(line => line.startsWith('run end')), 'run ends');
+            const lines = work();
+            assert(lines.includes('run begin 2 steps'), lines.join('\n'));
+            assert(lines.some(line => /^step 1\/2 begin explain=before say 12 chars code \+\d+\/-0 chars, estimated typing \d+ms$/u.test(line)), lines.join('\n'));
+            assert(lines.some(line => /^step 1\/2 type start$/u.test(line)) && lines.some(line => /^step 1\/2 type end after \d+ms completed$/u.test(line)), lines.join('\n'));
+            assert(lines.some(line => /^step 1\/2 line heard after \d+ms completed$/u.test(line)), lines.join('\n'));
+            assert(lines.some(line => /^step 2\/2 line heard after \d+ms not completed \(voice failed\)$/u.test(line)), lines.join('\n'));
+            assert(lines.at(-1).startsWith('run end: step 2/2 line not completed'), `the reason a run stops is logged: ${lines.at(-1)}`);
+            assert(logged.every(line => line.length < 600), 'each line fits the bridge cap');
+          } finally { await act(() => root.unmount()); }
+        } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
     name: 'practice call render: a step marked together types while its line is being said, and an interviewer starting to speak stops the talking and the typing together',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
@@ -1782,6 +1926,33 @@ export default [
             assert(deletedCalls.length === 1, 'confirming must call deleteRecording');
             assert(!window.document.querySelector('audio')?.hasAttribute('src'), 'the audio source is removed after the delete');
             assert(byLabel('Recording unavailable')?.textContent.includes('Recording deleted'), 'the replay must say the recording was deleted');
+          } finally { await act(() => root.unmount()); }
+        });
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
+    name: 'practice call render: a failed analysis offers Try again, which asks for the review again and shows a refusal; a running retry names its step',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      const bundle = await bundleComponent(path.resolve('src/practice-call/Replay.jsx'), {});
+      try {
+        await withDom(async window => {
+          const asked = [];
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const act = fn => bundle.module.act(async () => { await fn(); await Promise.resolve(); });
+          const byLabel = label => window.document.querySelector(`[aria-label="${label}"]`);
+          const failed = { ...REPLAY, analysis: { status: 'failed', error: 'feedback: too long' } };
+          try {
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay: failed, api: {} })));
+            assert(!byLabel('Try the feedback again'), 'without the bridge call there is no button');
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay: failed, api: { retryAnalysis: async () => { asked.push('retry'); return { error: 'Another call is in progress.' }; } } })));
+            assert(byLabel('Analysis failed').textContent.includes('Try again'), 'the failed notice carries the button');
+            await act(() => byLabel('Try the feedback again').click());
+            assert(asked.length === 1, 'the button asks the main process to run the review again');
+            assert(byLabel('Analysis failed').textContent.includes('Another call is in progress.'), 'a refusal is shown in the notice');
+            await act(() => root.render(bundle.module.React.createElement(bundle.module.Replay, { replay: { ...REPLAY, analysis: { status: 'analyzing', stage: 'review' } }, api: {} })));
+            assert(byLabel('Analysis status').textContent.includes('writing the feedback'), 'the running notice names the step');
           } finally { await act(() => root.unmount()); }
         });
       } finally { await bundle.dispose(); }
@@ -2136,7 +2307,9 @@ export default [
         const asker = html => (/Asked by <span[^>]*>([^<]*)<\/span>(?:<span[^>]*> · ([^<]*)<\/span>)?/.exec(html) || []).slice(1, 3).filter(Boolean).join(' | ');
         assert(asker(at(replay, 125_000)) === 'John Park | Senior engineer', 'a part opened by a colleague names that colleague and role');
         assert(asker(at(replay, 5_000)) === 'Dana Whitfield | Hiring manager', 'the lead comes from the persona');
-        assert(asker(at(replay, 430_000)) === 'Dana Whitfield | Hiring manager', 'a turn several interviewers spoke in is credited to its first speaker');
+        assert(asker(at(replay, 430_000)) === 'John Park | Senior engineer', 'a turn several interviewers spoke in is credited to the last to speak when nobody asked anything (a hand-over, then the exercise)');
+        const asked = { ...replay, transcript: replay.transcript.map((turn, index) => (index === 4 ? { ...turn, segments: [{ speakerId: 'B', text: 'I will leave it there.' }, { speakerId: 'A', text: 'Anything you would like to ask us?' }] } : turn)) };
+        assert(asker(at(asked, 430_000)) === 'Dana Whitfield | Hiring manager', 'and to whoever put the question when one of them did');
         assert(asker(at({ ...replay, panel: undefined, persona: undefined }, 125_000)) === 'Interviewer', 'no panel on the replay falls back to a plain Interviewer');
       } finally { await bundle.dispose(); }
     },

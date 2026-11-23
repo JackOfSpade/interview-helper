@@ -112,7 +112,8 @@ export function padSnapshotAt(pad, ms) {
     const start = Number(item?.atMs);
     if (Number.isFinite(start) && start <= ms && (!found || start >= Number(found.atMs))) found = item;
   }
-  return found;
+  // An entry marked closed is the moment the interviewer took the pad away: nothing is shown from there on.
+  return found?.closed ? null : found;
 }
 
 /**

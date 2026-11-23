@@ -147,8 +147,12 @@ test('work: the prompt asks for intent before each piece, never code read aloud,
   assert(!prompt.includes('<shared-pad>'), 'the pad goes in once');
   assert.deepEqual(DRAFT_WORK_SCHEMA.required, ['waitForReply', 'steps']);
   assert(prompt.includes('set waitForReply true') && prompt.includes('wait for them') && prompt.includes('they will tell you when to go on'), 'a question mid-exercise is answered, then the candidate waits');
-  assert.deepEqual(DRAFT_WORK_SCHEMA.properties.steps.items.required, ['say', 'code', 'typeWhileSpeaking']);
-  assert(prompt.includes('type while you talk (typeWhileSpeaking true)') && prompt.includes('neither is the rule'), 'the model chooses per step');
+  assert.deepEqual(DRAFT_WORK_SCHEMA.properties.steps.items.required, ['say', 'code', 'explain', 'bridge']);
+  assert.deepEqual(DRAFT_WORK_SCHEMA.properties.steps.items.properties.explain.enum, ['before', 'during', 'after']);
+  for (const choice of ['"before": you say what you are about to write', '"during": you talk while your hands write', '"after": you go quiet and write the piece, then say what you just wrote']) assert(prompt.includes(choice), choice);
+  assert(prompt.includes('none is the rule') && prompt.includes('The line always matches its choice'), 'the model chooses per step, and the words fit the choice');
+  assert(prompt.includes('One combination needs a bridge') && prompt.includes('It never explains the new piece') && prompt.includes('Every other step has bridge null'), 'two silent stretches back to back get a bridge');
+  assert(!/onto the next part/iu.test(prompt), 'no quotable bridge line to repeat');
 });
 
 test('work: a language the candidate picked is the only one written, and said once; a required one is simply used', () => {
@@ -164,16 +168,26 @@ test('work: a language the candidate picked is the only one written, and said on
 
 test('work: steps are cleaned, empty ones dropped, JSON text parsed, and nothing usable throws', async () => {
   assert.deepEqual(cleanWork({ steps: [{ say: ' First.\n\nThen. ', code: 'a\r\nb', typeWhileSpeaking: true }, { say: '', code: null }, { say: 'Done.', code: null, typeWhileSpeaking: true }] }),
-    [{ say: 'First. Then.', code: 'a\nb', together: true }, { say: 'Done.', code: null, together: false }], 'typing while talking needs both a line and code');
-  assert.deepEqual(cleanWork('```json\n{"steps":[{"say":"Hi.","code":null}]}\n```'), [{ say: 'Hi.', code: null, together: false }]);
+    [{ say: 'First. Then.', code: 'a\nb', order: 'during', together: true }, { say: 'Done.', code: null, order: 'before', together: false }], 'typing while talking needs both a line and code');
+  assert.deepEqual(cleanWork('```json\n{"steps":[{"say":"Hi.","code":null}]}\n```'), [{ say: 'Hi.', code: null, order: 'before', together: false }]);
+  // The three choices, and what an order means without a line or without code.
+  assert.deepEqual(cleanWork({ steps: [{ say: 'A.', code: 'a', explain: 'before' }, { say: 'B.', code: 'ab', explain: 'during' }, { say: 'C.', code: 'abc', explain: 'after' }, { say: 'D.', code: null, explain: 'after' }, { say: '', code: 'abcd', explain: 'during' }, { say: 'E.', code: 'abcde', explain: 'sideways' }] }).map(step => [step.order, step.together]),
+    [['before', false], ['during', true], ['after', false], ['before', false], ['before', false], ['before', false]]);
+  // A piece typed in silence straight after a piece typed in silence: the bridge is said between them, as its own line.
+  assert.deepEqual(cleanWork({ steps: [{ say: 'First the mask.', code: 'a', explain: 'before', bridge: null }, { say: 'That cleared the field.', code: 'ab', explain: 'after', bridge: ' Right, the other half. ' }] }),
+    [{ say: 'First the mask.', code: 'a', order: 'before', together: false }, { say: 'Right, the other half.', code: null, order: 'before', together: false }, { say: 'That cleared the field.', code: 'ab', order: 'after', together: false }]);
+  assert.deepEqual(cleanWork({ steps: [{ say: 'First the mask.', code: 'a', explain: 'before' }, { say: 'That cleared the field.', code: 'ab', explain: 'after', bridge: null }] }).map(step => [step.say, step.order]),
+    [['First the mask.', 'before'], ['That cleared the field.', 'during']], 'with no bridge written the piece is explained while it is typed, never after a second silence');
+  assert.deepEqual(cleanWork({ steps: [{ say: 'Talk only.', code: null, explain: 'before' }, { say: 'Wrote it.', code: 'a', explain: 'after', bridge: 'Moving on.' }, { say: 'And this.', code: 'ab', explain: 'after', bridge: 'Next.' }] }).map(step => step.say),
+    ['Talk only.', 'Wrote it.', 'And this.'], 'a bridge is dropped where no silent typing came just before');
   assert.throws(() => cleanWork({ steps: [] }));
   assert.throws(() => cleanWork('not json'));
   assert.deepEqual(cleanWork({ waitForReply: true, steps: [{ say: 'Positivity keeps the sum monotonic.', code: 'def f():\n', typeWhileSpeaking: true }, { say: 'Now the loop.', code: 'def f():\n    pass\n', typeWhileSpeaking: false }] }),
-    [{ say: 'Positivity keeps the sum monotonic.', code: null, together: false }], 'an answer to a question is said hands off the keyboard, and nothing follows it');
+    [{ say: 'Positivity keeps the sum monotonic.', code: null, order: 'before', together: false }], 'an answer to a question is said hands off the keyboard, and nothing follows it');
   assert.equal(cleanWork({ waitForReply: false, steps: [{ say: 'Fixed.', code: 'a', typeWhileSpeaking: false }, { say: 'Next.', code: 'ab', typeWhileSpeaking: false }] }).length, 2, 'otherwise the work carries on');
   const asked = [];
   const steps = await draftCandidateWork({ ...CONTEXT, pad: { open: true, text: '' }, callText: async request => { asked.push(request); return { steps: [{ say: 'Go.', code: 'x = 1\n' }] }; } });
-  assert.deepEqual(steps, [{ say: 'Go.', code: 'x = 1\n', together: false }]);
+  assert.deepEqual(steps, [{ say: 'Go.', code: 'x = 1\n', order: 'before', together: false }]);
   assert.equal(asked[0].schema, DRAFT_WORK_SCHEMA);
 });
 
@@ -181,6 +195,45 @@ test('work: a technical spoken reply leads with the answer and never reads a mat
   const prompt = draftAnswerPrompt(CONTEXT);
   assert(prompt.includes('answer only the part or bullet being asked about now'));
   assert(prompt.includes('never reading it out element by element'));
+});
+
+test('transcript: the candidate\'s own voiced line is shown as it was heard (sentText), falling back to its text', () => {
+  const lines = transcriptLines([
+    { speaker: 'candidate', voiced: true, text: 'The immutable boot ROM checks it.', sentText: 'The mutable boot rom checks it.' },
+    { speaker: 'candidate', text: 'Typed text.' },
+    { speaker: 'candidate', text: 'Whole line.', sentText: '   ' },
+  ]);
+  assert.deepEqual(lines, ['Candidate: The mutable boot rom checks it.', 'Candidate: Typed text.', 'Candidate: Whole line.']);
+});
+
+test('both prompts share the spoken-not-notes rule and the realism options, with no quotable example sentences', () => {
+  const reply = draftAnswerPrompt(CONTEXT);
+  const work = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
+  for (const prompt of [reply, work]) {
+    assert(prompt.includes('no sentence opens with a short label and a colon'), 'the label rule');
+    assert(prompt.includes('is not said again') && prompt.includes('your own earlier lines'), 'no repeated framing');
+    assert(prompt.includes('is for when the interviewer really did catch something'), 'praise only when earned');
+    assert(prompt.includes('Thanking the interviewers for their time') && prompt.includes('once, when the call is actually closing'), 'thanks once, at the close');
+    assert(prompt.includes('rather than reciting every digit') && prompt.includes('says hexadecimal the way engineers say it aloud'), 'values aloud');
+    assert(prompt.includes('follow-up or one-fact question gets a short answer'), 'size follows the question');
+  }
+  for (const quoted of ['Short version', 'Leading explanation', 'I think that\'s it', 'Happy to go through', 'assume the arrays', 'centre the coordinates', 'x equals x minus', 'about 170 kilograms', 'two point nine amps']) {
+    assert(!reply.includes(quoted) && !work.includes(quoted), `no quotable example: ${quoted}`);
+  }
+});
+
+test('work: the prompt keeps words and typing in step: the line is about its own code, with the real pace, and the pad is only added to', () => {
+  const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
+  assert(prompt.includes('A step\'s line is about the code that same step types') && prompt.includes('an earlier step already typed') && prompt.includes('a later piece'));
+  assert(prompt.includes('ten to twelve characters a second') && prompt.includes('two and a half words a second'));
+  assert(prompt.includes('either say more about that piece while you type it') && prompt.includes('split the piece'));
+  assert(prompt.includes('only added to, in order, unless you are fixing something'));
+  assert(prompt.includes('ten seconds or more'), 'the silence guidance stays');
+  assert(prompt.includes('that you are done and are ready for their questions'), 'the finish is still said plainly, in the candidate\'s words, in the last step only');
+  const props = DRAFT_WORK_SCHEMA.properties.steps.items.properties;
+  assert(props.say.description.includes('this same step types'));
+  assert(props.code.description.includes('only added to, in order'));
+  assert(props.explain.description.includes('"during": type while saying the line') && props.bridge.description.includes('without saying what it is'));
 });
 
 test('work: the stage runs on Opus at low effort', () => {

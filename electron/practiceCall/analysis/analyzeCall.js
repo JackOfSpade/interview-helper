@@ -1,7 +1,7 @@
 import { promises as nodeFs } from 'node:fs';
 import path from 'node:path';
-import { validatePracticeFeedback } from '../../ipc/interviewQaPractice.js';
-import { buildReviewPrompt, candidateAnswerKinds, pickedCards, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
+import { trimPracticeFeedback, trimPracticeText, validatePracticeFeedback } from '../../ipc/interviewQaPractice.js';
+import { buildReviewPrompt, candidateAnswerKinds, pickedCards, REVIEW_LIMITS, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
 import { prosodyByEntry } from '../audio/callMetrics.js';
 import { buildChapters } from './chapters.js';
 
@@ -16,12 +16,13 @@ const reason = error => (typeof error?.message === 'string' && error.message.tri
 
 /** Lazy defaults: the parallel audio, Scribe and Claude modules need not exist for tests. */
 async function resolveClients(deps) {
-  const transcribe = deps.transcribe ?? await (async () => {
+  // `audioAvailable: false` (a re-run after the recording's raw tracks were deleted) has nothing to transcribe, so nothing is loaded for it.
+  const transcribe = deps.transcribe ?? (deps.audioAvailable === false ? null : await (async () => {
     const [scribe, keys] = await Promise.all([import('../eleven/scribe.js'), import('../eleven/elevenKey.js')]);
     const verbatim = scribe.transcribeVerbatim ?? scribe.default;
     const readKey = keys.readElevenLabsKey ?? keys.default;
     return async request => verbatim({ ...request, key: await readKey({ execFile: deps.execFile }) });
-  })();
+  })());
   const metrics = deps.metrics ?? await (async () => {
     const audio = await import('../audio/callMetrics.js');
     const compute = audio.callMetrics ?? audio.default;
@@ -79,44 +80,93 @@ export function repairPlanned(planned, picked) {
   return { planned: out };
 }
 
-/** Validate the review reply: feedback plus turn-index anchors inside the transcript; `picked` (see pickedCards) holds planned to the picked cards. */
+const plainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * The host fills in what it already knows: every planned entry's question is the picked card's own text, so a
+ * model's copy of it can never fail validation. An entry that names a card exactly keeps that card; one that
+ * does not (a mangled copy) takes the card at its position when the counts agree and that card is not claimed.
+ */
+export function fillPlannedFromPicked(planned, picked) {
+  if (!Array.isArray(planned) || !Array.isArray(picked) || !picked.length) return planned;
+  const assigned = planned.map(entry => (plainObject(entry) ? picked.find(card => sameText(entry.question, card.question)) ?? null : null));
+  if (planned.length === picked.length) {
+    // A mangled copy takes the card at its own position, but only when that is unambiguous: every exact match sits at
+    // its own position (nothing was reordered) and that card is free. Anything else stays unmatched, so the reply is
+    // rejected and corrected, never filed under another card.
+    const inOrder = assigned.every((card, index) => !card || card === picked[index]);
+    if (inOrder) planned.forEach((entry, index) => { if (plainObject(entry) && !assigned[index]) assigned[index] = picked[index]; });
+  }
+  return planned.map((entry, index) => (assigned[index] ? { ...entry, question: assigned[index].question } : entry));
+}
+
+/** Chapters and moments: over-long titles and labels and over-long lists are cut, anything else is left to the checks. */
+function trimLists(raw, trimmed) {
+  const out = {};
+  for (const [key, max, field, textMax] of [['chapters', REVIEW_LIMITS.chapters, 'title', REVIEW_LIMITS.chapterTitle], ['moments', REVIEW_LIMITS.moments, 'label', REVIEW_LIMITS.momentLabel]]) {
+    if (!Array.isArray(raw[key])) continue;
+    if (raw[key].length > max) trimmed.push({ path: key, length: raw[key].length, limit: max });
+    out[key] = raw[key].slice(0, max).map((entry, index) => {
+      if (!plainObject(entry) || typeof entry[field] !== 'string' || entry[field].length <= textMax) return entry;
+      trimmed.push({ path: `${key}[${index}].${field}`, length: entry[field].length, limit: textMax });
+      return { ...entry, [field]: trimPracticeText(entry[field], textMax) };
+    });
+  }
+  return out;
+}
+
+/**
+ * Validate the review reply: feedback plus turn-index anchors inside the transcript; `picked` (see pickedCards)
+ * holds planned to the picked cards. Over-length model text is trimmed rather than rejected (`trimmed` lists what
+ * was cut); every remaining violation is collected into the one error, so the correction can name them all.
+ */
 export function checkReview(raw, transcript, picked = null) {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'the review reply was not a JSON object' };
-  let feedback;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'the review reply was not a JSON object', trimmed: [] };
+  const trimmed = [];
+  const cut = trimPracticeFeedback(raw.feedback);
+  trimmed.push(...cut.trimmed);
+  const hasPicked = Array.isArray(picked) && picked.length;
+  // Filled after the trimming: the plan's own question is host text and is never cut.
+  const given = hasPicked && plainObject(cut.feedback) ? { ...cut.feedback, planned: fillPlannedFromPicked(cut.feedback.planned, picked) } : cut.feedback;
+  const problems = [];
+  let feedback = null;
   try {
-    feedback = validatePracticeFeedback(raw.feedback);
+    feedback = validatePracticeFeedback(given, { all: true });
   } catch (error) {
-    return { error: `feedback: ${reason(error)}` };
+    const issues = Array.isArray(error?.issues) && error.issues.length ? error.issues : [reason(error)];
+    for (const issue of issues) problems.push(`feedback: ${issue}`);
   }
-  if (Array.isArray(picked) && picked.length) {
+  if (feedback && hasPicked) {
     const repaired = repairPlanned(feedback.planned, picked);
-    if (repaired.error) return { error: repaired.error };
-    feedback = { ...feedback, planned: repaired.planned };
+    if (repaired.error) problems.push(repaired.error);
+    else feedback = { ...feedback, planned: repaired.planned };
   }
-  if (!Array.isArray(raw.chapters)) return { error: 'chapters must be an array' };
+  const lists = trimLists(raw, trimmed);
   const chapters = [];
+  if (!Array.isArray(lists.chapters)) problems.push('chapters must be an array');
   const seen = new Set();
-  for (const entry of raw.chapters) {
+  for (const entry of lists.chapters ?? []) {
     const index = entry?.questionTurnIndex;
-    if (!Number.isInteger(index) || index < 0 || index >= transcript.length) return { error: `chapters: ${JSON.stringify(index)} is not a transcript turn index` };
-    if (transcript[index]?.speaker !== 'interviewer') return { error: `chapters: turn ${index} is not an interviewer turn` };
-    if (seen.has(index)) return { error: `chapters: turn ${index} is listed twice` };
+    if (!Number.isInteger(index) || index < 0 || index >= transcript.length) { problems.push(`chapters: ${JSON.stringify(index)} is not a transcript turn index`); continue; }
+    if (transcript[index]?.speaker !== 'interviewer') { problems.push(`chapters: turn ${index} is not an interviewer turn`); continue; }
+    if (seen.has(index)) { problems.push(`chapters: turn ${index} is listed twice`); continue; }
     const title = typeof entry.title === 'string' ? entry.title.trim() : '';
-    if (!title) return { error: `chapters: turn ${index} needs a title` };
+    if (!title) { problems.push(`chapters: turn ${index} needs a title`); continue; }
     seen.add(index);
     chapters.push({ questionTurnIndex: index, title });
   }
-  if (!Array.isArray(raw.moments)) return { error: 'moments must be an array' };
   const moments = [];
-  for (const entry of raw.moments) {
+  if (!Array.isArray(lists.moments)) problems.push('moments must be an array');
+  for (const entry of lists.moments ?? []) {
     const index = entry?.turnIndex;
-    if (!Number.isInteger(index) || index < 0 || index >= transcript.length) return { error: `moments: ${JSON.stringify(index)} is not a transcript turn index` };
-    if (!REVIEW_MOMENT_KINDS.includes(entry.kind)) return { error: `moments: kind must be one of ${REVIEW_MOMENT_KINDS.join(', ')}` };
+    if (!Number.isInteger(index) || index < 0 || index >= transcript.length) { problems.push(`moments: ${JSON.stringify(index)} is not a transcript turn index`); continue; }
+    if (!REVIEW_MOMENT_KINDS.includes(entry.kind)) { problems.push(`moments: kind must be one of ${REVIEW_MOMENT_KINDS.join(', ')}`); continue; }
     const label = typeof entry.label === 'string' ? entry.label.trim() : '';
-    if (!label) return { error: `moments: turn ${index} needs a label` };
+    if (!label) { problems.push(`moments: turn ${index} needs a label`); continue; }
     moments.push({ turnIndex: index, label, kind: entry.kind });
   }
-  return { review: { feedback, chapters, moments } };
+  if (problems.length) return { error: problems.join('; '), trimmed };
+  return { review: { feedback, chapters, moments }, trimmed };
 }
 
 /** Filler totals: the review's counted total, with filler moments split per answer. */
@@ -156,8 +206,51 @@ async function writeAnalysis(callDir, analysis, io = {}) {
   return target;
 }
 
-export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps = {} } = {}) {
+// The debug log caps a string at 2000 characters and a line at about 16000, so a reply goes in pieces to be joined.
+const LOG_PIECE = 1900;
+const LOG_PIECES_PER_LINE = 4;
+/** The reply as text, split for the debug log: the first lines' worth for the reply event, the rest for follow-up events. */
+function replyForLog(raw) {
+  let text;
+  try { text = typeof raw === 'string' ? raw : JSON.stringify(raw) ?? String(raw); } catch { text = String(raw); }
+  const pieces = text.match(new RegExp(`[\\s\\S]{1,${LOG_PIECE}}`, 'gu')) ?? [''];
+  const groups = [];
+  for (let at = 0; at < pieces.length; at += LOG_PIECES_PER_LINE) groups.push(pieces.slice(at, at + LOG_PIECES_PER_LINE));
+  return { first: { replyChars: text.length, replyText: groups[0] }, more: groups.slice(1) };
+}
+/** Path and length of every string over 200 characters in the reply, to see which field ran long. */
+function longFields(value, at = '', out = {}, depth = 0) {
+  if (typeof value === 'string') { if (value.length > 200) out[at || '(root)'] = value.length; } else if (value && typeof value === 'object' && depth < 6) {
+    for (const [key, item] of Object.entries(value)) longFields(item, Array.isArray(value) ? `${at}[${key}]` : at ? `${at}.${key}` : key, out, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * What a re-run of a failed review needs beyond the call record: the role and company, and the picked pool cards
+ * (by their pool number) the prompt describes. Kept in the failed analysis, since the plan lives only in memory.
+ */
+export function retryContext(picked, brief) {
+  const pool = {};
+  for (const entry of list(picked)) if (entry && !entry.unprepared && entry.card && typeof entry.card === 'object') pool[entry.number] = entry.card;
+  const title = brief?.role?.title ?? brief?.title;
+  const company = brief?.role?.company ?? brief?.company;
+  return { role: { ...(typeof title === 'string' ? { title } : {}), ...(typeof company === 'string' ? { company } : {}) }, pool };
+}
+/** The plan array pickedCards reads, rebuilt from a retry context: the picked cards at their pool positions. */
+export function planFromRetryContext(context) {
+  const pool = plainObject(context?.pool) ? context.pool : {};
+  const plan = [];
+  for (const [number, card] of Object.entries(pool)) if (Number.isInteger(Number(number)) && Number(number) >= 1 && plainObject(card)) plan[Number(number) - 1] = card;
+  // A hole would shift the cards when the prompt filters the list, so every unpicked position holds an empty card.
+  return Array.from(plan, card => card ?? {});
+}
+
+export async function analyzeCall({ callDir, callRecord = {}, plan: givenPlan, brief: givenBrief, retry = null, deps = {} } = {}) {
   if (typeof callDir !== 'string' || !callDir) throw new Error('analyzeCall needs the call directory.');
+  // A re-run has no live plan or brief: the retry context (see retryContext) stands in for them.
+  const plan = givenPlan ?? (retry ? planFromRetryContext(retry) : undefined);
+  const brief = givenBrief ?? (retry ? { role: retry.role ?? {} } : undefined);
   if (!callRecord || typeof callRecord !== 'object') throw new Error('analyzeCall needs the call record.');
   const transcript = list(callRecord.transcript);
   const durationMs = clockMs(callRecord.durationMs) ?? transcript.reduce((max, turn) => Math.max(max, clockMs(turn?.endMs) ?? 0), 0);
@@ -167,7 +260,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   // Progress for the call window; a listener that throws never stops the analysis.
   const stage = name => { try { deps.onStage?.(name); } catch { /* display only */ } };
   // Diagnostics for the call's debug log (and so bug reports): states, sizes, durations and error
-  // text, never transcript or feedback content. A listener that throws never stops the analysis.
+  // text, and the review's reply in full (the log keeps full content). A listener that throws never stops the analysis.
   const now = typeof deps.clock === 'function' ? deps.clock : () => Date.now();
   const begun = now();
   const elapsed = (from = begun) => Math.round(now() - from);
@@ -175,7 +268,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   event('begin', {
     transcriptEntries: transcript.length, durationMs, planCards: list(plan).length,
     hasBrief: !!brief, toneSamples: list(callRecord.toneSamples).length, prosodySamples: list(callRecord.candidateProsody).length,
-    clients: { transcribe: !!deps.transcribe, metrics: !!deps.metrics, callText: !!deps.callText },
+    clients: { transcribe: !!deps.transcribe, metrics: !!deps.metrics, callText: !!deps.callText }, audioAvailable: deps.audioAvailable !== false,
   });
 
   let words = [];
@@ -186,7 +279,11 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   // Only the microphone has anything to transcribe: a line the voice spoke is not on the candidate track.
   const nothingSpoken = answerKinds.live === 0;
   event('answers', { ...answerKinds });
-  if (!nothingSpoken) {
+  if (!nothingSpoken && !clients.transcribe) {
+    // The raw tracks are gone (a re-run of a failed review): the review goes without the word-level view and is told so.
+    transcriptionError = 'the recording of the spoken answers is no longer kept';
+    event('transcription', { skipped: 'no-audio' });
+  } else if (!nothingSpoken) {
     stage('transcribing');
     const started = now();
     try {
@@ -221,10 +318,11 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   const wordsByTurn = wordsByAnswer(transcript, words);
   event('words-by-answer', { answersWithWords: Object.keys(wordsByTurn).length, wordsPlaced: Object.values(wordsByTurn).reduce((sum, bucket) => sum + bucket.length, 0), wordsTotal: words.length });
   // analysis.json key order follows the build doc.
-  const compose = ({ status, chapters, fillers, error: failure }) => ({
+  const compose = ({ status, chapters, fillers, error: failure, retry }) => ({
     callId: callRecord.callId, status, createdAt, metrics, chapters,
     toneTimeline: list(callRecord.toneSamples), fillers,
     ...(failure ? { error: failure } : {}),
+    ...(retry ? { retry } : {}),
     ...(metricsError ? { metricsError } : {}),
   });
 
@@ -254,16 +352,19 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
       ? { keys: Object.keys(raw).slice(0, 20), chapters: Array.isArray(raw.chapters) ? raw.chapters.length : null, moments: Array.isArray(raw.moments) ? raw.moments.length : null, planned: Array.isArray(raw.feedback?.planned) ? raw.feedback.planned.length : null }
       : { type: Array.isArray(raw) ? 'array' : typeof raw };
     const checkedAttempt = checkReview(raw, transcript, picked);
+    const fullReply = replyForLog(raw);
+    const trimmed = checkedAttempt.trimmed ?? [];
     if (checkedAttempt.review) {
       checked = checkedAttempt.review;
-      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'accepted', ...replyShape, keptChapters: checked.chapters.length, keptMoments: checked.moments.length, keptPlanned: list(checked.feedback?.planned).length });
+      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'accepted', ...replyShape, ...fullReply.first, fieldLengths: longFields(raw), ...(trimmed.length ? { trimmed } : {}), keptChapters: checked.chapters.length, keptMoments: checked.moments.length, keptPlanned: list(checked.feedback?.planned).length });
     } else {
       error = checkedAttempt.error;
-      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'rejected', error, ...replyShape });
+      event('review-reply', { attempt: attempt + 1, ms: elapsed(started), outcome: 'rejected', error, ...replyShape, ...fullReply.first, fieldLengths: longFields(raw), ...(trimmed.length ? { trimmed } : {}) });
     }
+    fullReply.more.forEach((group, at) => event('review-reply-text', { attempt: attempt + 1, group: at + 2, groups: fullReply.more.length + 1, replyText: group }));
   }
   if (!checked) {
-    const analysis = compose({ status: 'failed', chapters: [], fillers: { total: 0, perMinute: 0, byAnswer: [] }, error });
+    const analysis = compose({ status: 'failed', chapters: [], fillers: { total: 0, perMinute: 0, byAnswer: [] }, error, retry: retryContext(picked, brief) });
     await writeAnalysis(callDir, analysis, deps);
     event('done', { status: 'failed', ms: elapsed(), error });
     return { analysis, feedback: null };

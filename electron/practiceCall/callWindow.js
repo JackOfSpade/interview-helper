@@ -10,7 +10,7 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'ready', 'answer', 'decline', 'call-back', 'cancel-call-back', 'hang-up', 'leave', 'choose-feedback', 'set-muted', 'send-chat',
-  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'reconnect-microphone', 'close', 'log-event',
+  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'retry-analysis', 'delete-recording', 'open-microphone-settings', 'reconnect-microphone', 'close', 'log-event',
 ]);
 // The call window's own event lines kept for bug reports (newest last), in memory only.
 // Enough for a whole run, for bug reports.
@@ -189,6 +189,7 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'draft-answer']() { return typeof service.draftAnswer === 'function' ? service.draftAnswer() : { error: 'Suggestions are not available.' }; },
     async [WINDOW_PREFIX + 'get-prepared-cards']() { return service.getPreparedCards(); },
     async [WINDOW_PREFIX + 'get-replay']() { return service.getReplay(current?.callId ?? service.getState().callId); },
+    async [WINDOW_PREFIX + 'retry-analysis']() { return typeof service.retryAnalysis === 'function' ? service.retryAnalysis(current?.callId ?? service.getState().callId) : { error: 'The feedback review is not available.' }; },
     async [WINDOW_PREFIX + 'delete-recording']() { return service.deleteRecording(current?.callId ?? service.getState().callId); },
     // Off unless the app passes it in: a unit suite must never open System Settings.
     async [WINDOW_PREFIX + 'open-microphone-settings']() { return typeof deps.openMicrophoneSettings === 'function' ? Boolean(await deps.openMicrophoneSettings()) : false; },

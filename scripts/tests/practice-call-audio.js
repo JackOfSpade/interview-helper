@@ -511,12 +511,33 @@ export default [
       const [generated] = metrics.answers;
       assert.equal(generated.generatedOnly, undefined, 'no special flag');
       assert.equal(generated.wordCount, 5, 'the known sent words, not the repeating recogniser text');
-      assert.equal(generated.responseLatencyMs, 5000);
+      assert.equal(generated.responseLatencyMs, null, 'the wait before a line the aid wrote is the aid\'s, not the candidate\'s');
       assert.equal(generated.speechMs, 4000);
       assert.equal(generated.pausesOver1s, 1);
-      assert.equal(metrics.responseLatencyMs, 4000, 'the median takes both answers');
+      assert.equal(metrics.responseLatencyMs, 3000, 'the median takes only the answer the candidate gave themselves');
       assert.equal(metrics.pausesOver1s, 1);
       assert.equal(metrics.candidateTalkMs, 11000, 'both answers count as talk time, by their spans like the interviewer\'s');
+    },
+  },
+  {
+    name: 'practice call audio: the gap between two generated lines is not the candidate\'s pause, a gap next to a live line is',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Question.', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', generated: true, voiced: true, text: 'First line.', startMs: 6000, endMs: 9000 },
+        { speaker: 'candidate', generated: true, voiced: true, text: 'Second line.', startMs: 13000, endMs: 16000 },
+        { speaker: 'candidate', text: 'And a live word.', startMs: 20000, endMs: 22000 },
+      ];
+      const prosody = { 1: [{ startMs: 6000, endMs: 9000, speechMs: 2500, pauses: [] }], 2: [{ startMs: 13000, endMs: 16000, speechMs: 2500, pauses: [] }], 3: [{ startMs: 20000, endMs: 22000, speechMs: 1500, pauses: [] }] };
+      const [answer] = callMetrics({ transcript, candidateProsodyByTurn: prosody }).answers;
+      assert.equal(answer.pauseCount, 1, 'only the 4 s gap between the generated line and the live one');
+      assert.equal(answer.longestPauseMs, 4000);
+      assert.equal(answer.responseLatencyMs, null);
+      const live = transcript.map(entry => ({ ...entry, generated: undefined }));
+      assert.equal(callMetrics({ transcript: live, candidateProsodyByTurn: prosody }).answers[0].pauseCount, 2, 'without the aid both gaps are pauses');
+      assert.equal(callMetrics({ transcript: live, candidateProsodyByTurn: prosody }).answers[0].responseLatencyMs, 1000);
+      const liveFirst = callMetrics({ transcript: [transcript[0], { speaker: 'candidate', text: 'Live.', startMs: 7000, endMs: 9000 }, transcript[2]], candidateProsodyByTurn: { 1: [{ startMs: 7000, endMs: 9000, speechMs: 1500, pauses: [] }], 2: prosody[2] } }).answers[0];
+      assert.equal(liveFirst.responseLatencyMs, 2000, 'an answer that starts live keeps its response time');
     },
   },
   {

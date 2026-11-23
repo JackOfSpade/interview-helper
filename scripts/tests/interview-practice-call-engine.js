@@ -3911,7 +3911,25 @@ test('panel: the acknowledgement is spoken in the floor holder\'s voice and the 
   rig.sessions.opener.answer('Mm-hm, okay, I follow.');
   await flush();
   assert.deepEqual(rig.streams[1].texts, ['Mm-hm, okay, I follow.'], 'sent to the stream opened for the floor holder');
-  assert(rig.sessions.main.calls[1].message.includes(MARK('Mm-hm, okay, I follow.')), rig.sessions.main.calls[1].message);
+  // The note names the voice: untagged text carries on in it, and only the note can tell the session that a colleague
+  // (not the lead) held the floor. Without it a lead's whole farewell came out in the colleague's voice.
+  assert(rig.sessions.main.calls[1].message.includes("[You have already started your reply out loud with: 'Mm-hm, okay, I follow.' These words were said in John's voice (id B), and what you write with no speaker tag stays in that voice. Carry on from there.]"), rig.sessions.main.calls[1].message);
+  assert(rig.sessions.opener.calls.at(-1).message.includes('[This reaction is spoken by John'), rig.sessions.opener.calls.at(-1).message);
+  assert(rig.sessions.opener.calls.at(-1).message.includes("[Last said by the interviewers: Priya: 'Hello, I am Priya.' John: 'And I am John.']"), 'a reply two people spoke in is quoted by speaker, never as one person\'s words');
+  assert(!rig.sessions.opener.calls.at(-1).message.includes('[You last said:'));
+});
+
+test('a warm reaction is dropped right after another, or for the same warm word, but not for a different one said a while back', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await answerTurn(rig, 'Go on.', 'Ah, lovely to meet you.');
+  await answerTurn(rig, 'Go on.', 'Mm-hm.');
+  await answerTurn(rig, 'Go on.', 'Okay, sure.');
+  await answerTurn(rig, 'Go on.', 'Right, thanks for that.'); // heard 2026-11-23: dropped for the "lovely" three reactions back, 3.9 s of silence
+  await answerTurn(rig, 'Go on.', 'Yeah, thank you.'); // right after a thanks
+  await answerTurn(rig, 'Go on.', 'No worries.');
+  await answerTurn(rig, 'Go on.', 'Oh, thanks.'); // the same warm word again within the last few
+  assert.deepEqual(rig.of('opener').map(event => event.outcome), ['spoken', 'spoken', 'spoken', 'spoken', 'dropped', 'spoken', 'dropped']);
 });
 
 test('a candidate who resumes while the acknowledgement is pending discards the turn: no main call, no report, a late answer changes nothing', async () => {

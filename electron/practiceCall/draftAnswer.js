@@ -44,12 +44,27 @@ export function transcriptLines(transcript, { interviewerName = 'Interviewer', p
   return entries.slice(-TRANSCRIPT_TURNS).map(entry => {
     // A sent message the candidate's voice spoke on the call was heard, not read.
     const how = entry.channel === 'chat' && !entry.voiced ? ' (typed in chat)' : '';
-    if (entry.speaker === 'candidate') return `Candidate${how}: ${clip(entry.text, TURN_MAX)}`;
+    // The candidate's own AI-voiced line is shown as the interviewers heard it (the speech recogniser's words, sentText), which is what the conversation holds.
+    if (entry.speaker === 'candidate') return `Candidate${how}: ${clip(typeof entry.sentText === 'string' && entry.sentText.trim() ? entry.sentText : entry.text, TURN_MAX)}`;
     const parts = Array.isArray(entry.segments) ? entry.segments.filter(item => item && typeof item.text === 'string' && item.text.trim()) : [];
     if (parts.length > 1) return parts.map(item => `${nameOf(item.speakerId)}${how}: ${clip(item.text, TURN_MAX)}`).join('\n');
     return `${nameOf(entry.speakerId)}${how}: ${clip(entry.text, TURN_MAX)}`;
   });
 }
+
+// Rules both prompts share, as situations and options (never a sentence to repeat: whatever is quoted gets said in every call).
+// The spoken-not-notes rule: shared, since the work prompt's lines were said as stray note fragments.
+const SPOKEN_NOT_NOTES = '- Every sentence is one a person would actually say, never a note or a slide: no sentence opens with a short label and a colon that names what follows (a heading for the point, a name for the result, a key and its value), no bare fragment stands in for a sentence (a cost, a property or a finding named on its own), and no dash or semicolon stitches notes together. Say the same thing as a whole spoken sentence. Mentioning cost or complexity is optional: only when it matters to the question.';
+// What a real candidate keeps in mind about what they have already said and how a call flows (audited calls repeated one self-description in most replies and thanked at every hand-over).
+const CONVERSATION_REALISM = [
+  '- What you have already said on the call is not said again. A way of describing yourself or your background, a caveat, an assumption, a reason you suit the role or an opening habit is said once at most; your own earlier lines in the conversation below are there so you can see what is already said, and a later reply moves on to what is new.',
+  '- An opening reaction to the question (praising it, calling it a good point, saying they caught something) is for when the interviewer really did catch something or ask something sharp; most replies just begin with the answer.',
+  '- Thanking the interviewers for their time, or saying goodbye, happens once, when the call is actually closing. A hand-over, a new question or a new part of an exercise gets no thanks.',
+  '- Reading values aloud while checking or testing: an engineer names what matters (the field or quantity that changes, the result, what it means) rather than reciting every digit of every register or table entry, and says hexadecimal the way engineers say it aloud, with a long value summarised or its meaningful part named.',
+  '- The size of the answer follows the size of the question and how short the interview is: a follow-up or one-fact question gets a short answer, not a presentation.',
+];
+// How fast the work plays, so the words and the typing can be matched (padTyping.js keyDelayMs: about 70 ms a key, longer at line ends).
+const WORK_PACE = 'Real pace: your hands type about ten to twelve characters a second (a forty-character line of code takes around four seconds; a ten-line function around forty), and your voice speaks about two and a half words a second (a forty-word line takes around sixteen seconds).';
 
 /**
  * The prompt. `context` holds what the call already has: the brief (company, role, summary,
@@ -99,8 +114,10 @@ export function draftAnswerPrompt(context = {}) {
     '',
     'How to write it:',
     '- First person, as yourself, in natural spoken English: the way a prepared, confident candidate answers out loud. No headings, lists, markdown, quotation marks around the whole reply, or sign-off.',
-    '- Every sentence is one a person would actually say. Never open a sentence with a label and a colon the way notes or slides do ("Short version: I was wrong", "Leading explanation: the meter", "What\'s changed: the current fell", "To the ground:"); say it as speech instead ("The short version is that I was wrong", "My leading explanation is the meter", "What\'s changed is that the current fell", "and to the ground I\'d say"). The same goes for a dash or semicolon used to stitch notes together. One flowing reply, no paragraph breaks.',
-    '- Say numbers and units the way people say them aloud when it reads oddly otherwise ("about 170 kilograms an hour", "two point nine amps").',
+    SPOKEN_NOT_NOTES,
+    '- One flowing reply, no paragraph breaks.',
+    '- Say numbers and units the way people say them aloud when it reads oddly otherwise: rounded where a person would round, with the unit spelled out as a word.',
+    ...CONVERSATION_REALISM,
     '- Stay in character the whole time. You are this person speaking from memory, not an assistant reading files: never mention documents, notes, a résumé as a source, a prompt, being an AI, or what you can or cannot say, and never hedge or refuse because something is not written down.',
     '- Build on the career documents below: they are your history, so use their employers, projects, tools and results. Where they do not cover what was asked (why you left a job, a specific story, a number, an opinion, a hobby), make up plausible, specific details that fit them, one or two, not a list. This reply is for rehearsing the interview, so sounding like a real, well-prepared candidate matters more than sticking to what is written.',
     '- Keep anything you make up consistent with the documents (do not contradict their employers, titles or dates) and with what you have already said in the conversation.',
@@ -149,7 +166,11 @@ export async function draftCandidateAnswer({ callText, signal, ...context } = {}
 
 export const DRAFT_WORK_STAGE = 'practice-call-draft-work';
 export const DRAFT_WORK_MAX_STEPS = 10;
+/** When a step's line is said against the typing of its code: ahead of it, while it is typed, or once it is written. */
+export const WORK_ORDERS = Object.freeze(['before', 'during', 'after']);
 const SAY_MAX = 700;
+const BRIDGE_MAX = 120;
+const BRIDGES_MAX = 5; // bridges become lines of their own, beside the steps the reply may have
 const WORK_PAD_MAX = 20000;
 
 /** The JSON schema the work reply must follow. */
@@ -160,11 +181,12 @@ export const DRAFT_WORK_SCHEMA = Object.freeze({
     steps: {
       type: 'array', minItems: 1, maxItems: DRAFT_WORK_MAX_STEPS,
       items: {
-        type: 'object', additionalProperties: false, required: ['say', 'code', 'typeWhileSpeaking'],
+        type: 'object', additionalProperties: false, required: ['say', 'code', 'explain', 'bridge'],
         properties: {
-          say: { type: 'string', description: 'What you say out loud at this step, spoken word for word.' },
-          code: { type: ['string', 'null'], description: 'The whole coding pad as it reads after this step, or null to leave it as it is.' },
-          typeWhileSpeaking: { type: 'boolean', description: 'true to type this step\'s code while saying the line, false to say the line first and then type.' },
+          say: { type: 'string', description: 'What you say out loud at this step, spoken word for word. It is about the code this same step types, never a piece an earlier step already typed or a later step will type.' },
+          code: { type: ['string', 'null'], description: 'The whole coding pad as it reads after this step, or null to leave it as it is. The pad is only added to, in order, unless you are fixing something: everything between the first and the last change is retyped.' },
+          bridge: { type: ['string', 'null'], description: 'Only for an "after" step that follows a "before" step with code (two silent stretches of typing back to back): the few words you say before starting this piece, which mark that you are moving on to something new without saying what it is. null everywhere else.' },
+          explain: { type: 'string', enum: [...WORK_ORDERS], description: 'When the line is said against the typing of this step\'s code. "before": say the line, then type in silence. "during": type while saying the line (the two start together and should take about as long as each other). "after": type in silence first, then say the line about what was just written.' },
         },
       },
     },
@@ -187,21 +209,25 @@ export function draftWorkPrompt(context = {}) {
     : required ? [`- The exercise asks for ${required}: write the code in ${required}.`] : [];
   return [
     `You are ${name || 'the candidate'}, a strong candidate in a live video interview for ${brief.role || 'the role'}${brief.company ? ` at ${brief.company}` : ''}. The interviewers have shared an exercise and opened a coding pad${lang ? ` (${lang})` : ''} that you write in while they watch.`,
-    'Show what an excellent answer to this exercise looks like, done live. Write it as a short sequence of steps. Each step is a line you say out loud, then the whole coding pad as it should read after you have typed that step (or null when that step changes nothing in the pad). Your words are spoken on the call in your voice and the code is typed into the pad at a person\'s pace after each line, so the interviewers hear you and watch you write.',
+    'Show what an excellent answer to this exercise looks like, done live. Write it as a short sequence of steps. Each step is a line you say out loud, the whole coding pad as it should read after you have typed that step (or null when that step changes nothing in the pad), and when you say the line against the typing. Your words are spoken on the call in your voice and the code is typed into the pad at a person\'s pace, so the interviewers hear you and watch you write.',
     '',
     'How a strong candidate works through it:',
     '- Start where things stand now: read the conversation and the pad below. If an interviewer has just put a question to you (why an approach works, its cost, what would change if, how you would test it), answer it briefly and naturally in a single step with code null, and set waitForReply true. Then stop: take your hands off the keyboard and wait for them, as a candidate does when someone cuts in mid-exercise, since they may want to follow up, push back or move on. Do not say what you will code next or announce that you are carrying on; they will tell you when to go on. If they have pointed out a bug, given a hint or asked you to change something, the first step acknowledges it briefly and then you carry on from the code already in the pad (fix it, or continue it), never starting over without a reason. If they have just confirmed your answer or told you to go ahead, pick up where you left off without re-answering. If they said you can leave the unfinished part, leave it as it is and answer only what they asked. If the code is finished and you already said so, answer what was asked in one step with code null.',
-    '- Starting fresh: the first step restates the task in a sentence in your own words, states any assumption you are making (as a statement, never a question you would wait on: "I\'ll assume the arrays are the same length"), and gives the approach in plain English with its cost when that matters. Its code may be just the function signature, or null.',
-    '- For each step choose how the line and the typing go together, the way a person does at that moment: say it first and then type (typeWhileSpeaking false), usually for a new idea or a choice worth explaining before you commit to it; or type while you talk (typeWhileSpeaking true), usually for straightforward code you are describing as your hands write it. Mix them as a real candidate would; neither is the rule. Typing takes real time (about a line every few seconds): a piece of more than a few lines typed after its line leaves the call silent for ten seconds or more, which a candidate would rarely do; they talk while typing a longer piece, or write it in smaller pieces.',
-    '- Then write the code in a few small, logical pieces, one per step (usually two to four). Before each piece, say in plain English what it will do and why, at the level of intent: "First I\'ll centre the coordinates by taking off the mean, so the second moments are about the centre." Never read the code aloud or spell out syntax, symbols, brackets, variable assignments or operators ("x equals x minus mean of x", "for i in range", "open bracket"). One or two sentences per step.',
+    '- Starting fresh: the first step restates the task in a sentence in your own words, states any assumption you are making (as a statement, never a question you would wait on), and gives the approach in plain English with its cost when that matters. Its code may be just the function signature, or null.',
+    '- For each step that types code, choose when you explain it ("explain"), the way a person does at that moment. "before": you say what you are about to write and why, then type it without talking; usually for a new idea or a choice worth explaining before you commit to it. "during": you talk while your hands write; usually for straightforward code you are describing as it appears. "after": you go quiet and write the piece, then say what you just wrote and why; usually for a short piece that is quicker to write than to announce, or one you want to get down before you lose it. Mix them across the steps as a real candidate would; none is the rule, and a run that uses the same one every time sounds mechanical. The line always matches its choice: before the code it looks ahead, during it describes what is appearing, after it looks back at what is now in the pad. Typing takes real time: a piece of more than a few lines typed in silence (before or after its line) leaves the call quiet for ten seconds or more, which a candidate would rarely do; they talk while typing a longer piece, or write it in smaller pieces.',
+    '- One combination needs a bridge. When a "before" step (line, then silent typing) is followed by an "after" step (silent typing, then line), the listeners would watch two pieces appear in one unbroken silence and take the second for more of what you explained first. So that "after" step carries a "bridge": a few words said before its typing starts that mark the move to a new piece, the way a person mutters when they turn to the next thing. It never explains the new piece (that is what the line after the typing is for) and never repeats an earlier bridge; choose words that fit this moment and how you have been talking. Every other step has bridge null.',
+    `- Keep the words and the hands together. A step's line is about the code that same step types: never explaining a piece an earlier step already typed while typing the next one, and never explaining a later piece while still typing this one. ${WORK_PACE} Typing and talking should take about the same time when they go together ("during"; the hands slow down or speed up a little to keep with the voice, but only a little): when typing a piece would far outlast its line, either say more about that piece while you type it (what it does, why, what it handles) or split the piece into smaller steps; when the line is much longer than the typing, say it first or shorten it. The pad is only added to, in order, unless you are fixing something (retyping rewrites everything between the first and the last change, so a fix is made in place and minimal).`,
+    '- Then write the code in a few small, logical pieces, one per step (usually two to four). Before each piece, say in plain English what it will do and why, at the level of intent: the operation and the reason for it, in your own words. Never read the code aloud or spell out syntax, symbols, brackets, variable assignments, operators or loop headers. One or two sentences per step.',
     '- The code is correct, runnable, idiomatic and small: what a careful senior engineer writes in an interview, with a short docstring or a comment only where it helps. Each step\'s code is the WHOLE pad after that step, so it repeats the earlier code and adds to it.',
     '- Then test it out loud: walk the given example through by hand with its actual numbers, said the way people say numbers, and give the result with its units. If the exercise asks for a hand calculation or a value, this is where you give it, worked briefly. Mention an edge case your code handles or that you would check, in a sentence. A step that only talks has code null.',
-    '- Finish by saying plainly, in your own words, that you are done and inviting their questions ("I think that\'s it. Happy to go through any part of it."). This is how the interviewers know your answer is final, so say it only in the last step.',
+    '- Finish by saying plainly, in your own words, that you are done and are ready for their questions or to go through any part of it; there are many natural ways a person says that, so word it as you would, not as a stock closing. This is how the interviewers know your answer is final, so say it only in the last step, and say it clearly enough that nobody could take it for anything else.',
     '- Keep every line short and spoken: no lists, headings or markdown in what you say, no paragraph breaks, and never more than about forty words in a line. Numbers and units are said as words where it reads oddly otherwise.',
+    SPOKEN_NOT_NOTES,
+    ...CONVERSATION_REALISM,
     ...languageRule,
     '- Answer every bullet the exercise asks, in order, and nothing it does not ask.',
     '- Stay in character: never mention documents, notes, a prompt or being an AI.',
-    '- Reply with JSON only, matching the schema: {"waitForReply":true or false,"steps":[{"say":"...","code":"..." or null,"typeWhileSpeaking":true or false}]}.',
+    '- Reply with JSON only, matching the schema: {"waitForReply":true or false,"steps":[{"say":"...","code":"..." or null,"explain":"before" or "during" or "after","bridge":"..." or null}]}.',
     ...sources,
     `\n<coding-pad-now${lang ? ` lang="${lang}"` : ''}>\n${padText || '(empty)'}\n</coding-pad-now>\n`,
     'Your steps:',
@@ -218,14 +244,27 @@ export function cleanWork(raw) {
   const steps = (Array.isArray(value?.steps) ? value.steps : []).slice(0, DRAFT_WORK_MAX_STEPS).map(step => {
     const say = cleanDraft(step?.say).slice(0, SAY_MAX);
     const code = typeof step?.code === 'string' ? step.code.replace(/\r\n?/gu, '\n').slice(0, WORK_PAD_MAX) : null;
-    return { say, code, together: step?.typeWhileSpeaking === true && !!say && code !== null };
-  }).filter(step => step.say || step.code !== null);
+    // An order only means something with both a line and code; an older reply's typeWhileSpeaking still reads as "during".
+    const asked = WORK_ORDERS.includes(step?.explain) ? step.explain : step?.typeWhileSpeaking === true ? 'during' : 'before';
+    const order = say && code !== null ? asked : 'before';
+    return { say, code, order, together: order === 'during', bridge: cleanDraft(step?.bridge).slice(0, BRIDGE_MAX) };
+  }).filter(step => step.say || step.code !== null).flatMap((step, at, all) => {
+    // Typing in silence straight after a piece that was typed in silence after its own line: the two would read as
+    // one piece, the one already explained. The bridge is said between them, as a line of its own; a reply that left
+    // it out has this piece explained while it is typed instead, so the words and the hands still start together.
+    const { bridge, ...kept } = step;
+    const before = all[at - 1];
+    const silentRun = step.order === 'after' && !!before && before.order === 'before' && before.code !== null;
+    if (!silentRun) return [kept];
+    if (bridge) return [{ say: bridge, code: null, order: 'before', together: false }, kept];
+    return [{ ...kept, order: 'during', together: true }];
+  }).slice(0, DRAFT_WORK_MAX_STEPS + BRIDGES_MAX);
   if (!steps.length) throw new Error('The drafted work had no steps.');
   // An answer to an interviewer's question mid-exercise is said with the hands off the keyboard, and then the candidate
   // waits for the interviewer's reply: only the first line is kept, and it types nothing.
   if (value?.waitForReply === true) {
     const answer = steps.find(step => step.say);
-    if (answer) return [{ say: answer.say, code: null, together: false }];
+    if (answer) return [{ say: answer.say, code: null, order: 'before', together: false }];
   }
   return steps;
 }

@@ -14,6 +14,8 @@ import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
 const TYPED_ONLY_DELIVERY = 'Delivery was not measured: every answer was typed.';
 const SPEEDS = Object.freeze([1, 1.25, 1.5, 2]);
+// The step a review run again is on, as the replay's running notice names it.
+const ANALYSIS_STAGES = Object.freeze({ recording: 'preparing', transcribing: 'transcribing your answers', metrics: 'measuring delivery', review: 'writing the feedback', saving: 'saving' });
 const SKIP_MS = 10_000;
 const BUBBLE_ESTIMATE_PX = 120;
 const RING = 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300';
@@ -262,6 +264,9 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleted, setDeleted] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
+  // A failed review run again from the notice: whether the request is out, and why it was refused.
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState(null);
   const audioRef = useRef(null);
   const pendingSeekRef = useRef(null);
   const audioUrl = !deleted && replay?.audioUrl ? replay.audioUrl : null;
@@ -320,6 +325,16 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
     } catch { setPlaying(false); }
   }, [audioUrl, durationMs, playing, positionMs, seek]);
   const jumpPart = useCallback(direction => seekActive(partJumpTarget(model.chapters, activePos, direction, activeMs)), [model.chapters, activePos, activeMs, seekActive]);
+  const retryAnalysis = async () => {
+    if (typeof api?.retryAnalysis !== 'function' || retrying) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const result = await api.retryAnalysis();
+      if (result?.error) setRetryError(result.error);
+    } catch (error) { setRetryError(error?.message || 'The feedback could not be run again.'); }
+    setRetrying(false);
+  };
   const confirmDelete = async () => {
     if (typeof api?.deleteRecording === 'function') {
       try { await api.deleteRecording(); }
@@ -425,9 +440,10 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
           : replay?.recordingPruned ? `Only the ${replay.recordingsKept ?? 10} most recent calls keep their recording. The feedback of this one is kept.`
             : 'The recording for this call is not available. The feedback is kept.'}
       </p>}
-      {analysis?.status === 'analyzing' && <p role="status" aria-label="Analysis status" className="rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">Analysis is still running. Chapters and feedback may be incomplete.</p>}
+      {analysis?.status === 'analyzing' && <p role="status" aria-label="Analysis status" className="rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">Analysis is still running{ANALYSIS_STAGES[analysis.stage] ? ` (${ANALYSIS_STAGES[analysis.stage]})` : ''}. Chapters and feedback may be incomplete.</p>}
       {analysis?.status === 'failed' && <p role="alert" aria-label="Analysis failed" className="flex items-start gap-1.5 rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">
-        <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />Analysis failed{analysis.error ? `: ${analysis.error}` : ''}. The recording is still available.
+        <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" /><span>Analysis failed{analysis.error ? `: ${analysis.error}` : ''}. The recording is still available.{retryError ? ` ${retryError}` : ''}</span>
+        {typeof api?.retryAnalysis === 'function' && <button type="button" onClick={retryAnalysis} disabled={retrying} aria-label="Try the feedback again" className={`ml-auto shrink-0 rounded-md border border-red-400/40 bg-red-500/25 px-3 py-0.5 hover:bg-red-500/35 disabled:opacity-40 ${RING}`}>{retrying ? 'Trying…' : 'Try again'}</button>}
       </p>}
       {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-lg border border-red-400/30 bg-red-500/15 px-3 py-2 text-sm text-red-100">{deleteError}</p>}
       {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-100">

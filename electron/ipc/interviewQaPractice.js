@@ -17,9 +17,12 @@ const CODE_LENGTH = 20;
 export const PRACTICE_CODE_RE = new RegExp(`^PRACTICE-[${CODE_ALPHABET}]{${CODE_LENGTH}}$`, 'u');
 const INTRO = normalizeQuestion('Tell me about yourself.');
 
+// `question` bounds a planned question the host copies from the plan itself (it is never the model's own text), so it is generous.
 const LIMITS = Object.freeze({
-  text: 600, long: 1500, short: 300, transcriptText: 4000, transcript: 200, planned: PRACTICE_MAX_QUESTIONS, moments: 30, priorities: 5,
+  text: 600, long: 1500, short: 300, question: 4000, transcriptText: 4000, transcript: 200, planned: PRACTICE_MAX_QUESTIONS, moments: 30, priorities: 5,
 });
+/** The limits the review prompt states to the model, from the same numbers the validator enforces. */
+export const PRACTICE_FEEDBACK_LIMITS = LIMITS;
 export const PRACTICE_MOMENT_KINDS = Object.freeze(['small-talk', 'curveball', 'off-topic', 'follow-up', 'questions-for-interviewer', 'closing', 'other']);
 
 export function newPracticeCode(randomBytes = crypto.randomBytes) {
@@ -99,7 +102,7 @@ export const INTERVIEW_PRACTICE_FEEDBACK_SCHEMA = Object.freeze({
     session: { type: 'string', description: 'The practice session code from the starter message.' },
     overall: { type: 'object', additionalProperties: false, required: ['score', 'summary'], properties: { score: scoreSchema, summary: str(LIMITS.long) }, description: 'The whole call, not only the planned questions.' },
     planned: { type: 'array', maxItems: LIMITS.planned, items: { type: 'object', additionalProperties: false, required: ['question', 'asked'], properties: {
-      question: str(LIMITS.short), asked: { type: 'boolean' }, askedAs: str(LIMITS.short), score: { ...scoreSchema, description: 'Only for questions you asked; omit it for unasked ones.' },
+      question: str(LIMITS.question), asked: { type: 'boolean' }, askedAs: str(LIMITS.short), score: { ...scoreSchema, description: 'Only for questions you asked; omit it for unasked ones.' },
       covered: str(LIMITS.text), adapted: str(LIMITS.text), improve: str(LIMITS.text),
       extension: { ...str(LIMITS.text), description: 'Optional extension: material beyond the memorized prepared answer that would have answered more completely, phrased as something to consider next time, never required.' },
     } }, description: 'One entry per planned question, question copied from the plan.' },
@@ -145,61 +148,147 @@ const rate = (value, field) => {
 };
 
 /** Optional delivery notes from the post-call review; every field is bounded. */
-function deliveryNotes(input) {
+function deliveryNotes(input, check = fn => fn()) {
   if (input === undefined) return null;
   if (!plain(input)) throw new Error('delivery must be an object.');
   const out = {};
   for (const key of ['summary', 'pace', 'pauses', 'fillers', 'confidence', 'interruptions', 'typedAnswers']) {
-    const value = bounded(input[key], key === 'summary' ? LIMITS.long : LIMITS.short, `delivery.${key}`);
-    if (key === 'summary' && !value) throw new Error('delivery.summary is required.');
+    const value = check(() => {
+      const bound = bounded(input[key], key === 'summary' ? LIMITS.long : LIMITS.short, `delivery.${key}`);
+      if (key === 'summary' && !bound) throw new Error('delivery.summary is required.');
+      return bound;
+    });
     if (value) out[key] = value;
   }
-  const fillerCount = count(input.fillerCount, 'delivery.fillerCount');
-  if (fillerCount !== null) out.fillerCount = fillerCount;
-  const wordsPerMinute = rate(input.wordsPerMinute, 'delivery.wordsPerMinute');
-  if (wordsPerMinute !== null) out.wordsPerMinute = wordsPerMinute;
+  const fillerCount = check(() => count(input.fillerCount, 'delivery.fillerCount'));
+  if (fillerCount !== null && fillerCount !== undefined) out.fillerCount = fillerCount;
+  const wordsPerMinute = check(() => rate(input.wordsPerMinute, 'delivery.wordsPerMinute'));
+  if (wordsPerMinute !== null && wordsPerMinute !== undefined) out.wordsPerMinute = wordsPerMinute;
   return out;
 }
 
-/** Normalize and bound a finish_practice_interview payload; throws with the reason. */
-export function validatePracticeFeedback(input) {
+/**
+ * Cuts model-written text to `max` characters: at the last sentence end inside the limit when that keeps at least
+ * 40% of it, else at a word boundary with an ellipsis. Text inside the limit is returned as it is.
+ */
+export function trimPracticeText(text, max) {
+  if (typeof text !== 'string' || text.length <= max) return text;
+  const head = text.slice(0, max);
+  let end = -1;
+  for (const match of head.matchAll(/[.!?\u2026]["'\u201d\u2019)\]]*(?=\s|$)/gu)) end = match.index + match[0].length;
+  if (end >= max * 0.4) return head.slice(0, end).trimEnd();
+  const room = text.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/u, ''); // never half of a surrogate pair
+  const atWord = room.search(/\s\S*$/u);
+  return `${(atWord > 0 ? room.slice(0, atWord) : room).replace(/[\s.,;:!?\u2026-]+$/u, '')}\u2026`;
+}
+
+/**
+ * Brings a model-written feedback object inside the limits instead of rejecting it: over-long text is cut
+ * (trimPracticeText) and over-long arrays lose their tail. Only strings and arrays are touched, so a wrong type is
+ * still left for validatePracticeFeedback to reject. Returns the cut copy and what was cut ({ path, length, limit }).
+ */
+export function trimPracticeFeedback(input) {
+  const trimmed = [];
+  if (!plain(input)) return { feedback: input, trimmed };
+  const out = structuredClone(input);
+  const text = (owner, key, max, at) => {
+    const value = owner?.[key];
+    if (typeof value !== 'string' || value.length <= max) return;
+    trimmed.push({ path: at, length: value.length, limit: max });
+    owner[key] = trimPracticeText(value, max);
+  };
+  const list = (owner, key, max) => {
+    if (!Array.isArray(owner?.[key])) return [];
+    if (owner[key].length > max) { trimmed.push({ path: key, length: owner[key].length, limit: max }); owner[key] = owner[key].slice(0, max); }
+    return owner[key];
+  };
+  if (plain(out.overall)) text(out.overall, 'summary', LIMITS.long, 'overall.summary');
+  list(out, 'planned', LIMITS.planned).forEach((item, index) => {
+    if (!plain(item)) return;
+    text(item, 'question', LIMITS.question, `planned[${index}].question`);
+    text(item, 'askedAs', LIMITS.short, `planned[${index}].askedAs`);
+    for (const key of ['covered', 'adapted', 'improve', 'extension']) text(item, key, LIMITS.text, `planned[${index}].${key}`);
+  });
+  list(out, 'moments', LIMITS.moments).forEach((item, index) => {
+    if (!plain(item)) return;
+    text(item, 'prompt', LIMITS.short, `moments[${index}].prompt`);
+    text(item, 'note', LIMITS.text, `moments[${index}].note`);
+  });
+  if (plain(out.communication)) for (const key of ['pace', 'clarity', 'structure', 'confidence', 'filler']) text(out.communication, key, LIMITS.short, `communication.${key}`);
+  list(out, 'priorities', LIMITS.priorities).forEach((_, index, items) => text(items, index, LIMITS.short, `priorities[${index}]`));
+  list(out, 'transcript', LIMITS.transcript).forEach((item, index) => { if (plain(item)) text(item, 'text', LIMITS.transcriptText, `transcript[${index}].text`); });
+  if (plain(out.delivery)) {
+    text(out.delivery, 'summary', LIMITS.long, 'delivery.summary');
+    for (const key of ['pace', 'pauses', 'fillers', 'confidence', 'interruptions', 'typedAnswers']) text(out.delivery, key, LIMITS.short, `delivery.${key}`);
+  }
+  return { feedback: out, trimmed };
+}
+
+/**
+ * Normalize and bound a finish_practice_interview payload; throws with the reason. With `all`, every
+ * violation is collected (the error's `issues`, joined in its message) instead of stopping at the first.
+ */
+export function validatePracticeFeedback(input, { all = false } = {}) {
+  const issues = [];
+  // The first problem throws; when collecting, it is recorded and the next field is checked.
+  const check = fn => {
+    try { return fn(); } catch (error) {
+      if (!all) throw error;
+      issues.push(error.message);
+      return undefined;
+    }
+  };
   if (!plain(input)) throw new Error('feedback must be an object.');
   if (!plain(input.overall)) throw new Error('overall must be an object with score and summary.');
-  const overall = { score: score(input.overall.score, 'overall.score'), summary: bounded(input.overall.summary, LIMITS.long, 'overall.summary') };
-  if (overall.score === null || !overall.summary) throw new Error('overall needs a score and a summary.');
-  if (!Array.isArray(input.planned) || input.planned.length > LIMITS.planned) throw new Error(`planned must be an array of at most ${LIMITS.planned} entries.`);
-  const planned = input.planned.map((item, index) => {
-    if (!plain(item) || typeof item.asked !== 'boolean') throw new Error(`planned[${index}] needs question and asked.`);
-    const question = bounded(item.question, LIMITS.short, `planned[${index}].question`);
-    if (!question) throw new Error(`planned[${index}].question is required.`);
-    // An unasked question has no performance to grade: a placeholder score
-    // would read as a failing mark on the node.
-    return { question, asked: item.asked, askedAs: bounded(item.askedAs, LIMITS.short, `planned[${index}].askedAs`), score: item.asked ? score(item.score, `planned[${index}].score`) : null,
-      covered: bounded(item.covered, LIMITS.text, `planned[${index}].covered`), adapted: bounded(item.adapted, LIMITS.text, `planned[${index}].adapted`), improve: bounded(item.improve, LIMITS.text, `planned[${index}].improve`),
-      extension: bounded(item.extension, LIMITS.text, `planned[${index}].extension`) };
+  const overall = check(() => {
+    const result = { score: score(input.overall.score, 'overall.score'), summary: bounded(input.overall.summary, LIMITS.long, 'overall.summary') };
+    if (result.score === null || !result.summary) throw new Error('overall needs a score and a summary.');
+    return result;
   });
-  const momentsIn = input.moments === undefined ? [] : input.moments;
-  if (!Array.isArray(momentsIn) || momentsIn.length > LIMITS.moments) throw new Error(`moments must be an array of at most ${LIMITS.moments} entries.`);
-  const moments = momentsIn.map((item, index) => {
-    if (!plain(item) || !PRACTICE_MOMENT_KINDS.includes(item.kind)) throw new Error(`moments[${index}].kind must be one of ${PRACTICE_MOMENT_KINDS.join(', ')}.`);
-    const prompt = bounded(item.prompt, LIMITS.short, `moments[${index}].prompt`);
-    if (!prompt) throw new Error(`moments[${index}].prompt is required.`);
-    return { kind: item.kind, prompt, score: score(item.score, `moments[${index}].score`), note: bounded(item.note, LIMITS.text, `moments[${index}].note`) };
+  const planned = check(() => {
+    if (!Array.isArray(input.planned) || input.planned.length > LIMITS.planned) throw new Error(`planned must be an array of at most ${LIMITS.planned} entries.`);
+    return input.planned.map((item, index) => check(() => {
+      if (!plain(item) || typeof item.asked !== 'boolean') throw new Error(`planned[${index}] needs question and asked.`);
+      const question = bounded(item.question, LIMITS.question, `planned[${index}].question`);
+      if (!question) throw new Error(`planned[${index}].question is required.`);
+      // An unasked question has no performance to grade: a placeholder score
+      // would read as a failing mark on the node.
+      return { question, asked: item.asked, askedAs: bounded(item.askedAs, LIMITS.short, `planned[${index}].askedAs`), score: item.asked ? score(item.score, `planned[${index}].score`) : null,
+        covered: bounded(item.covered, LIMITS.text, `planned[${index}].covered`), adapted: bounded(item.adapted, LIMITS.text, `planned[${index}].adapted`), improve: bounded(item.improve, LIMITS.text, `planned[${index}].improve`),
+        extension: bounded(item.extension, LIMITS.text, `planned[${index}].extension`) };
+    }));
   });
-  const communicationIn = input.communication === undefined ? {} : input.communication;
-  if (!plain(communicationIn)) throw new Error('communication must be an object.');
-  const communication = Object.fromEntries(['pace', 'clarity', 'structure', 'confidence', 'filler'].map(key => [key, bounded(communicationIn[key], LIMITS.short, `communication.${key}`)]));
-  if (!Array.isArray(input.priorities) || input.priorities.length > LIMITS.priorities) throw new Error(`priorities must be an array of at most ${LIMITS.priorities} strings.`);
-  const priorities = input.priorities.map((item, index) => bounded(item, LIMITS.short, `priorities[${index}]`)).filter(Boolean);
-  const transcriptIn = input.transcript === undefined ? [] : input.transcript;
-  if (!Array.isArray(transcriptIn) || transcriptIn.length > LIMITS.transcript) throw new Error(`transcript must be an array of at most ${LIMITS.transcript} turns.`);
-  const transcript = transcriptIn.map((item, index) => {
-    if (!plain(item) || !['interviewer', 'candidate'].includes(item.role)) throw new Error(`transcript[${index}].role must be interviewer or candidate.`);
-    const text = bounded(item.text, LIMITS.transcriptText, `transcript[${index}].text`);
-    if (!text) throw new Error(`transcript[${index}].text is required.`);
-    return { role: item.role, text };
+  const moments = check(() => {
+    const momentsIn = input.moments === undefined ? [] : input.moments;
+    if (!Array.isArray(momentsIn) || momentsIn.length > LIMITS.moments) throw new Error(`moments must be an array of at most ${LIMITS.moments} entries.`);
+    return momentsIn.map((item, index) => check(() => {
+      if (!plain(item) || !PRACTICE_MOMENT_KINDS.includes(item.kind)) throw new Error(`moments[${index}].kind must be one of ${PRACTICE_MOMENT_KINDS.join(', ')}.`);
+      const prompt = bounded(item.prompt, LIMITS.short, `moments[${index}].prompt`);
+      if (!prompt) throw new Error(`moments[${index}].prompt is required.`);
+      return { kind: item.kind, prompt, score: score(item.score, `moments[${index}].score`), note: bounded(item.note, LIMITS.text, `moments[${index}].note`) };
+    }));
   });
-  const callId = callIdValue(input.callId);
-  const delivery = deliveryNotes(input.delivery);
+  const communication = check(() => {
+    const communicationIn = input.communication === undefined ? {} : input.communication;
+    if (!plain(communicationIn)) throw new Error('communication must be an object.');
+    return Object.fromEntries(['pace', 'clarity', 'structure', 'confidence', 'filler'].map(key => [key, check(() => bounded(communicationIn[key], LIMITS.short, `communication.${key}`)) ?? '']));
+  });
+  const priorities = check(() => {
+    if (!Array.isArray(input.priorities) || input.priorities.length > LIMITS.priorities) throw new Error(`priorities must be an array of at most ${LIMITS.priorities} strings.`);
+    return input.priorities.map((item, index) => check(() => bounded(item, LIMITS.short, `priorities[${index}]`))).filter(Boolean);
+  });
+  const transcript = check(() => {
+    const transcriptIn = input.transcript === undefined ? [] : input.transcript;
+    if (!Array.isArray(transcriptIn) || transcriptIn.length > LIMITS.transcript) throw new Error(`transcript must be an array of at most ${LIMITS.transcript} turns.`);
+    return transcriptIn.map((item, index) => check(() => {
+      if (!plain(item) || !['interviewer', 'candidate'].includes(item.role)) throw new Error(`transcript[${index}].role must be interviewer or candidate.`);
+      const text = bounded(item.text, LIMITS.transcriptText, `transcript[${index}].text`);
+      if (!text) throw new Error(`transcript[${index}].text is required.`);
+      return { role: item.role, text };
+    }));
+  });
+  const callId = check(() => callIdValue(input.callId));
+  const delivery = check(() => deliveryNotes(input.delivery, check));
+  if (issues.length) throw Object.assign(new Error(issues.join('; ')), { issues });
   return { overall, planned, moments, communication, priorities, transcript, ...(callId === null ? {} : { callId }), ...(delivery === null ? {} : { delivery }) };
 }

@@ -49,6 +49,8 @@ const practiceCallAPI = Object.freeze({
   draftAnswer: () => invoke('draft-answer'),
   getPreparedCards: () => invoke('get-prepared-cards'),
   getReplay: () => invoke('get-replay'),
+  // Runs a failed feedback review again for the replay's call.
+  retryAnalysis: () => invoke('retry-analysis'),
   onReplayUpdated: cb => subscribe(`${PREFIX}replay-updated`, cb),
   deleteRecording: () => invoke('delete-recording'),
   openMicrophoneSettings: () => invoke('open-microphone-settings'),
