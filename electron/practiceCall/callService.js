@@ -10,7 +10,7 @@ import { createCallDebugLog } from './callDebugLog.js';
 import { RECORDINGS_KEPT } from './callStore.js';
 import { createSavedInterviewStore, isSavedInterviewId } from './savedInterviews.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../interviewPracticeCallEngine.js';
-import { padLanguageName } from '../../src/practice-call/padLanguages.js';
+import { padLanguageNames } from '../../src/practice-call/padLanguages.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list', listSaved: 'practice-call:list-saved', removeSaved: 'practice-call:remove-saved' });
@@ -626,10 +626,11 @@ export function createPracticeCallService(deps = {}) {
   }
   /**
    * The languages the pad offers the candidate: those of the prepared problem on screen when it allows several (the
-   * role is hired for more than one), else none, which means every listed language. The problem is the one whose part
+   * role is hired for more than one), by the names the planner wrote; else none, and the pad shows no language at
+   * all (any language is fine, and nothing here keeps a list of its own). The problem is the one whose part
    * is shown now. While the pad stays open it keeps that problem through a stopped share or a screen the interviewer
    * wrote (a follow-up or a corrected screen of the same exercise). Closing the pad ends the exercise, and a screen
-   * of the interviewer's own shown with the pad closed starts another: a pad opened for that offers every language.
+   * of the interviewer's own shown with the pad closed starts another: a pad opened for that offers none.
    * So does opening the open pad again with such a screen, and so does moving on to another planned question.
    * With nothing on screen and nothing remembered, a plan with one problem means that problem.
    */
@@ -646,16 +647,21 @@ export function createPracticeCallService(deps = {}) {
     else if (state.screen && (!state.pad.open || clock.now() - (self.padReopenedAt ?? -Infinity) < SAME_REPLY_MS)) self.padProblemRef = null;
     const problem = shown ?? problems.find(item => item?.ref === self.padProblemRef) ?? (!state.screen && !self.padMovedOn && problems.length === 1 ? problems[0] : null);
     if (!problem || String(problem.language ?? '').trim() || !Array.isArray(problem.languages)) return [];
-    const names = [...new Set(problem.languages.map(padLanguageName).filter(Boolean))];
+    const names = padLanguageNames(problem.languages);
     return names.length > 1 ? names : [];
   }
-  /** Keeps the pad's offered languages with the exercise; a pick that is no longer offered is dropped, and the window picks again. */
+  /**
+   * Keeps the pad's offered languages with the exercise. The pick is always one of them: the candidate's last own
+   * pick when it is offered, else the first. With none offered there is no pick.
+   */
   function syncPadOptions(self) {
     const options = padOptions(self);
-    const choice = options.length && !options.includes(state.pad.choice) ? '' : state.pad.choice;
+    const choice = [self?.padPicked, state.pad.choice].find(name => name && options.includes(name)) ?? options[0] ?? '';
     const before = Array.isArray(state.pad.options) ? state.pad.options : [];
     if (choice === state.pad.choice && before.length === options.length && before.every((name, index) => name === options[index])) return;
     state.pad = { ...state.pad, options, choice };
+    // The record keeps the pick of the exercise the pad is on now: none once that exercise offers no language.
+    if (self?.padRecord && !state.pad.lang) self.padRecord.chosen = choice;
   }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
   function applyPadEvent(self, rawEvent) {
@@ -3272,15 +3278,15 @@ export function createPracticeCallService(deps = {}) {
     // The window owns the pad text while the candidate types: it is stored and forwarded but never
     // published, so the text is not echoed back on every keystroke and cannot fight the cursor. The
     // stored text reaches a window only through a later state, which a reopened window reads.
-    // The candidate's pick of language for a pad whose exercise leaves the language open (only a listed name). It is
+    // The candidate's pick among the languages the exercise offers (only one of those, by its offered name). It is
     // what the wand writes in; the interviewers hear of it only as the candidate says it.
     setPadLanguage: name => {
       if (!call || call.finished || !call.inCall || state.interviewerLeft) return snapshot();
-      const choice = padLanguageName(name);
+      const asked = typeof name === 'string' ? name.trim().toLowerCase() : '';
+      const choice = asked ? (state.pad.options || []).find(option => option.toLowerCase() === asked) : '';
       if (!choice || choice === state.pad.choice) return snapshot();
-      // An exercise that allows only some languages takes a pick among those.
-      if (state.pad.options?.length && !state.pad.options.includes(choice)) return snapshot();
       state.pad = { ...state.pad, choice };
+      call.padPicked = choice;
       if (call.padRecord && !state.pad.lang) call.padRecord.chosen = choice;
       dbg('pad-language', { choice });
       publish();

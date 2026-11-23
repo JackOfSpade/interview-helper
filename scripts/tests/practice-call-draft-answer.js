@@ -193,6 +193,8 @@ test('work: a language the candidate picked is the only one written, and said on
   assert(required.includes('The exercise asks for SQL') && !required.includes('writing in Go'), 'a required language wins over a pick');
   const none = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: '', choice: '', text: '' } });
   assert(!none.includes('left the language to you') && !none.includes('The exercise asks for'));
+  assert(none.includes('the language is yours to choose') && none.includes('Code already in the pad settles it') && none.includes('Say which language you are using once'), 'with none set the writer chooses, staying with what is in the pad');
+  assert(!picked.includes('yours to choose') && !required.includes('yours to choose'));
 });
 
 test('work: steps are cleaned, empty ones dropped, JSON text parsed, and nothing usable throws', async () => {

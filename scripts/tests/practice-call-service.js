@@ -3555,7 +3555,7 @@ test('pad: the pad names a language only when a prepared problem requires it', a
   assert.equal(await labelFor('', ''), '');
 });
 
-test('pad: the candidate picks a listed language, which is published and kept in the record when none is required', async () => {
+test('pad: an exercise that leaves the language open offers none and takes no pick; offered languages are whatever the plan wrote', async () => {
   const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
     problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Task', content: 'Reverse a list.' }], solution: 'Reverse it.', edgeCases: [], hints: [] }],
   }) });
@@ -3563,12 +3563,25 @@ test('pad: the candidate picks a listed language, which is published and kept in
   const { service, deps } = await panelStart(setup);
   await service.answer();
   setup.engineOptions[0].onEvent({ type: 'pad', open: true, lang: '', atMs: 100 });
-  assert.equal(service.setPadLanguage('Brainfuck').pad.choice, '', 'only a listed language');
-  assert.equal(service.setPadLanguage('go').pad.choice, 'Go', 'by its listed name');
+  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [[], ''], 'nothing is offered and nothing is picked');
+  assert.equal(service.setPadLanguage('Go').pad.choice, '', 'no list of its own to pick from');
   await service.hangUp();
   const record = await deps.store.readRecord('call-1');
-  assert.equal(record.pad.chosen, 'Go');
+  assert.equal('chosen' in record.pad, false);
   assert.equal(record.pad.lang, '');
+  // Names no list could hold are offered as the plan wrote them, and the pad starts on the first.
+  const obscure = panelHarness({ plan: drawn => soloPlan(drawn, {
+    problems: [{ ref: 'p1', question: 1, language: '', languages: ['Eiffel', 'Ada 2012', ' eiffel ', 7], parts: [{ title: 'Task', content: 'Reverse a list.' }], solution: 'Reverse it.', edgeCases: [], hints: [] }],
+  }) });
+  obscure.overrides.loadCards = async () => PLAN_CARDS;
+  const second = await panelStart(obscure);
+  await second.service.answer();
+  obscure.engineOptions[0].onEvent({ type: 'pad', open: true, lang: '', atMs: 100 });
+  assert.deepEqual([second.service.getState().pad.options, second.service.getState().pad.choice], [['Eiffel', 'Ada 2012'], 'Eiffel'], 'as written, each once, starting on the first');
+  assert.equal(second.service.setPadLanguage('ada 2012').pad.choice, 'Ada 2012', 'by its offered name');
+  assert.equal(second.service.setPadLanguage('Python').pad.choice, 'Ada 2012', 'only an offered language');
+  await second.service.hangUp();
+  assert.equal((await second.deps.store.readRecord('call-1')).pad.chosen, 'Ada 2012');
 });
 
 test('pad: an exercise that allows several languages offers only those, and takes a pick only among them', async () => {
@@ -3579,12 +3592,12 @@ test('pad: an exercise that allows several languages offers only those, and take
   await service.answer();
   const emit = setup.engineOptions[0].onEvent;
   emit({ type: 'pad', open: true, lang: 'C', atMs: 100 });
-  assert.deepEqual([service.getState().pad.lang, service.getState().pad.options], ['', []], 'two problems and none shown yet: no label, every language');
-  assert.equal(service.setPadLanguage('Python').pad.choice, 'Python');
+  assert.deepEqual([service.getState().pad.lang, service.getState().pad.options], ['', []], 'two problems and none shown yet: no label, nothing offered');
+  assert.equal(service.setPadLanguage('Python').pad.choice, '', 'nothing offered, nothing picked');
   emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 200 });
   assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'the problem on screen allows two');
-  assert.equal(service.getState().pad.choice, '', 'a pick that is not offered is dropped');
-  assert.equal(service.setPadLanguage('Python').pad.choice, '', 'only an offered language');
+  assert.equal(service.getState().pad.choice, 'C', 'the pad starts on the first offered');
+  assert.equal(service.setPadLanguage('Python').pad.choice, 'C', 'only an offered language');
   assert.equal(service.setPadLanguage('c++').pad.choice, 'C++');
   emit({ type: 'screen-stop', atMs: 300 });
   assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'the pad outlives its screen');
@@ -3595,11 +3608,11 @@ test('pad: an exercise that allows several languages offers only those, and take
   emit({ type: 'screen', title: 'Task p1', content: 'Look at the diagram.\n\nDo p1.', speakerId: 'A', atMs: 340 });
   assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'matched by the text as shown');
   emit({ type: 'screen', title: 'Task p2', content: 'Do p2.', speakerId: 'A', atMs: 400 });
-  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [[], 'C++'], 'an open exercise offers every language again and keeps the pick');
+  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [[], ''], 'an open exercise offers none and has no pick');
   // A screen the interviewer wrote while the pad is open is taken as part of the same exercise: the limit stays.
   emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 500 });
   emit({ type: 'screen', title: 'Follow-up', content: 'Now make it reentrant.', speakerId: 'A', atMs: 520 });
-  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'a follow-up screen keeps the limit');
+  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [['C', 'C++'], 'C++'], 'a follow-up screen keeps the limit, and the candidate\'s own pick comes back with it');
   // Opening the open pad again with a screen of the interviewer's own starts a new exercise, whichever tag came first.
   emit({ type: 'pad', open: true, lang: '', atMs: 522 });
   assert.deepEqual(service.getState().pad.options, [], 'reopened for the interviewer\'s own screen');
@@ -3619,7 +3632,7 @@ test('pad: an exercise that allows several languages offers only those, and take
   emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 536 });
   emit({ type: 'screen', title: 'Follow-up', content: 'Now make it reentrant.', speakerId: 'A', atMs: 538 });
   assert.deepEqual(service.getState().pad.options, ['C', 'C++']);
-  // Closing the pad ends the exercise: a pad opened for a screen of the interviewer's own offers every language.
+  // Closing the pad ends the exercise: a pad opened for a screen of the interviewer's own offers none.
   emit({ type: 'pad', open: false, atMs: 540 });
   emit({ type: 'screen', title: 'Something else', content: 'Sketch a parser.', speakerId: 'A', atMs: 560 });
   emit({ type: 'pad', open: true, lang: '', atMs: 580 });
@@ -3629,6 +3642,13 @@ test('pad: an exercise that allows several languages offers only those, and take
   emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 620 });
   emit({ type: 'pad', open: true, lang: '', atMs: 640 });
   assert.deepEqual(service.getState().pad.options, ['C', 'C++']);
+  // An exercise of the interviewer's own names no language, and the record no longer carries the earlier pick.
+  emit({ type: 'pad', open: false, atMs: 660 });
+  emit({ type: 'screen', title: 'Last one', content: 'Sketch a cache.', speakerId: 'A', atMs: 680 });
+  emit({ type: 'pad', open: true, lang: '', atMs: 700 });
+  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [[], '']);
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 720 });
+  assert.equal(service.getState().pad.choice, 'C++', 'the candidate\'s own pick, not the first offered');
   await service.hangUp();
   assert.equal((await deps.store.readRecord('call-1')).pad.chosen, 'C++');
 });

@@ -212,13 +212,15 @@ export function draftWorkPrompt(context = {}) {
   const name = String(context.candidateName || '').trim();
   const brief = context.brief || {};
   const required = String(context.pad?.lang || '').trim();
-  // The exercise leaves the language open: the candidate picked one in the pad, and that is the only one written.
+  // The exercise offers several languages: the candidate picked one in the pad, and that is the only one written.
+  // With no language required and none offered, the choice is the writer's own, as it would be the candidate's.
   const chosen = required ? '' : String(context.pad?.choice || '').trim();
   const lang = required || chosen;
   const padText = typeof context.pad?.text === 'string' ? context.pad.text.slice(0, WORK_PAD_MAX) : '';
   const languageRule = chosen
     ? [`- The interviewers left the language to you, and you are writing in ${chosen}. Every piece of code you write is ${chosen}, whatever the screen's examples look like or any earlier step used. Say which language you are using once, in passing and in your own words, the first time you start writing code, unless you already said so in the conversation below. If the pad already holds code in another language, you switched: say so briefly and rewrite it in ${chosen}.`]
-    : required ? [`- The exercise asks for ${required}: write the code in ${required}.`] : [];
+    : required ? [`- The exercise asks for ${required}: write the code in ${required}.`]
+      : ['- No language is set for this exercise, so when it calls for code the language is yours to choose, and you use one language throughout. Code already in the pad settles it: carry on in that language. Otherwise a language you named in the conversation below settles it. Otherwise pick the one a strong candidate for this role would reach for, given the role and the exercise. Say which language you are using once, in passing and in your own words, the first time you start writing code, unless you already said so in the conversation below.'];
   return [
     `You are ${name || 'the candidate'}, a strong candidate in a live video interview for ${brief.role || 'the role'}${brief.company ? ` at ${brief.company}` : ''}. The interviewers have shared an exercise and opened a coding pad${lang ? ` (${lang})` : ''} that you write in while they watch.`,
     'Show what an excellent answer to this exercise looks like, done live. Write it as a short sequence of steps. Each step is a line you say out loud, the whole coding pad as it should read after you have typed that step (or null when that step changes nothing in the pad), and when you say the line against the typing. Your words are spoken on the call in your voice and the code is typed into the pad at a person\'s pace, so the interviewers hear you and watch you write.',

@@ -7,7 +7,6 @@ import CodingPad from './CodingPad.jsx';
 import { logEvent } from './callEventLog.js';
 import { padEdit, padTypingMs, typingPace } from './padTyping.js';
 import MoreOptions from './MoreOptions.jsx';
-import { DEFAULT_PAD_LANGUAGE, padLanguageName } from './padLanguages.js';
 import { clampScreen } from './screenMarkup.js';
 import { firstNameOf, participantsOf } from './persona.js';
 import { playJoinChime, playLeaveChime } from './ringtone.js';
@@ -33,8 +32,6 @@ const WORK_STEP_MAX_MS = 120000;
 const AFTER_TYPING_SETTLE_MS = 1500; // between the last key of a piece typed in silence and the line that explains it
 // How long a tile that just left takes to fade out before it is removed (matches .pc-leave).
 const LEAVE_MS = 300;
-// The candidate's last pick of pad language, kept for the next exercise and the next call.
-const PAD_LANGUAGE_KEY = 'practiceCall.padLanguage';
 
 function SpeakingBadge({ small = false }) {
   return <span aria-hidden="true" className={`pc-bars absolute flex items-center justify-center gap-[3px] rounded-full bg-[#1a73e8] ${small ? 'right-2 top-2 h-5 w-5' : 'right-3 top-3 h-7 w-7'}`}><i /><i /><i /></span>;
@@ -479,27 +476,14 @@ export default function InCall({ state, api }) {
   const screen = state?.screen && typeof state.screen === 'object' ? { ...clampScreen(state.screen), speakerId: state.screen.speakerId, presenterName: state.screen.presenterName, visual: state.screen.visual ?? null } : null;
   const pad = state?.pad && typeof state.pad === 'object' ? state.pad : null;
   const padOpen = pad?.open === true;
-  // The exercise leaves the language open: the candidate picks it in the pad (the last pick is remembered here, per
-  // viewer), and the wand writes in it.
+  // The exercise may offer several languages (the role is hired for them), named by the AI that prepared it: the pad
+  // then has a dropdown of exactly those, and the wand writes in the one picked. The service keeps the pick.
   const canChooseLanguage = typeof api?.setPadLanguage === 'function';
-  // The exercise may allow only some languages (the role is hired for several): the pad then offers just those. A
-  // pick among them is not kept as the candidate's own preference for the next open exercise.
-  const padOptions = Array.isArray(pad?.options) ? pad.options.filter(name => padLanguageName(name) === name) : [];
-  const optionsKey = padOptions.join('|');
+  const padOptions = Array.isArray(pad?.options) ? pad.options.filter(name => typeof name === 'string' && name) : [];
   const chooseLanguage = name => {
-    if (!padLanguageName(name) || (padOptions.length && !padOptions.includes(name))) return;
-    if (!padOptions.length) { try { window.localStorage.setItem(PAD_LANGUAGE_KEY, name); } catch { /* storage unavailable */ } }
+    if (!padOptions.includes(name)) return;
     api.setPadLanguage(name)?.catch?.(() => {});
   };
-  const needsLanguage = padOpen && canChooseLanguage && !pad?.lang && !pad?.choice && !interviewerLeft;
-  useEffect(() => {
-    if (!needsLanguage) return;
-    let saved = '';
-    try { saved = window.localStorage.getItem(PAD_LANGUAGE_KEY) || ''; } catch { /* storage unavailable */ }
-    const offered = optionsKey ? optionsKey.split('|') : [];
-    const first = [padLanguageName(saved), DEFAULT_PAD_LANGUAGE].find(name => name && (!offered.length || offered.includes(name))) ?? offered[0];
-    api.setPadLanguage(first)?.catch?.(() => {});
-  }, [needsLanguage, api, optionsKey]);
   // While the interviewer is still setting a share up on their side, nothing shows here, as on a
   // real call: the layout changes only when the content arrives. state.sharing is not displayed.
   const presenting = !!screen || padOpen;

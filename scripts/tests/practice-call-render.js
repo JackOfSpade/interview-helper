@@ -392,7 +392,7 @@ export const presentingTests = [
     },
   },
   {
-    name: 'practice call render: a pad with no required language has a language dropdown that starts on Python and sends the pick; a required one is a label',
+    name: 'practice call render: a pad offers exactly the languages the exercise wrote and sends the pick; with none offered it names no language; a required one is a label',
     async run() {
       const { JSDOM } = await import('jsdom');
       const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true, url: 'http://localhost/' });
@@ -413,24 +413,20 @@ export const presentingTests = [
         const render = state => root.render(React.createElement(InCall, { state, api }));
         const { act } = React;
         const select = () => dom.window.document.querySelector('select[aria-label="Language"]');
+        // Nothing offered: any language is fine, so the pad names none and keeps no list of its own.
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: '', options: [], text: '' } }));
+        assert(!select() && !dom.window.document.querySelector('[data-pad-lang]'), 'no dropdown and no label');
         await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: '', text: '' } }));
+        assert(!select(), 'nor for a state with no options at all');
+        strict.deepEqual(picks, [], 'and the window picks nothing by itself');
+        // The exercise offers languages in its own words: the dropdown lists exactly those.
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: 'Eiffel', options: ['Eiffel', 'Ada 2012'], text: '' } }));
         assert(select(), 'the dropdown is beside the title');
-        strict.deepEqual(picks, ['Python'], 'a first pad starts on Python');
-        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: 'Python', text: '' } }));
-        strict.equal(select().value, 'Python');
-        assert(select().querySelectorAll('option').length >= 20, 'every major language is listed');
-        await act(async () => { select().value = 'Go'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
-        strict.deepEqual(picks, ['Python', 'Go'], 'a pick is sent');
-        strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), 'Go', 'and remembered for the next pad');
-        // An exercise that allows only some languages: the dropdown lists just those, starts on one of them, and a
-        // pick among them is not kept as the candidate's own preference.
-        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: '', options: ['C', 'C++'], text: '' } }));
-        strict.deepEqual([...select().querySelectorAll('option')].map(option => option.value).filter(Boolean), ['C', 'C++'], 'only the offered languages');
-        strict.equal(picks.at(-1), 'C', 'the saved pick (Go) is not offered, so the first offered one');
-        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: 'C', options: ['C', 'C++'], text: '' } }));
-        await act(async () => { select().value = 'C++'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
-        strict.equal(picks.at(-1), 'C++');
-        strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), 'Go', 'the preference is untouched');
+        strict.deepEqual([...select().querySelectorAll('option')].map(option => option.value), ['Eiffel', 'Ada 2012'], 'only the offered languages, as written');
+        strict.equal(select().value, 'Eiffel');
+        await act(async () => { select().value = 'Ada 2012'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+        strict.deepEqual(picks, ['Ada 2012'], 'a pick is sent');
+        strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), null, 'nothing is remembered in the window');
         await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: 'SQL', choice: 'Go', text: '' } }));
         assert(!select(), 'a required language has no dropdown');
         strict.equal(dom.window.document.querySelector('[data-pad-lang]')?.textContent, 'SQL', 'only its label');
@@ -1405,14 +1401,14 @@ export default [
   },
   {
     // In the call of 2026-11-22 the window never passed setPadLanguage on to the call screen, so no dropdown showed.
-    name: 'practice call render: the window passes the pad language choice through, so an open pad with no required language has the Language dropdown',
+    name: 'practice call render: the window passes the pad language choice through, so an open pad whose exercise offers languages has the Language dropdown',
     async run() {
       const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
       await withDom(async window => {
         const bundle = await bundleComponent(path.resolve('src/practice-call/PracticeCallApp.jsx'), {});
         try {
           const picks = [];
-          let pad = { open: true, lang: '', text: '', choice: '' };
+          let pad = { open: true, lang: '', text: '', choice: 'C', options: ['C', 'Go'] };
           let pushState = null;
           const current = () => ({ phase: 'in-call', persona: PERSONA, chat: [], pad });
           window.practiceCallAPI = {
@@ -1428,7 +1424,6 @@ export default [
             await act(() => new Promise(resolve => setTimeout(resolve, 5)));
             const select = () => window.document.querySelector('[data-pad-language-choice="true"]');
             assert(select(), 'the open pad has the Language dropdown');
-            assert(picks.length === 1 && picks[0], 'a first pad starts on a language');
             await act(() => {
               select().value = 'Go';
               select().dispatchEvent(new window.Event('change', { bubbles: true }));
