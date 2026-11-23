@@ -1,10 +1,11 @@
 // Bug reports for the standalone Interview Helper app.
 //
 // "Report a bug" in the main window writes one Markdown file describing what
-// the app was doing: versions, the saved interviews as states and counts, the
-// Claude worker, running tasks, what the window showed, and the recent event
-// and log lines of both processes. It never contains career text, answers,
-// questions, posting text or transcripts.
+// the app was doing during this run: versions, the saved interviews, the
+// Claude worker, running tasks, what the window showed, every practice call of
+// the run with its transcript and whole debug log, and the event and log lines
+// of every window and the main process. The report is read on this Mac (by the
+// person or Claude Code), so content is kept; only secrets are masked.
 //
 // "Copy to clipboard" saves the full report in `<profile>/bug-reports/` and
 // puts a short pointer (the file path plus the typed description) on the
@@ -24,46 +25,26 @@ export const BUG_REPORT_SAVE_CHANNEL = 'interview-app:save-bug-report';
 
 // Only files of the shape this module writes are ever pruned.
 const REPORT_FILE_RE = /^bug-report-.*\.md$/u;
-const MAX_EVENT_LINES = 400;
+export const MAX_EVENT_LINES = 20_000;
 const MAX_SCREEN_MESSAGES = 30;
-const MAX_LINE_CHARS = 600;
-const PROCESS_STARTED_AT = Date.now();
+export const PROCESS_STARTED_AT = Date.now();
 
-// ── Redaction ────────────────────────────────────────────────────────────────
-// A report is handed to someone else, so log and event lines lose what a
-// reader does not need: URL queries and fragments, local paths, credentials
-// and opaque ids.
+// ── Secrets ──────────────────────────────────────────────────────────────────
+// Content, paths, links and ids stay: they are what a reader debugs with.
+// Credentials are masked, since a report may still be pasted somewhere.
 
-// A path may contain spaces ("Application Support"), so it runs to the end of
-// the line or to a quote, bracket or stack-frame arrow, whichever comes first.
-const LOCAL_PATH_RE = /(^|[\s=:([`'"])(?:file:\/\/|~\/|\/(?:(?:System\/Volumes\/Data\/)?Users|private|tmp|Applications|opt|Volumes|Library|var|etc|usr|home)(?=\/|$))[^\r\n|`'"()←⏎]*/gimu;
-
-function redactUrl(raw) {
-  try {
-    const url = new URL(raw);
-    return url.protocol === 'http:' || url.protocol === 'https:' ? `${url.origin}${url.pathname}` : '<redacted-url>';
-  } catch { return '<redacted-url>'; }
-}
-
-export function redactReportText(value) {
+export function maskSecrets(value) {
   return String(value ?? '')
-    .replace(/https?:\/\/[^\s`<>"|]+/giu, (match) => {
-      const suffix = match.match(/[)\]}.,;:]+$/u)?.[0] || '';
-      return `${redactUrl(suffix ? match.slice(0, -suffix.length) : match)}${suffix}`;
-    })
-    .replace(LOCAL_PATH_RE, '$1<local-path>')
     .replace(/\b"?(?:cookie|set[-_ ]?cookie)"?\s*(?:=|:)\s*[^\r\n|]+/giu, 'credential=<redacted>')
     .replace(/\b"?(?:(?:proxy[-_ ]?)?authorization|password|passphrase|api[-_ ]?key|client[-_ ]?secret|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|session[-_ ]?(?:id|token|key)|token)"?\s*(?:=|:)\s*(?:(?:Bearer|Basic)\s+)?(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;|]+)/giu, 'credential=<redacted>')
     .replace(/\bBearer\s+[^\s,;|]+/giu, 'Bearer <redacted>')
     .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{16,}\b/gu, '<redacted-key>')
-    .replace(/\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+\b/gu, '<redacted-jwt>')
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu, '<opaque-id>');
+    .replace(/\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+\b/gu, '<redacted-jwt>');
 }
 
-/** One redacted line of bounded length; line breaks become a visible mark. */
-function reportLine(value, max = MAX_LINE_CHARS) {
-  const text = redactReportText(value).replace(/\r?\n/gu, ' ⏎ ').replace(/\s+/gu, ' ').trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+/** One line with secrets masked; line breaks become a visible mark. */
+function reportLine(value) {
+  return maskSecrets(value).replace(/\r?\n/gu, ' ⏎ ').replace(/[ \t]+/gu, ' ').trim();
 }
 
 // Indented code cannot be closed by its content, so log text stays literal.
@@ -133,7 +114,8 @@ function windowSection({ renderer, windows }) {
   return lines.join('\n');
 }
 
-// States and counts only: a title, job link or file name never leaves the app.
+const cell = value => String(value ?? '').replace(/\|/gu, '\\|').replace(/\s+/gu, ' ').trim();
+
 export function interviewRows(state, selectedIndex = null) {
   const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
   return sessions.map((session, index) => {
@@ -143,12 +125,13 @@ export function interviewRows(state, selectedIndex = null) {
     return {
       index: index + 1,
       selected,
-      named: typeof session?.title === 'string' && session.title.trim().length > 0,
-      careerFiles: Array.isArray(data.interviewHelperCareerFilenames) ? data.interviewHelperCareerFilenames.length : 0,
+      title: typeof session?.title === 'string' ? session.title.trim() : '',
+      careerFiles: Array.isArray(data.interviewHelperCareerFilenames) ? data.interviewHelperCareerFilenames.filter(name => typeof name === 'string') : [],
       careerSnapshot: typeof data.interviewHelperCareerSnapshotId === 'string' && data.interviewHelperCareerSnapshotId.length > 0,
       job: data.interviewHelperTypedJob ? `typed (${code(data.interviewHelperTypedJobKind) || 'unknown kind'})`
         : data.interviewHelperApplicationBundle ? 'application folder'
           : data.interviewHelperJobUrl ? 'link only' : 'none',
+      jobUrl: typeof data.interviewHelperJobUrl === 'string' ? data.interviewHelperJobUrl : '',
       // A failed Prepare names its fixed failure code (CLAUDE_SAFEGUARD_BLOCKED, ...), which survives a restart.
       preparation: !preparation ? 'none' : `${code(preparation.status, /^[a-z-]{1,40}$/u) || 'saved'}${code(preparation.code, /^[A-Z][A-Z0-9_]{2,63}$/u) ? ` (${preparation.code})` : ''}`,
       runPending: typeof data.interviewHelperPreparationRunId === 'string' && data.interviewHelperPreparationRunId.length > 0,
@@ -161,12 +144,12 @@ function interviewsSection({ state, renderer }) {
   const yes = value => (value ? 'yes' : 'no');
   return [
     '## Interviews',
-    `- ${rows.length} saved · Applied Jobs folder ${state?.appliedJobsFolder ? 'chosen' : 'not chosen'}`,
+    `- ${rows.length} saved · Applied Jobs folder ${state?.appliedJobsFolder ? `chosen: ${maskSecrets(state.appliedJobsFolder)}` : 'not chosen'}`,
     ...(rows.length ? [
       '',
-      '| # | On screen | Named | Career files | Career text stored | Job | Preparation | Run id held |',
-      '| --- | --- | --- | --- | --- | --- | --- | --- |',
-      ...rows.map(row => `| ${row.index} | ${yes(row.selected)} | ${yes(row.named)} | ${row.careerFiles} | ${yes(row.careerSnapshot)} | ${row.job} | ${row.preparation} | ${yes(row.runPending)} |`),
+      '| # | On screen | Title | Career files | Career text stored | Job | Job link | Preparation | Run id held |',
+      '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+      ...rows.map(row => `| ${row.index} | ${yes(row.selected)} | ${cell(row.title) || '(untitled)'} | ${cell(row.careerFiles.join(', ')) || 'none'} | ${yes(row.careerSnapshot)} | ${row.job} | ${cell(maskSecrets(row.jobUrl))} | ${row.preparation} | ${yes(row.runPending)} |`),
     ] : []),
   ].join('\n');
 }
@@ -174,21 +157,20 @@ function interviewsSection({ state, renderer }) {
 function claudeSection({ status, activity, now }) {
   const lines = ['## Claude worker'];
   lines.push(`- ${status?.paused ? `Paused: ${code(status.pauseCode) || 'unknown reason'}` : 'Not paused'}`
-    + `${status?.providerNotice ? ` · notice: ${reportLine(status.providerNotice, 200)}` : ''}`
-    + `${status?.searchNotice ? ` · search notice: ${reportLine(status.searchNotice, 200)}` : ''}`);
+    + `${status?.providerNotice ? ` · notice: ${reportLine(status.providerNotice)}` : ''}`
+    + `${status?.searchNotice ? ` · search notice: ${reportLine(status.searchNotice)}` : ''}`);
   const tasks = Object.values(activity?.tasks || {});
   lines.push(`- Running ${count(activity?.running)} · waiting ${count(activity?.waiting)} · held keys ${Array.isArray(activity?.held) ? activity.held.length : 0} · accounts ${Array.isArray(activity?.claudeAccounts) ? activity.claudeAccounts.length : 'unknown'}`);
-  for (const task of tasks.slice(0, 25)) {
+  for (const task of tasks) {
     lines.push(`- ${code(task?.task) || 'task'} · ${code(task?.state) || 'unknown'} / ${code(task?.phase) || 'unknown'}`
       + ` · model ${code(task?.model) || 'default'}${code(task?.effort) ? ` (${task.effort})` : ''}`
       + ` · round ${count(task?.round)} · rejected ${count(task?.rejections)} · tool turns ${count(task?.toolTurns)}`
       + ` · started ${seconds(now - task?.firstStartedAt)} ago · in this phase ${seconds(now - task?.phaseStartedAt)}`
       + `${task?.failure?.code ? ` · last failure ${code(task.failure.code) || 'unknown'} (attempt ${count(task.failure.attempts)})` : ''}`);
-    for (const step of (Array.isArray(task?.steps) ? task.steps : []).slice(-8)) {
-      lines.push(`    - ${isoTime(step?.at)} ${reportLine(step?.label, 160)}`);
+    for (const step of (Array.isArray(task?.steps) ? task.steps : [])) {
+      lines.push(`    - ${isoTime(step?.at)} ${reportLine(step?.label)}`);
     }
   }
-  if (tasks.length > 25) lines.push(`- ${tasks.length - 25} more task(s) not shown`);
   if (!tasks.length) lines.push('- No Claude task is queued or running.');
   return lines.join('\n');
 }
@@ -198,7 +180,7 @@ function activeTasksSection({ tasks }) {
   return [
     '## Requests still running in the app',
     ...(rows.length
-      ? rows.slice(0, 40).map(row => `- ${count(row?.taskCount)} task(s) · oldest ${seconds(row?.oldestAgeMs)} · ${(Array.isArray(row?.channels) ? row.channels : []).map(channel => code(channel) || 'unknown').join(', ') || 'no channel recorded'}`)
+      ? rows.map(row => `- ${count(row?.taskCount)} task(s) · oldest ${seconds(row?.oldestAgeMs)} · ${(Array.isArray(row?.channels) ? row.channels : []).map(channel => code(channel) || 'unknown').join(', ') || 'no channel recorded'}`)
       : ['- None.']),
   ].join('\n');
 }
@@ -217,9 +199,9 @@ function dataFolderSection({ entries }) {
   if (!Array.isArray(entries)) return '## Data folder\n- Could not be read.';
   return [
     '## Data folder',
-    '> Names, kinds and sizes of the top level of the interview data folder. No file is opened.',
+    '> Names, kinds and sizes of the top level of the interview data folder.',
     ...(entries.length
-      ? entries.slice(0, 60).map(entry => `- ${reportLine(entry.name, 120)} · ${entry.kind}${entry.kind === 'folder' ? ` · ${count(entry.children)} item(s)` : ` · ${count(entry.bytes).toLocaleString('en-US')} bytes`} · changed ${isoTime(entry.changedAt)}`)
+      ? entries.map(entry => `- ${reportLine(entry.name)} · ${entry.kind}${entry.kind === 'folder' ? ` · ${count(entry.children)} item(s)` : ` · ${count(entry.bytes).toLocaleString('en-US')} bytes`} · changed ${isoTime(entry.changedAt)}`)
       : ['- Empty.']),
   ].join('\n');
 }
@@ -228,7 +210,7 @@ function screenSection({ renderer }) {
   return [
     '## Messages on screen',
     '> Status and error messages the main window showed when the report was made.',
-    ...(renderer.screenMessages.length ? renderer.screenMessages.map(message => `- ${reportLine(message, 400)}`) : ['- None.']),
+    ...(renderer.screenMessages.length ? renderer.screenMessages.map(message => `- ${reportLine(message)}`) : ['- None.']),
   ].join('\n');
 }
 
@@ -243,12 +225,13 @@ function rendererEventsSection({ renderer }) {
 
 function mainLogSection({ logs }) {
   const lines = (Array.isArray(logs) ? logs : [])
+    // The buffer can still hold the end of the previous launch.
     .filter(entry => Number(entry?.ts) >= PROCESS_STARTED_AT - 60_000)
     .sort((a, b) => Number(a.ts) - Number(b.ts))
-    .map(entry => `[${isoTime(Number(entry.ts))}] ${String(entry.level || '').toUpperCase().padEnd(5, ' ')} ${reportLine(entry.message, / failed: .* stack: /u.test(String(entry.message)) ? 1400 : MAX_LINE_CHARS)}`);
+    .map(entry => `[${isoTime(Number(entry.ts))}] ${String(entry.level || '').toUpperCase().padEnd(5, ' ')} ${reportLine(entry.message)}`);
   return [
     `## App log (${lines.length} line${lines.length === 1 ? '' : 's'})`,
-    '> Oldest first: the main process log of this run. Warnings and errors are kept longest.',
+    '> Oldest first: the main process log of this run.',
     lines.length ? codeBlock(lines) : '- Nothing logged.',
   ].join('\n');
 }
@@ -256,125 +239,43 @@ function mainLogSection({ logs }) {
 // ── Practice calls ───────────────────────────────────────────────────────────
 // Each call writes `debug.jsonl` (practiceCall/callDebugLog.js): phases, setup steps, engine and
 // audio helper events, the candidate's actions, the call window's own events and every step of the
-// feedback review. Those lines carry call content (captions, chat, what the interviewer was told), so
-// a report keeps only the shape of each line: event names, numbers, booleans, short codes and the
-// length of every other text. Notes, warnings and failures keep their text (redacted, quotes removed).
+// feedback review. A report shows every call of this run (the newest call when none ran yet) with
+// its transcript and every line of that log, secrets masked.
 
-export const REPORT_CALLS = 3;
-const MAX_CALL_LINES = 1500;
-// Text is shown only under these keys, and only as a short code (no spaces); every other string,
-// whatever its key, becomes its length. An allow-list, so a new event field never leaks by default.
-const CODE_KEYS = new Set([
-  'type', 'kind', 'phase', 'from', 'state', 'status', 'reason', 'requestedReason', 'outcome', 'code', 'action', 'speaker',
-  'speakerId', 'model', 'mainModel', 'effort', 'lang', 'stage', 'step', 'channel', 'mode', 'how', 'level', 'failure', 'voice',
-  'askedBy', 'skipped', 'feedback', 'missed', 'source', 'track', 'keys', 'interviewKind', 'endedBy', 'returnedCall', 'gate',
-]);
-// Keys an event uses for its own step names rather than content.
-const NAME_KEYS = Object.freeze({ 'setup-timing': new Set(['name']) });
-// Events whose message is diagnostic text (also in the app log), kept redacted.
-const MESSAGE_EVENTS = new Set(['note', 'warn', 'fail', 'window']);
-// High-volume events dropped first when a call has more lines than a report shows.
-const ROUTINE_EVENTS = new Set(['engine', 'helper', 'session-turn']);
-// Error text is diagnostic, but a rejected review names the question it is about.
-const ERROR_KEY = /^(?:error|errors|stack|metricsError|finalizeError|transcriptionError)$/u;
-const SHORT_CODE = /^[A-Za-z0-9_.+-]{1,48}$/u;
-
-// Quoted text is dropped whole: «» (how analyzeCall names a question, see quoteQuestion), double quotes
-// with escapes, curly quotes and single-quoted spans.
-const unquoted = value => String(value)
-  .replace(/«[^»]*»?/gu, '«…»')
-  .replace(/"(?:\\.|[^"\\\n])*"?/gu, '"…"')
-  .replace(/“[^”\n]*”?|‘[^’\n]*’?/gu, '"…"')
-  .replace(/(^|[\s(=:,[])'[^'\n]{2,}'(?=$|[\s),.;:\]])/gu, '$1\'…\'');
-// A click line names its control from a fixed set (src/practice-call/callEventLog.js), so its quotes stay.
-const windowLine = value => (/^\[[^\]]*\] click "[^"\n]*"$/u.test(String(value)) ? String(value) : unquoted(value));
-
-function shapeValue(value, key, depth) {
-  if (value === null || value === undefined) return value ?? null;
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
-    if (ERROR_KEY.test(key)) return reportLine(unquoted(value), 300);
-    return CODE_KEYS.has(key) && SHORT_CODE.test(value) ? value : `‹${value.length} chars›`;
-  }
-  if (Array.isArray(value)) {
-    if (depth >= 3) return `‹${value.length} item(s)›`;
-    // Items of a list are judged by the list's own key (`keys: ['feedback', ...]`).
-    const items = value.slice(0, 12).map(item => shapeValue(item, key, depth + 1));
-    if (value.length > 12) items.push(`‹${value.length - 12} more›`);
-    return items;
-  }
-  if (typeof value === 'object') {
-    if (depth >= 3) return '‹…›';
-    const out = {};
-    let other = 0;
-    for (const [name, item] of Object.entries(value).slice(0, 30)) {
-      // A key is shown only when it reads as a field name; a map keyed by text is counted instead.
-      if (/^[A-Za-z][A-Za-z0-9_-]{0,40}$/u.test(name)) out[name] = shapeValue(item, name, depth + 1);
-      else other += 1;
-    }
-    if (other) out['‹other keys›'] = other;
-    return out;
-  }
-  return null;
-}
-
-/**
- * A note, warning, failure or window line. A note that ends in JSON (`plan {...}`, `voices drawn [...]`)
- * has that JSON shaped like any event's data; other text is redacted with quoted spans dropped.
- */
-function messageText(event, value) {
-  if (event === 'window') return reportLine(windowLine(value), 500);
-  const json = event === 'note' ? String(value).match(/^([^{["]{1,80}?)\s*([[{][\s\S]*)$/u) : null;
-  if (json) {
-    try { return reportLine(`${unquoted(json[1])} ${JSON.stringify(shapeValue(JSON.parse(json[2]), '', 0))}`, 900); } catch { /* not JSON: plain text */ }
-  }
-  return reportLine(unquoted(value), 500);
-}
-
-/** One debug.jsonl line as a report line: `+up [ms] event data`, content reduced to sizes. */
+/** One debug.jsonl line as a report line: `+up [call ms] event data`. */
 export function debugLineForReport(raw) {
   let line;
   try { line = JSON.parse(raw); } catch { return null; }
   if (!line || typeof line !== 'object' || typeof line.event !== 'string') return null;
-  const event = code(line.event, /^[A-Za-z0-9_.:-]{1,60}$/u) || 'event';
   const stamp = `+${Number.isFinite(line.up) ? `${(line.up / 1000).toFixed(1)}s` : '?'}${Number.isFinite(line.ms) ? ` call ${(line.ms / 1000).toFixed(1)}s` : ''}`;
   let data = '';
-  if (line.data && typeof line.data === 'object') {
-    const shaped = {};
-    for (const [key, value] of Object.entries(line.data)) {
-      shaped[key] = MESSAGE_EVENTS.has(event) && typeof value === 'string' && /^(?:message|line|stack)$/u.test(key)
-        ? messageText(event, value)
-        : NAME_KEYS[event]?.has(key) && typeof value === 'string' && SHORT_CODE.test(value) ? value : shapeValue(value, key, 0);
-    }
-    try { data = JSON.stringify(shaped); } catch { data = '‹unreadable›'; }
-  }
-  return { event, routine: ROUTINE_EVENTS.has(event), text: reportLine(`${stamp} ${event}${data ? ` ${data}` : ''}`, 900) };
+  if (line.data !== undefined) { try { data = JSON.stringify(line.data); } catch { data = String(line.data); } }
+  return { event: line.event, text: reportLine(`${stamp} ${line.event}${data ? ` ${data}` : ''}`) };
 }
 
-/** A call's timeline for the report: every line when it fits, else routine lines dropped oldest first. */
-export function callTimeline(text, max = MAX_CALL_LINES) {
-  const parsed = String(text || '').split('\n').filter(Boolean).map(debugLineForReport);
-  const lines = parsed.filter(Boolean);
-  const unreadable = parsed.length - lines.length;
+/** A call's whole timeline, with how many lines each event has. */
+export function callTimeline(text) {
+  const raw = String(text || '').split('\n').filter(Boolean);
+  const lines = [];
   const counts = {};
-  for (const entry of lines) counts[entry.event] = (counts[entry.event] || 0) + 1;
-  let kept = lines;
-  let dropped = 0;
-  if (lines.length > max) {
-    const important = lines.filter(entry => !entry.routine).length;
-    let routineRoom = Math.max(0, max - important);
-    const keep = new Array(lines.length).fill(false);
-    // The newest routine lines are nearest to where something went wrong; keep those.
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      if (!lines[index].routine) keep[index] = true;
-      else if (routineRoom > 0) { keep[index] = true; routineRoom -= 1; }
-    }
-    kept = lines.filter((_, index) => keep[index]);
-    // Still too many: the oldest are cut.
-    if (kept.length > max) kept = kept.slice(kept.length - max);
-    dropped = lines.length - kept.length;
+  let unreadable = 0;
+  for (const value of raw) {
+    const entry = debugLineForReport(value);
+    if (!entry) { unreadable += 1; lines.push(reportLine(`(unreadable) ${value}`)); continue; }
+    counts[entry.event] = (counts[entry.event] || 0) + 1;
+    lines.push(entry.text);
   }
-  return { lines: kept.map(entry => entry.text), dropped, unreadable, counts };
+  return { lines, unreadable, counts };
+}
+
+/** One transcript entry: `+12.3s speaker: text {other fields}`. */
+function transcriptLine(entry) {
+  if (!entry || typeof entry !== 'object') return reportLine(String(entry));
+  const { speaker, speakerId, text, startMs, endMs, ...rest } = entry;
+  const at = Number.isFinite(startMs) ? `+${(startMs / 1000).toFixed(1)}s` : '+?';
+  const span = Number.isFinite(endMs) && Number.isFinite(startMs) && endMs > startMs ? `–${(endMs / 1000).toFixed(1)}s` : '';
+  const extra = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : '';
+  return reportLine(`${at}${span} ${speaker ?? '?'}${speakerId ? ` (${speakerId})` : ''}: ${text ?? ''}${extra}`);
 }
 
 function practiceCallsSection({ calls, windowEvents, logStats, now }) {
@@ -382,14 +283,16 @@ function practiceCallsSection({ calls, windowEvents, logStats, now }) {
   const yes = value => (value ? 'yes' : 'no');
   const out = [
     '## Practice calls',
-    `> The newest ${REPORT_CALLS} calls with a debug log, newest first: what the call record and review say (states and counts), then every line the call logged (phases, setup, engine and audio events, the candidate's actions, the call window's events and each feedback step). Text is reduced to its length; notes, warnings and errors keep theirs, with quoted text removed.`,
+    '> Every call with a debug log started during this run (the newest call when none was), newest first: its folder, what the call record and review say, the transcript, then every line the call logged (phases, setup, engine and audio events, the candidate\'s actions, the call window\'s events and each feedback step).',
   ];
   if (logStats && Number.isFinite(logStats.count)) out.push(`- Debug logs on disk: ${count(logStats.count)} · ${count(logStats.bytes).toLocaleString('en-US')} bytes`);
   if (!list.length) out.push('- No practice call has a debug log.');
   list.forEach((call, position) => {
     const record = call?.record;
     const analysis = call?.analysis;
-    out.push('', `### Call ${position + 1}${position === 0 ? ' (newest)' : ''}: started ${isoTime(call?.startedAt)}${Number.isFinite(call?.startedAt) ? ` (${seconds(now - call.startedAt)} ago)` : ''}`);
+    const before = Number.isFinite(call?.startedAt) && call.startedAt < PROCESS_STARTED_AT ? ' · before this run' : '';
+    out.push('', `### Call ${position + 1}${position === 0 ? ' (newest)' : ''}: started ${isoTime(call?.startedAt)}${Number.isFinite(call?.startedAt) ? ` (${seconds(now - call.startedAt)} ago)` : ''}${before}`);
+    if (typeof call?.dir === 'string') out.push(`- Folder: \`${call.dir}\` (call.json, analysis.json, debug.jsonl, call.m4a)`);
     out.push(record
       ? `- Record: length ${seconds(record.durationMs)}${record.pausedMs ? ` · paused ${seconds(record.pausedMs)}` : ''} · ended ${code(record.reason) || 'unknown'}${record.endedBy ? ` (${code(record.endedBy) || 'other'})` : ''}${record.returnedCall ? ` · returned call (${code(record.returnedCall) || 'yes'})` : ''}`
         + ` · ${count(record.transcriptEntries)} transcript entries (${count(record.candidateTurns)} the candidate's) · ${count(record.interviewers)} interviewer(s)`
@@ -397,27 +300,29 @@ function practiceCallsSection({ calls, windowEvents, logStats, now }) {
         + ` · feedback skipped ${yes(record.feedbackSkipped)} · recording ${call.hasAudio ? 'kept' : record.recordingPruned ? 'pruned' : 'none'}`
       : '- Record: none (the call never reached its record: a setup that failed, a missed call, or a call still running).');
     if (record?.timings && Object.keys(record.timings).length) {
-      out.push(`- Timings: ${Object.entries(record.timings).slice(0, 20).map(([key, value]) => `${code(key) || 'timing'} ${Math.round(value)}`).join(' · ')}`);
+      out.push(`- Timings: ${Object.entries(record.timings).map(([key, value]) => `${key} ${Math.round(value)}`).join(' · ')}`);
     }
     out.push(analysis
       ? `- Review: ${code(analysis.status) || 'unknown'}${analysis.tooShort ? ' (too short to review)' : ''} · ${count(analysis.chapters)} chapter(s) · feedback ${yes(analysis.hasFeedback)}`
-        + `${analysis.error ? ` · error: ${reportLine(unquoted(analysis.error), 300)}` : ''}${analysis.metricsError ? ` · metrics error: ${reportLine(unquoted(analysis.metricsError), 200)}` : ''}`
+        + `${analysis.error ? ` · error: ${reportLine(analysis.error)}` : ''}${analysis.metricsError ? ` · metrics error: ${reportLine(analysis.metricsError)}` : ''}`
       : '- Review: none written.');
+    const transcript = Array.isArray(call?.transcript) ? call.transcript : [];
+    out.push('', `#### Transcript (${transcript.length})`, transcript.length ? codeBlock(transcript.map(transcriptLine)) : '- Empty.');
+    out.push('', '#### Debug log');
     if (typeof call?.text !== 'string') { out.push('- The debug log could not be read.'); return; }
     const timeline = callTimeline(call.text);
     const counts = Object.entries(timeline.counts).sort((a, b) => b[1] - a[1]).map(([event, n]) => `${event} ${n}`).join(' · ');
-    out.push(`- Debug log: ${count(call.bytes).toLocaleString('en-US')} bytes${call.truncated ? ' (only its end is read)' : ''} · lines by event: ${counts || 'none'}`
-      + `${timeline.dropped ? ` · ${timeline.dropped} routine line(s) (engine, helper, session-turn) not shown, oldest first` : ''}${timeline.unreadable ? ` · ${timeline.unreadable} unreadable line(s)` : ''}`);
+    out.push(`- ${count(call.bytes).toLocaleString('en-US')} bytes · lines by event: ${counts || 'none'}${timeline.unreadable ? ` · ${timeline.unreadable} unreadable line(s)` : ''}`);
     out.push('', timeline.lines.length ? codeBlock(timeline.lines) : '- Nothing logged.');
   });
   const events = Array.isArray(windowEvents?.events) ? windowEvents.events.filter(line => typeof line === 'string') : [];
   out.push('', `### Call window events (${events.length}${count(windowEvents?.eventsDropped) ? `, ${count(windowEvents.eventsDropped)} older dropped` : ''})`,
-    '> Oldest first: buttons pressed (by fixed names only), screens shown, errors and console warnings in the practice call and replay windows since the app started.',
-    events.length ? codeBlock(events.map(line => reportLine(windowLine(line)))) : '- None recorded.');
+    '> Oldest first: buttons pressed, screens shown, errors and console warnings in the practice call and replay windows since the app started.',
+    events.length ? codeBlock(events.map(line => reportLine(line))) : '- None recorded.');
   return out.join('\n');
 }
 
-/** Lists the top level of the data folder without opening any file. */
+/** Lists the top level of the data folder. */
 export async function listDataFolder(root) {
   const names = await fs.promises.readdir(root);
   const entries = await Promise.all(names.filter(name => !name.startsWith('.')).sort().map(async (name) => {
@@ -445,7 +350,7 @@ export async function buildBugReportMarkdown({ payload, sources = {}, now = Date
   const read = async (name) => (typeof sources[name] === 'function' ? sources[name]() : undefined);
   const section = async (title, build) => {
     try { return await build(); }
-    catch (error) { return `## ${title}\n- This section could not be written: ${reportLine(error?.message || error, 200)}`; }
+    catch (error) { return `## ${title}\n- This section could not be written: ${reportLine(error?.message || error)}`; }
   };
   const parts = [
     '# Interview Helper bug report',

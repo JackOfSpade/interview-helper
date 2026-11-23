@@ -13,7 +13,8 @@ const WINDOW_CHANNELS = Object.freeze([
   'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'reconnect-microphone', 'close', 'log-event',
 ]);
 // The call window's own event lines kept for bug reports (newest last), in memory only.
-const WINDOW_EVENTS_KEPT = 300;
+// Enough for a whole run, for bug reports.
+const WINDOW_EVENTS_KEPT = 20_000;
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
 const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing']);
@@ -203,7 +204,7 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'close']() { if (windowAlive()) win.close(); return null; },
     async [WINDOW_PREFIX + 'log-event'](line) {
       if (typeof line !== 'string' || !line) return null;
-      const text = line.slice(0, 600);
+      const text = line;
       windowEvents.push(text);
       if (windowEvents.length > WINDOW_EVENTS_KEPT) { windowEvents.shift(); windowEventsDropped += 1; }
       try { service.logWindowEvent?.(text); } catch { /* diagnostics only */ }

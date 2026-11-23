@@ -16,7 +16,7 @@ function harness(extra = {}) {
       if (extra.throwOnSpawn) throw new Error('/private/synthetic/path');
       const child = new EventEmitter();
       child.stdout = new EventEmitter();
-      child.stderr = { resumed: 0, resume() { this.resumed += 1; } };
+      child.stderr = Object.assign(new EventEmitter(), { resumed: 0, resume() { this.resumed += 1; }, setEncoding() {} });
       child.stdin = new EventEmitter();
       child.stdin.lines = []; child.stdin.accept = true; child.stdin.ended = false;
       child.stdin.write = line => { child.stdin.lines.push(line); return child.stdin.accept; };
@@ -494,16 +494,22 @@ export default [
     },
   },
   {
-    name: 'interview practice audio: stderr is drained and ignored and nothing is logged',
+    name: 'interview practice audio: stderr lines go to onStderr whole, and nothing reaches the console',
     run() {
       const methods = ['log', 'info', 'warn', 'error', 'debug'];
       const original = Object.fromEntries(methods.map(name => [name, console[name]]));
       const logged = [];
       for (const name of methods) console[name] = (...args) => { logged.push(args); };
       try {
-        const h = started();
+        const stderr = [];
+        const h = started({ options: { onStderr: line => stderr.push(line) } });
         const child = h.children[0];
         assert.equal(child.stderr.resumed, 1);
+        child.stderr.emit('data', 'AVAudioEngine: route changed\nhalf a ');
+        child.stderr.emit('data', 'line\r\n\n');
+        child.stderr.emit('data', 'no newline at the end');
+        child.stderr.emit('end');
+        assert.deepEqual(stderr, ['AVAudioEngine: route changed', 'half a line', 'no newline at the end']);
         h.send({ type: 'transcript', text: 'Synthetic private words.', segmentId: 's', final: true, startMs: 0, endMs: 5 });
         h.raw('garbage with /private/synthetic/recording.wav\n');
         h.raw(Buffer.alloc(40000, 0x62));

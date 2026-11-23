@@ -1327,10 +1327,10 @@ export function createPracticeCallService(deps = {}) {
     const plan = result.plan;
     dbg('plan-attempts', { attempts });
     note(`plan ${JSON.stringify({
-      // Sizes only for the planner's own text (roles, the unprepared question): the app log goes into bug reports.
-      ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, roleChars: String(plan.lead?.role ?? '').length },
-      unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ textChars: String(question.text ?? '').length, askedBy: question.askedBy, minutes: question.minutes })),
-      panel: (plan.panel || []).map(member => ({ voice: member.voice, roleChars: String(member.role ?? '').length })),
+      ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, role: plan.lead?.role },
+      // The one question that is not from the pool, as the planner wrote it.
+      unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ text: question.text, askedBy: question.askedBy, minutes: question.minutes })),
+      panel: (plan.panel || []).map(member => ({ voice: member.voice, role: member.role })),
       questions: (plan.questions || []).map(question => ({ number: question.number, askedBy: question.askedBy, minutes: question.minutes })),
       problems: (plan.problems || []).map(problem => problem.ref),
     })}`);
@@ -2627,12 +2627,11 @@ export function createPracticeCallService(deps = {}) {
           deps: {
             ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage,
             clock: () => clock.now(),
-            // Each analysis step lands in debug.jsonl; failures and rejected reviews also go to the app log,
-            // with quoted text (a rejected review quotes the question) left out.
+            // Each analysis step lands in debug.jsonl; failures and rejected reviews also go to the app log.
             onEvent: (name, fields) => {
               dbg(`analysis-${name}`, fields);
               if (fields?.failed || fields?.outcome === 'rejected' || fields?.outcome === 'call-failed') {
-                logWarn(deps.logger, `[PracticeCall] analysis ${name}${fields.attempt ? ` attempt ${fields.attempt}` : ''}: ${fields.outcome || 'failed'} after ${fields.ms ?? '?'} ms: ${String(fields.error || 'no detail').replace(/"[^"]*"/gu, '"…"')}`);
+                logWarn(deps.logger, `[PracticeCall] analysis ${name}${fields.attempt ? ` attempt ${fields.attempt}` : ''}: ${fields.outcome || 'failed'} after ${fields.ms ?? '?'} ms: ${fields.error || 'no detail'}`);
               } else if (name === 'done' || name === 'review-reply') {
                 logNote(deps.logger, `analysis ${name}: ${fields?.status || fields?.outcome || 'ok'} in ${fields?.ms ?? '?'} ms`);
               }

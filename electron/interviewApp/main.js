@@ -27,7 +27,7 @@ import { interviewAppDataRoots } from './dataRoots.js';
 import { migrateInterviewDataFromCanvas } from './migrateFromCanvas.js';
 import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
 import { handleSafe, snapshotActiveNodeTasks } from '../ipc/ipcUtils.js';
-import { BUG_REPORT_DIRECTORY, REPORT_CALLS, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
+import { BUG_REPORT_DIRECTORY, PROCESS_STARTED_AT, createBugReportService, createBugReportStore, listDataFolder, registerBugReportHandlers } from './bugReport.js';
 import { createSaveLocationStore, saveDialogStartPath } from './saveLocation.js';
 import { attachContextMenu } from './contextMenu.js';
 import { TEXT_SIZE_CHANGED_CHANNEL, createTextSizeController, createTextSizeStore, registerTextSizeHandlers, textSizeMenuItems } from './textSize.js';
@@ -384,7 +384,7 @@ if (!app.requestSingleInstanceLock()) {
           // refusal does not stop the call: the helper then runs without capture, so the
           // interviewer is heard, the candidate is not, and the chat still works.
           helperFactory: options => {
-            const helper = createPracticeAudioHelper({ ...options, helperPath });
+            const helper = createPracticeAudioHelper({ onStderr: line => logger.info(`[PracticeAudio stderr] ${line}`), ...options, helperPath });
             return Object.freeze({
               ...helper,
               start: async startOptions => {
@@ -433,17 +433,17 @@ if (!app.requestSingleInstanceLock()) {
           activeTasks: () => snapshotActiveNodeTasks(),
           handoffs: () => getNonApiAiHandoffLifecycleSnapshot(),
           dataFolder: () => listDataFolder(roots.data),
-          // The newest calls' debug logs (content reduced to sizes in bugReport.js) and the call window's events.
+          // Every call of this run (else the newest) with its whole debug log and transcript, and the call window's events.
           practiceCalls: async () => {
             const store = practiceCallController?.store;
             if (!store) return { calls: [], windowEvents: practiceCallController?.windowEvents?.() ?? null, logStats: null };
             const [calls, logStats] = await Promise.all([
-              store.recentDiagnostics?.({ limit: REPORT_CALLS }) ?? [],
+              store.recentDiagnostics?.({ since: PROCESS_STARTED_AT }) ?? [],
               store.debugLogStats?.().catch(() => null) ?? null,
             ]);
             return { calls, windowEvents: practiceCallController.windowEvents?.() ?? null, logStats };
           },
-          logs: () => getRecentLogs(500),
+          logs: () => getRecentLogs(),
         },
       }),
     });

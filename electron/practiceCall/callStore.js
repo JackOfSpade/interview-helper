@@ -246,11 +246,11 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
   }
 
   /**
-   * For bug reports: the newest `limit` call folders that have a debug log, newest first, each with
-   * the log's text (its last `maxBytes` when longer) and the record's states and counts. Transcript
-   * text, persona, plan and review content are not returned; the caller strips content from the log.
+   * For bug reports: every call with a debug log that started at or after `since` (the newest one
+   * when none did), newest first, each with its folder, the whole log, the record's states and
+   * counts, the transcript and the review's status.
    */
-  async function recentDiagnostics({ limit = 3, maxBytes = 2 * 1024 * 1024 } = {}) {
+  async function recentDiagnostics({ since = null, limit = Infinity } = {}) {
     const calls = [];
     for (const callId of await api.knownCallIds()) {
       const file = path.join(rootDir, callId, DEBUG_FILE);
@@ -261,31 +261,22 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
       calls.push({ callId, file, bytes: entry.size || 0, changedAt: entry.mtimeMs ?? null, at, record });
     }
     calls.sort((left, right) => right.at - left.at);
+    const inRun = Number.isFinite(since) ? calls.filter(item => item.at >= since) : calls;
+    const chosen = (inRun.length ? inRun : calls.slice(0, 1)).slice(0, Math.max(0, limit));
     const out = [];
-    for (const item of calls.slice(0, Math.max(0, limit))) {
+    for (const item of chosen) {
       let text = '';
-      let truncated = false;
-      try {
-        const handle = await fs.open(item.file, 'r');
-        try {
-          const size = (await handle.stat()).size || 0;
-          const start = Math.max(0, size - maxBytes);
-          const buffer = Buffer.alloc(size - start);
-          if (buffer.length) await handle.read(buffer, 0, buffer.length, start);
-          text = buffer.toString('utf8');
-          // A cut start lands mid-line: the partial first line is dropped.
-          if (start > 0) { truncated = true; text = text.slice(text.indexOf('\n') + 1); }
-        } finally { await handle.close(); }
-      } catch { text = null; }
+      try { text = await fs.readFile(item.file, 'utf8'); } catch { text = null; }
       const record = item.record;
       const analysis = record ? await readJson(item.callId, 'analysis.json') : null;
       out.push({
         callId: item.callId,
+        dir: path.join(rootDir, item.callId),
         startedAt: typeof record?.startedAt === 'number' ? record.startedAt : null,
         changedAt: item.changedAt,
         bytes: item.bytes,
-        truncated,
         text,
+        transcript: Array.isArray(record?.transcript) ? record.transcript : [],
         record: record ? {
           durationMs: typeof record.durationMs === 'number' ? record.durationMs : null,
           pausedMs: typeof record.pausedMs === 'number' ? record.pausedMs : null,

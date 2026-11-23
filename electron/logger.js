@@ -18,8 +18,9 @@
  */
 const isProd = typeof process !== 'undefined' && !process.defaultApp;
 
-const NORMAL_RING_BUFFER_SIZE = 200;
-const HIGH_SIGNAL_RING_BUFFER_SIZE = 300;
+// Large enough to hold a whole run for a bug report.
+const NORMAL_RING_BUFFER_SIZE = 20_000;
+const HIGH_SIGNAL_RING_BUFFER_SIZE = 5_000;
 const RING_BUFFER_SIZE = NORMAL_RING_BUFFER_SIZE + HIGH_SIGNAL_RING_BUFFER_SIZE;
 const normalRingBuffer = [];
 const highSignalRingBuffer = [];

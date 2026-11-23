@@ -1,11 +1,10 @@
 // A short memory of what happened in the main window, for bug reports.
 //
-// Holds the last few hundred lines: buttons pressed, uncaught errors, rejected
+// Holds the lines of this run: buttons pressed, uncaught errors, rejected
 // promises and console warnings and errors. It lives in memory only and is
-// read when the person makes a bug report. Typed text is never recorded.
+// read when the person makes a bug report.
 
-const MAX_LINES = 300;
-const MAX_LINE_CHARS = 500;
+const MAX_LINES = 20_000;
 const lines = [];
 const listeners = new Set();
 let dropped = 0;
@@ -18,7 +17,7 @@ function describe(value) {
 
 export function logEvent(kind, ...details) {
   const text = details.map(describe).join(' ').replace(/\s+/gu, ' ').trim();
-  const line = `[${new Date().toISOString()}] ${kind}${text ? ` ${text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS - 1)}…` : text}` : ''}`;
+  const line = `[${new Date().toISOString()}] ${kind}${text ? ` ${text}` : ''}`;
   lines.push(line);
   if (lines.length > MAX_LINES) { lines.shift(); dropped += 1; }
   for (const listener of listeners) { try { listener(line); } catch { /* a listener cannot break recording */ } }
@@ -38,12 +37,12 @@ export function resetEventLogForTest() { lines.length = 0; dropped = 0; listener
 export function controlName(element) {
   const name = element?.getAttribute?.('aria-label') || element?.textContent || element?.getAttribute?.('title') || '';
   const text = String(name).replace(/\s+/gu, ' ').trim();
-  return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 }
 
 /**
  * Starts recording in this window. Returns a function that stops it. `nameControl(control)` names a
- * pressed control instead of the default (a window whose buttons can carry private text passes one).
+ * pressed control instead of the default.
  */
 export function installEventCapture(target = window, { nameControl = null } = {}) {
   if (!target || target.__interviewEventCapture) return () => {};
@@ -52,9 +51,6 @@ export function installEventCapture(target = window, { nameControl = null } = {}
   const onClick = (event) => {
     const control = event?.target?.closest?.('button, a, [role="button"], [role="tab"], summary');
     if (!control) return;
-    // Entries of the interview list are named after the interview; record the action, not the name.
-    const inList = control.closest?.('[aria-label="Interviews"][role="listbox"]');
-    if (inList) { logEvent('click', '(an interview in the list)'); return; }
     let name;
     try { name = typeof nameControl === 'function' ? nameControl(control) : controlName(control); } catch { name = '(a control)'; }
     logEvent('click', `"${name}"`);
@@ -87,7 +83,7 @@ export function screenMessages(doc = document, exclude = null) {
   for (const element of doc.querySelectorAll('[role="alert"], [role="status"]')) {
     if (exclude?.contains?.(element) || element.closest?.('[hidden]')) continue;
     const text = String(element.textContent || '').replace(/\s+/gu, ' ').trim();
-    if (text) seen.add(`${element.getAttribute('role')}: ${text.length > 400 ? `${text.slice(0, 399)}…` : text}`);
+    if (text) seen.add(`${element.getAttribute('role')}: ${text}`);
     if (seen.size >= 30) break;
   }
   return [...seen];

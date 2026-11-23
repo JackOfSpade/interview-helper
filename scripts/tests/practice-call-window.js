@@ -254,7 +254,7 @@ test('the draft-answer handler is a window channel and answers with an error whe
   assert.deepEqual(await invoke('practice-call-window:draft-answer'), { error: 'Suggestions are not available.' });
 });
 
-test('the call window\'s event lines reach the call\'s debug log and are kept, bounded, for bug reports', async () => {
+test('the call window\'s event lines reach the call\'s debug log and are kept whole for bug reports', async () => {
   const { WINDOW_CHANNELS } = await import('../../electron/practiceCall/callWindow.js');
   assert.ok(WINDOW_CHANNELS.includes('log-event'));
   const { invoke, service, controller } = await harness({ phase: 'ringing' });
@@ -264,11 +264,11 @@ test('the call window\'s event lines reach the call\'s debug log and are kept, b
   await invoke('practice-call-window:log-event', '[t] click "Hang up"');
   await invoke('practice-call-window:log-event', 42);
   await invoke('practice-call-window:log-event', 'x'.repeat(900));
-  assert.deepEqual(logged.map(line => line.length), [19, 600], 'only text is kept, cut at 600 characters');
+  assert.deepEqual(logged.map(line => line.length), [19, 900], 'only text is kept, whole');
   for (let index = 0; index < 305; index += 1) await invoke('practice-call-window:log-event', `line ${index}`);
   const { events, eventsDropped } = controller.windowEvents();
-  assert.equal(events.length, 300);
-  assert.equal(eventsDropped, 7);
+  assert.equal(events.length, 307, 'a whole run is kept');
+  assert.equal(eventsDropped, 0);
   assert.equal(events.at(-1), 'line 304');
 });
 

@@ -110,7 +110,7 @@ All settled.
 ## Practice audio helper protocol
 
 NDJSON over stdio: one JSON object per line, UTF-8. The Node wrapper is
-`electron/interviewPracticeAudio.js`. Stderr is drained and ignored.
+`electron/interviewPracticeAudio.js`. Each stderr line goes to the app log as `[PracticeAudio stderr]`.
 
 **Launch**
 

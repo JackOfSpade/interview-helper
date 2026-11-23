@@ -85,8 +85,8 @@ function validateHelperEvent(value) {
 }
 
 /** Main-process owner of the native Practice Audio Helper. The executable and
- * protocol are host-owned. Helper stderr is drained and ignored (it may hold
- * private text); transcript text and recording paths are never logged.
+ * protocol are host-owned. Each line the helper writes to stderr goes to
+ * `onStderr` (the app log), so a bug report shows the native diagnostics.
  */
 export function createPracticeAudioHelper({
   helperPath = practiceAudioHelperPath(),
@@ -94,6 +94,7 @@ export function createPracticeAudioHelper({
   platform = process.platform,
   arch = process.arch,
   onEvent = () => {},
+  onStderr = () => {},
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 } = {}) {
@@ -236,8 +237,17 @@ export function createPracticeAudioHelper({
     session.child = child;
     current = session;
     state = { status: 'starting', errorCode: null, message: '' };
-    // Ignore native diagnostics entirely: they can contain private text or
-    // paths. Drain stderr so an OS diagnostic cannot block the helper.
+    // Native diagnostics go to the log line by line; reading them also keeps stderr drained.
+    let stderrRest = '';
+    const stderrLine = (line) => { if (line.trim()) { try { onStderr(line); } catch { /* logging cannot stop the helper */ } } };
+    child.stderr?.setEncoding?.('utf8');
+    child.stderr?.on?.('data', (chunk) => {
+      const parts = (stderrRest + String(chunk)).split(/\r?\n/u);
+      stderrRest = parts.pop() ?? '';
+      if (stderrRest.length > 64_000) { stderrLine(stderrRest); stderrRest = ''; }
+      parts.forEach(stderrLine);
+    });
+    child.stderr?.on?.('end', () => { stderrLine(stderrRest); stderrRest = ''; });
     child.stderr?.resume?.();
     child.stderr?.on?.('error', () => undefined);
     child.stdin?.on?.('error', () => undefined);

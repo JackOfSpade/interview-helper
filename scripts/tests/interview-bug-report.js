@@ -1,5 +1,5 @@
 // "Report a bug" in the standalone Interview Helper app: what a report holds,
-// what it leaves out, where it is saved and what reaches the clipboard.
+// which secrets it masks, where it is saved and what reaches the clipboard.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,9 +7,8 @@ import path from 'node:path';
 import {
   BUG_REPORT_COPY_CHANNEL, BUG_REPORT_DESCRIPTION_MAX, BUG_REPORT_MAX_AGE_MS, BUG_REPORT_RETENTION, BUG_REPORT_SAVE_CHANNEL,
   buildBugReportMarkdown, buildBugReportPointer, createBugReportService, createBugReportStore, interviewRows, listDataFolder,
-  callTimeline, debugLineForReport, normalizeBugReportPayload, redactReportText, registerBugReportHandlers, validateBugReportDescription,
+  MAX_EVENT_LINES, callTimeline, debugLineForReport, maskSecrets, normalizeBugReportPayload, registerBugReportHandlers, validateBugReportDescription,
 } from '../../electron/interviewApp/bugReport.js';
-import { callControlName } from '../../src/practice-call/callEventLog.js';
 import { controlName, eventLogSnapshot, installEventCapture, logEvent, resetEventLogForTest } from '../../src/utils/eventLog.js';
 import { buildMacApplication, readConfiguredMacSigningConfig, selectBuildTarget } from '../build-macos.mjs';
 
@@ -60,14 +59,12 @@ const payload = (overrides = {}) => ({
 
 const tests = [
   {
-    name: 'bug report: log and event text loses URL queries, local paths, credentials and opaque ids',
+    name: 'bug report: only secrets are masked; links, paths and ids stay',
     run() {
-      const text = redactReportText('GET https://a.example.test/p/q?x=1#y, wrote /Users/jack/Desktop/file.txt (password: "hunter2") Bearer abc.def id 123e4567-e89b-12d3-a456-426614174000 sk-abcdefghijklmnopqrstuv');
-      assert.match(text, /https:\/\/a\.example\.test\/p\/q,/u, 'the address stays, its query and fragment go');
-      for (const gone of ['x=1', '#y', 'jack', 'hunter2', 'abc.def', '123e4567', 'sk-abcdef']) assert.ok(!text.includes(gone), `${gone} is removed`);
-      assert.match(text, /<local-path>/u);
-      assert.match(text, /<opaque-id>/u);
-      assert.equal(redactReportText('round 2 of 3: tokens used 5120'), 'round 2 of 3: tokens used 5120', 'ordinary diagnostics are left alone');
+      const text = maskSecrets('GET https://a.example.test/p/q?x=1#y, wrote /Users/jack/Desktop/file.txt (password: "hunter2") Bearer abc.def id 123e4567-e89b-12d3-a456-426614174000 sk-abcdefghijklmnopqrstuv');
+      for (const kept of ['https://a.example.test/p/q?x=1#y', '/Users/jack/Desktop/file.txt', '123e4567-e89b-12d3-a456-426614174000']) assert.ok(text.includes(kept), `${kept} stays`);
+      for (const gone of ['hunter2', 'abc.def', 'sk-abcdef']) assert.ok(!text.includes(gone), `${gone} is masked`);
+      assert.equal(maskSecrets('round 2 of 3: tokens used 5120'), 'round 2 of 3: tokens used 5120', 'ordinary diagnostics are left alone');
     },
   },
   {
@@ -80,21 +77,21 @@ const tests = [
       assert.throws(() => normalizeBugReportPayload({ description: {} }), TypeError);
       const normalized = normalizeBugReportPayload({ description: 'hi', renderer: { events: ['a', 5, 'b'], screenMessages: 'nope', windowWidth: -1, windowHeight: 700.4, selectedIndex: 'x', online: 'yes', extra: 1 }, extra: 1 });
       assert.deepEqual(normalized, { description: 'hi', renderer: { events: ['a', 'b'], eventsDropped: 0, screenMessages: [], windowWidth: null, windowHeight: 700, selectedIndex: null, online: null } });
-      assert.equal(normalizeBugReportPayload({ renderer: { events: Array.from({ length: 900 }, (_, index) => `e${index}`) } }).renderer.events.length, 400, 'only the newest events are kept');
+      assert.equal(normalizeBugReportPayload({ renderer: { events: Array.from({ length: MAX_EVENT_LINES + 5 }, (_, index) => `e${index}`) } }).renderer.events.length, MAX_EVENT_LINES, 'a whole run of events is kept');
     },
   },
   {
-    name: 'bug report: interviews appear as states and counts, never as names, links or text',
+    name: 'bug report: interviews show their title, career files, job and link',
     run() {
       const rows = interviewRows(sessionsState());
-      assert.deepEqual(rows[0], { index: 1, selected: false, named: true, careerFiles: 2, careerSnapshot: true, job: 'application folder', preparation: 'failed', runPending: true });
-      assert.deepEqual(rows[1], { index: 2, selected: true, named: false, careerFiles: 0, careerSnapshot: false, job: 'typed (generated)', preparation: 'none', runPending: false });
+      assert.deepEqual(rows[0], { index: 1, selected: false, title: SECRET_TITLE, careerFiles: ['resume.pdf', 'notes.md'], careerSnapshot: true, job: 'application folder', jobUrl: '', preparation: 'failed', runPending: true });
+      assert.deepEqual(rows[1], { index: 2, selected: true, title: '', careerFiles: [], careerSnapshot: false, job: 'typed (generated)', jobUrl: 'https://jobs.hidden.test/1?token=abc', preparation: 'none', runPending: false });
       assert.equal(rows[2].job, 'none');
       assert.equal(interviewRows(sessionsState(), 0)[0].selected, true, 'the window says which interview is on screen');
       assert.deepEqual(interviewRows(null), []);
       const coded = { sessions: [{ id: 'a', data: { interviewHelperPreparation: { status: 'failed', error: 'x', code: 'CLAUDE_SAFEGUARD_BLOCKED' } } },
         { id: 'b', data: { interviewHelperPreparation: { status: 'failed', code: 'not a code /private/x' } } }] };
-      assert.deepEqual(interviewRows(coded).map(row => row.preparation), ['failed (CLAUDE_SAFEGUARD_BLOCKED)', 'failed'], 'a fixed failure code is shown, free text never');
+      assert.deepEqual(interviewRows(coded).map(row => row.preparation), ['failed (CLAUDE_SAFEGUARD_BLOCKED)', 'failed']);
     },
   },
   {
@@ -108,22 +105,21 @@ const tests = [
       assert.match(markdown, /Interview Helper 1\.2\.3 \(packaged\)/u);
       assert.match(markdown, /Main window: 1180 × 860 px/u);
       assert.match(markdown, /- Practice call: open/u);
-      assert.match(markdown, /3 saved · Applied Jobs folder chosen/u);
-      assert.match(markdown, /\| 1 \| no \| yes \| 2 \| yes \| application folder \| failed \| yes \|$/mu);
+      assert.match(markdown, /3 saved · Applied Jobs folder chosen: \/Users\/someone\/Applied Jobs/u);
+      assert.ok(markdown.includes(`| 1 | no | ${SECRET_TITLE} | resume.pdf, notes.md | yes | application folder |  | failed | yes |`));
+      assert.ok(markdown.includes('| 2 | yes | (untitled) | none | no | typed (generated) | https://jobs.hidden.test/1?credential=<redacted> | none | no |'), 'a link keeps all but its secret');
       assert.match(markdown, /Paused: CLAUDE_USAGE_LIMIT/u);
       assert.match(markdown, /interview-answer · running \/ writing · model claude-opus \(high\) · round 2 · rejected 1 · tool turns 3 · started 90s ago · in this phase 5s · last failure CLAUDE_TIMEOUT \(attempt 1\)/u);
-      assert.match(markdown, /Reading https:\/\/example\.test\/page$/mu, 'a step keeps the page, not its query');
+      assert.match(markdown, /Reading https:\/\/example\.test\/page\?session=abc$/mu, 'a step keeps its whole link');
       assert.match(markdown, /2 task\(s\) · oldest 61s · build-interview-brief/u);
       assert.match(markdown, /issued 4 · accepted 3/u);
       assert.match(markdown, /interview-helper-sessions\.json · file · 2,048 bytes/u);
       assert.match(markdown, /- alert: Preparation failed/u);
       assert.match(markdown, / {4}\[t\] click "Prepare"/u);
-      const info = markdown.indexOf('INFO  fetched https://api.example.test/v1/thing for <opaque-id>');
-      const error = markdown.indexOf('ERROR [build-interview-brief] failed: boom at <local-path>');
-      assert.ok(info > 0 && error > info, 'the app log is redacted and oldest first');
-      for (const secret of [SECRET_TITLE, 'Hidden Corp', 'jobs.hidden.test', 'private text', 'resume.pdf', '/Users/someone', 'abc123', 'api_key', 'run-1', 'session=abc']) {
-        assert.ok(!markdown.includes(secret), `${secret} must not be in a report`);
-      }
+      const info = markdown.indexOf('INFO  fetched https://api.example.test/v1/thing?credential=<redacted> for 123e4567-e89b-12d3-a456-426614174000');
+      const error = markdown.indexOf('ERROR [build-interview-brief] failed: boom at /Users/someone/secret/file.js credential=<redacted>');
+      assert.ok(info > 0 && error > info, 'the app log is whole but for secrets, oldest first');
+      for (const secret of ['abc123', 'zzz']) assert.ok(!markdown.includes(secret), `${secret} is masked`);
     },
   },
   {
@@ -134,7 +130,7 @@ const tests = [
         sources: sources({ sessions: () => { throw new Error('sessions file unreadable at /Users/someone/x.json'); }, dataFolder: async () => { throw new Error('gone'); }, claudeActivity: undefined, logs: () => [] }),
       });
       assert.match(markdown, /_No description was given\._/u);
-      assert.match(markdown, /## Interviews\n- This section could not be written: sessions file unreadable at <local-path>/u);
+      assert.match(markdown, /## Interviews\n- This section could not be written: sessions file unreadable at \/Users\/someone\/x\.json/u);
       assert.match(markdown, /## Data folder\n- This section could not be written: gone/u);
       assert.match(markdown, /No Claude task is queued or running\./u);
       assert.match(markdown, /## App log \(0 lines\)\n[^\n]*\n- Nothing logged\./u);
@@ -268,7 +264,7 @@ const tests = [
     },
   },
   {
-    name: 'bug report: the window remembers presses, errors and warnings, not typed text or interview names',
+    name: 'bug report: the window remembers presses, errors and warnings',
     run() {
       resetEventLogForTest();
       const listeners = new Map();
@@ -294,21 +290,21 @@ const tests = [
       const text = events.map(line => line.replace(/^\[[^\]]+\] /u, ''));
       assert.equal(text[0], 'window opened');
       assert.equal(text[1], 'click "Prepare"');
-      assert.equal(text[2], 'click (an interview in the list)');
+      assert.equal(text[2], 'click "Acme interview"');
       assert.match(text[3], /^ERROR TypeError: x is not a function/u);
       assert.deepEqual(text.slice(4), ['ERROR unhandled rejection: late failure', 'WARN console: careful {"a":1}', 'ERROR console: bad']);
-      assert.equal(controlName({ getAttribute: () => null, textContent: `  ${'long '.repeat(40)}` }).length, 60);
+      assert.equal(controlName({ getAttribute: () => null, textContent: `  ${'long '.repeat(60)}` }).length, 200);
       stop();
       assert.equal(listeners.size, 0);
       target.console.error('after');
       assert.equal(eventLogSnapshot().events.length, events.length, 'nothing is recorded after stopping');
-      for (let index = 0; index < 320; index += 1) logEvent('note', `x${index}`);
-      assert.deepEqual([eventLogSnapshot().events.length, eventLogSnapshot().eventsDropped], [300, events.length + 20]);
+      for (let index = 0; index < MAX_EVENT_LINES + 20; index += 1) logEvent('note', `x${index}`);
+      assert.deepEqual([eventLogSnapshot().events.length, eventLogSnapshot().eventsDropped], [MAX_EVENT_LINES, events.length + 20]);
       resetEventLogForTest();
     },
   },
   {
-    name: 'practice calls: each recent call\'s debug log is a timeline with content reduced to sizes; notes, warnings and errors keep their text',
+    name: 'practice calls: each call of the run shows its folder, transcript and every debug line with only secrets masked',
     async run() {
       const line = (up, ms, event, data) => JSON.stringify({ t: '2026-11-20T10:00:00.000Z', up, ms, event, ...(data ? { data } : {}) });
       const debugText = [
@@ -330,7 +326,8 @@ const tests = [
         practiceCalls: () => ({
           logStats: { count: 2, bytes: 4096 },
           calls: [
-            { callId: 'call-1', startedAt: Date.parse('2026-11-20T10:00:00.000Z'), bytes: debugText.length, text: debugText, hasAudio: true,
+            { callId: 'call-1', dir: '/Users/someone/Library/Application Support/Interview Helper/practice-calls/call-1', startedAt: Date.parse('2026-11-20T10:00:00.000Z'), bytes: debugText.length, text: debugText, hasAudio: true,
+              transcript: [{ speaker: 'interviewer', speakerId: 'A', text: 'SECRET QUESTION?', startMs: 1500, endMs: 4000 }, { speaker: 'candidate', text: 'SECRET ANSWER', startMs: 5000, endMs: 5000, typed: true }],
               record: { durationMs: 300_000, reason: 'candidate', transcriptEntries: 12, candidateTurns: 6, interviewers: 2, pickedQuestions: 5, askedQuestions: 4, answeredQuestions: 3, feedbackSkipped: false, timings: { setupLeadMs: 4200 } },
               analysis: { status: 'failed', error: 'feedback.planned marks card 2 ("SECRET OTHER QUESTION") as not asked', chapters: 0, hasFeedback: false } },
             { callId: 'call-0', startedAt: null, bytes: 0, text: null, record: null, analysis: null },
@@ -340,26 +337,30 @@ const tests = [
       }) });
       const section = markdown.slice(markdown.indexOf('## Practice calls'), markdown.indexOf('## Messages on screen'));
       assert.ok(markdown.indexOf('## Practice calls') > markdown.indexOf('## Data folder'));
-      for (const secret of ['SECRET', 'Private Interviewer', 'jobs.hidden.test', '/Users/someone']) assert.ok(!section.includes(secret), `${secret} stays out of the report`);
       for (const needle of [
         '- Debug logs on disk: 2 · 4,096 bytes',
         '### Call 1 (newest): started 2026-11-20T10:00:00.000Z (300s ago)',
         'length 300s · ended candidate · 12 transcript entries (6 the candidate\'s) · 2 interviewer(s) · questions picked 5, asked 4, answered 3 · feedback skipped no · recording kept',
         '- Timings: setupLeadMs 4200',
-        '- Review: failed · 0 chapter(s) · feedback no · error: feedback.planned marks card 2 ("…") as not asked',
+        '- Review: failed · 0 chapter(s) · feedback no · error: feedback.planned marks card 2 ("SECRET OTHER QUESTION") as not asked',
+        '- Folder: `/Users/someone/Library/Application Support/Interview Helper/practice-calls/call-1`',
+        '#### Transcript (2)',
+        '+1.5s–4.0s interviewer (A): SECRET QUESTION?',
+        '+5.0s candidate: SECRET ANSWER {"typed":true}',
         'lines by event:',
         '1 unreadable line(s)',
+        '(unreadable) {not json',
         'setup-timing {"name":"voices","ms":880}',
         'phase {"from":"precheck","phase":"ringing","elapsedMs":0}',
-        'session-turn {"kind":"main","message":"‹32 chars›"}',
-        'engine {"type":"caption","text":"‹14 chars›","speaker":"A","name":"‹19 chars›"}',
-        'user {"action":"chat","text":"‹11 chars›"}',
+        'session-turn {"kind":"main","message":"SECRET PROMPT TO THE INTERVIEWER"}',
+        'engine {"type":"caption","text":"SECRET CAPTION","speaker":"A","name":"Private Interviewer"}',
+        'user {"action":"chat","text":"SECRET CHAT"}',
         'window {"line":"[2026-11-20T10:00:08.000Z] click \\"Hang up\\""}',
         '+8.1s call 3.1s window',
-        'ERROR console: failed "…"',
-        'warn {"message":"[PracticeCall] session restarted: timeout at <local-path>"}',
-        'fail {"code":"precheck-failed","message":"helper exited 1"',
-        'analysis-review-reply {"attempt":1,"ms":52000,"outcome":"rejected","error":"feedback.planned has no entry for card 1 (\\"…\\"), which the call asked","keys":["feedback","chapters"]}',
+        'ERROR console: failed "SECRET QUOTE"',
+        'warn {"message":"[PracticeCall] session restarted: timeout at /Users/someone/Library/x.js"}',
+        'fail {"code":"precheck-failed","message":"helper exited 1","stack":"Error: helper exited 1\\n at /Users/someone/app.js:1:1"}',
+        'analysis-review-reply {"attempt":1,"ms":52000,"outcome":"rejected","error":"feedback.planned has no entry for card 1 (\\"SECRET QUESTION\\"), which the call asked","keys":["feedback","chapters"]}',
         'analysis-done {"status":"ready","ms":61000,"chapters":4}',
         '### Call 2: started unknown',
         '- Record: none',
@@ -367,61 +368,25 @@ const tests = [
         '### Call window events (2, 3 older dropped)',
         'screen in-call',
       ]) assert.ok(section.includes(needle), `the practice call section shows ${needle}`);
-      assert.ok(section.includes('start {"callId":"‹6 chars›","args":{"nodeId":"‹1 chars›","canonicalJobUrl":"‹26 chars›"},"steering":"‹15 chars›"}'));
+      assert.ok(section.includes('start {"callId":"call-1","args":{"nodeId":"n","canonicalJobUrl":"https://jobs.hidden.test/1"},"steering":"SECRET STEERING"}'));
       // No call at all, or no practice call service, still writes the section.
       const empty = await buildBugReportMarkdown({ payload: {}, sources: sources({ practiceCalls: () => ({ calls: [] }) }) });
       assert.match(empty, /## Practice calls[\s\S]*- No practice call has a debug log\.[\s\S]*### Call window events \(0\)/u);
     },
   },
   {
-    name: 'practice calls: text is shown only under known code keys, and quoted questions are dropped whole',
-    async run() {
-      const shaped = (event, data) => debugLineForReport(JSON.stringify({ up: 1500, event, data })).text;
-      // A cut-off reply of one word is still interviewer speech.
-      assert.equal(shaped('engine', { type: 'interrupted', heardText: 'Salesforce.' }), '+1.5s engine {"type":"interrupted","heardText":"‹11 chars›"}');
-      assert.equal(shaped('engine', { type: 'pad', open: true, lang: 'python' }), '+1.5s engine {"type":"pad","open":true,"lang":"python"}');
-      assert.equal(shaped('x', { tags: ['Google', 'Meta'], map: { 'What is your SECRET?': 1, ok: 2 } }), '+1.5s x {"tags":["‹6 chars›","‹4 chars›"],"map":{"ok":2,"‹other keys›":1}}');
-      // A note ending in JSON is shaped field by field, escaped quotes and all.
-      const plan = shaped('note', { message: `plan ${JSON.stringify({ ms: 60000, kind: 'panel', unprepared: [{ text: 'Explain "SECRET" in Acme Corp' }] })}` });
-      assert.ok(!plan.includes('SECRET') && !plan.includes('Acme'), plan);
-      assert.ok(plan.includes('\\"kind\\":\\"panel\\"') && plan.includes('\\"text\\":\\"‹29 chars›\\"'), plan);
-      // analyzeCall sets a question in «» so it goes whole, whatever quotes it holds.
-      const rejected = shaped('analysis-review-reply', { outcome: 'rejected', error: 'feedback.planned marks card 2 («What does "SECRET" mean») as not asked' });
-      assert.ok(rejected.includes('card 2 («…») as not asked') && !rejected.includes('SECRET'), rejected);
-      const single = shaped('warn', { message: "review quoted 'SECRET project' wrongly; it's fine" });
-      assert.ok(single.includes("quoted '…' wrongly; it's fine"), single);
-      const escaped = shaped('warn', { message: 'bad reply: {"q":"a \\"SECRET\\" b"}' });
-      assert.ok(!escaped.includes('SECRET'), escaped);
-    },
-  },
-  {
-    name: 'practice calls: a long call keeps every important line and the newest routine lines',
+    name: 'practice calls: a long call keeps every line, and secrets in a line are masked',
     async run() {
       const lines = [];
-      for (let index = 0; index < 2000; index += 1) lines.push(JSON.stringify({ up: index, ms: index, event: 'engine', data: { type: 'timing', n: index } }));
-      lines.splice(10, 0, JSON.stringify({ up: 10, event: 'warn', data: { message: 'early warning' } }));
-      lines.push(JSON.stringify({ up: 3000, event: 'analysis-done', data: { status: 'ready' } }));
-      const timeline = callTimeline(lines.join('\n'), 100);
-      assert.equal(timeline.lines.length, 100);
-      assert.equal(timeline.dropped, 1902);
-      assert.ok(timeline.lines.some(text => text.includes('early warning')), 'an early warning survives');
-      assert.ok(timeline.lines.at(-1).includes('analysis-done'));
-      assert.ok(timeline.lines.at(-2).includes('"n":1999'), 'the newest routine lines are kept');
-      assert.deepEqual(timeline.counts, { engine: 2000, warn: 1, 'analysis-done': 1 });
+      for (let index = 0; index < 5000; index += 1) lines.push(JSON.stringify({ up: index, ms: index, event: 'engine', data: { type: 'timing', n: index } }));
+      lines.push(JSON.stringify({ up: 6000, event: 'note', data: { message: 'auth header Authorization: Bearer sk-abcdefghijklmnopqrstuv' } }));
+      const timeline = callTimeline(lines.join('\n'));
+      assert.equal(timeline.lines.length, 5001);
+      assert.deepEqual(timeline.counts, { engine: 5000, note: 1 });
+      assert.ok(!timeline.lines.at(-1).includes('sk-abcdef'), timeline.lines.at(-1));
       assert.equal(debugLineForReport('[]'), null);
       assert.equal(debugLineForReport('{"event":"x"}').text, '+? x');
-    },
-  },
-  {
-    name: 'practice calls: the call window names a pressed control only from a fixed set of names',
-    async run() {
-      const control = (label, text = '') => ({ getAttribute: name => (name === 'aria-label' ? label : null), textContent: text });
-      assert.equal(callControlName(control('Hang up')), 'Hang up');
-      assert.equal(callControlName(control(null, "I'm ready")), "I'm ready");
-      assert.equal(callControlName(control('Seek to Tell me about a SECRET project at 01:02')), 'Seek to a moment');
-      assert.equal(callControlName(control('Current chapter: SECRET. Show chapters')), 'Show chapters');
-      assert.equal(callControlName(control(null, 'SECRET transcript turn')), '(a control)');
-      assert.equal(callControlName(control('SECRET')), '(a control)');
+      assert.equal(debugLineForReport(JSON.stringify({ up: 1500, event: 'engine', data: { type: 'interrupted', heardText: 'Salesforce.' } })).text, '+1.5s engine {"type":"interrupted","heardText":"Salesforce."}');
     },
   },
   {
