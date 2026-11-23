@@ -47,6 +47,21 @@ const tests = [
     },
   },
   {
+    name: 'practice call planner: a problem may leave the pick among several listed languages; one alone is the required language',
+    async run() {
+      const withLanguages = (language, languages) => { const raw = goodPlan(); raw.problems[0].language = language; raw.problems[0].languages = languages; const out = check(raw); assert.deepEqual(out.problems, []); return out.plan.problems[0]; };
+      const several = withLanguages('', ['c', 'C++', 'C', 'Klingon']);
+      assert.deepEqual([several.language, several.languages], ['', ['C', 'C++']], 'listed names, each once');
+      const one = withLanguages('', ['C++']);
+      assert.deepEqual([one.language, 'languages' in one], ['C++', false], 'one language alone is required');
+      const required = withLanguages('python', ['C', 'C++']);
+      assert.deepEqual([required.language, 'languages' in required], ['python', false], 'a required language leaves no pick');
+      assert.equal('languages' in withLanguages('', []), false);
+      assert(PLAN_SCHEMA.properties.problems.items.required.includes('languages') && PLAN_SCHEMA.properties.problems.items.properties.languages.items.enum.includes('C++'));
+      assert.match(buildPlanPrompt({ ...ctx, brief: { company: 'Acme', role: 'Widget Engineer' }, application: { resume: '', coverLetter: '' } }), /hired for more than one language[^.]*never pick one of them for the candidate/u);
+    },
+  },
+  {
     name: 'practice call planner: every person needs an "interrupting" text, which is carried through and asked for in the prompt and schema',
     async run() {
       const mutate = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };

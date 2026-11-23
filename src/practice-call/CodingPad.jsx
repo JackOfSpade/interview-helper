@@ -23,7 +23,8 @@ const WORD_END = /[\s.,;:()[\]{}]/u;
 // speaking and the reaction time is over) it stops at the end of the word being typed, as a person gives way.
 // lang is the language the exercise requires, shown as a label. With none required and onChooseLanguage given, the
 // header has a dropdown instead: `choice` is the candidate's pick, and picking another calls onChooseLanguage(name).
-export default function CodingPad({ lang = '', choice = '', onChooseLanguage, initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
+// `options` limits the dropdown to the languages the exercise allows (a role hired for several); empty lists them all.
+export default function CodingPad({ lang = '', choice = '', options, onChooseLanguage, initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
   const [own, setOwn] = useState(() => String(initialText || '').slice(0, PAD_TEXT_MAX));
   const text = readOnly ? String(value || '') : own;
   const textRef = useRef(own);
@@ -156,7 +157,7 @@ export default function CodingPad({ lang = '', choice = '', onChooseLanguage, in
           onChange={event => onChooseLanguage(event.target.value)}
           className="ml-2 rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs font-normal text-[#e8eaed] outline-none focus:ring-1 focus:ring-[#8ab4f8] disabled:opacity-50">
           {!choice && <option value="" disabled>Language</option>}
-          {PAD_LANGUAGES.map(name => <option key={name} value={name} className="bg-[#1e1f22]">{name}</option>)}
+          {(Array.isArray(options) && options.length ? options : PAD_LANGUAGES).map(name => <option key={name} value={name} className="bg-[#1e1f22]">{name}</option>)}
         </select>}
       </h2>
       {!readOnly && <div className="flex items-center gap-3">

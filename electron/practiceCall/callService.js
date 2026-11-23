@@ -349,7 +349,7 @@ function freshState() {
     phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, microphoneFailed: false, microphoneNeedsRejoin: false, microphoneReconnecting: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
-    screen: null, sharing: null, pad: { open: false, lang: '', text: '', choice: '' },
+    screen: null, sharing: null, pad: { open: false, lang: '', text: '', choice: '', options: [] },
   };
 }
 const ENGINE_NOTICES = Object.freeze({
@@ -558,13 +558,51 @@ export function createPracticeCallService(deps = {}) {
     const required = [...new Set(problems.map(problem => String(problem?.language ?? '').trim()).filter(Boolean))];
     if (!required.length) return '';
     const said = languageKey(label);
+    // A language the candidate may pick (a problem that allows several) is never a label: the pad offers it instead.
+    if (problems.some(problem => !String(problem?.language ?? '').trim() && (problem?.languages || []).some(name => languageKey(name) === said))) return '';
     return required.find(name => languageKey(name) === said) ?? (required.length === 1 ? required[0] : '');
+  }
+  /**
+   * The languages the pad offers the candidate: those of the prepared problem on screen when it allows several (the
+   * role is hired for more than one), else none, which means every listed language. The problem is the one whose part
+   * is shown now. While the pad stays open it keeps that problem through a stopped share or a screen the interviewer
+   * wrote (a follow-up or a corrected screen of the same exercise). Closing the pad ends the exercise, and a screen
+   * of the interviewer's own shown with the pad closed starts another: a pad opened for that offers every language.
+   * So does opening the open pad again with such a screen, and so does moving on to another planned question.
+   * With nothing on screen and nothing remembered, a plan with one problem means that problem.
+   */
+  function padOptions(self) {
+    const problems = self?.settledPlan?.problems;
+    if (!Array.isArray(problems) || !problems.length) return [];
+    // The screen shows a part as it was prepared (a picture's lead line above the text, the title cut to the screen's
+    // limit), which can differ from the plan's own wording, so both are tried.
+    const isShown = part => !!part && String(part.title ?? '').slice(0, 120) === state.screen.title && part.content === state.screen.content;
+    const shown = state.screen ? problems.find(problem => [...(self.prepared?.[problem?.ref]?.parts || []), ...(problem?.parts || [])].some(isShown)) : null;
+    if (shown) { self.padProblemRef = shown.ref; self.padMovedOn = false; }
+    // A screen of the interviewer's own starts another exercise when the pad is closed, or when they opened the pad
+    // again for it in the same reply (the tag may come just before or just after the screen).
+    else if (state.screen && (!state.pad.open || clock.now() - (self.padReopenedAt ?? -Infinity) < SAME_REPLY_MS)) self.padProblemRef = null;
+    const problem = shown ?? problems.find(item => item?.ref === self.padProblemRef) ?? (!state.screen && !self.padMovedOn && problems.length === 1 ? problems[0] : null);
+    if (!problem || String(problem.language ?? '').trim() || !Array.isArray(problem.languages)) return [];
+    const names = [...new Set(problem.languages.map(padLanguageName).filter(Boolean))];
+    return names.length > 1 ? names : [];
+  }
+  /** Keeps the pad's offered languages with the exercise; a pick that is no longer offered is dropped, and the window picks again. */
+  function syncPadOptions(self) {
+    const options = padOptions(self);
+    const choice = options.length && !options.includes(state.pad.choice) ? '' : state.pad.choice;
+    const before = Array.isArray(state.pad.options) ? state.pad.options : [];
+    if (choice === state.pad.choice && before.length === options.length && before.every((name, index) => name === options[index])) return;
+    state.pad = { ...state.pad, options, choice };
   }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
   function applyPadEvent(self, rawEvent) {
     const event = rawEvent?.open ? { ...rawEvent, lang: padLabel(self, rawEvent.lang) } : rawEvent;
+    // Opening a pad that is already open is how an interviewer starts an exercise of their own in it.
+    if (event?.open && state.pad.open) self.padReopenedAt = clock.now();
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
-    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); }
+    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); }
+    else self.padProblemRef = null;
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
     // The record marks when the pad came up and went away, so the replay shows it from its opening (empty at first)
     // and takes it down again; before, it appeared at the first text that reached an interviewer and never closed.
@@ -598,6 +636,7 @@ export function createPracticeCallService(deps = {}) {
     const file = visual ? self.visuals.get(visualId)?.file : null;
     self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId, ...(visual ? { visual: { ...visual, ...(file ? { file } : {}) } } : {}) });
     state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId), ...(visual ? { visual } : {}) };
+    syncPadOptions(self);
   }
   /** The screen a suggested reply should see: the one shown now, else the last one shown in this call. */
   function sharedScreenForDraft(self) {
@@ -2153,6 +2192,12 @@ export function createPracticeCallService(deps = {}) {
       emitEvent({ type: 'caption', ...event });
       return;
     }
+    // The interviewers moved on to another planned question: the exercise the pad was limited for is over, so a
+    // screen of their own after this is a new exercise and not a follow-up (a prepared part still on screen keeps it).
+    if (event.type === 'question-asked' && call && !call.finished && call.padProblemRef) {
+      const limited = (call.settledPlan?.problems || []).find(problem => problem?.ref === call.padProblemRef);
+      if (limited && limited.question !== event.number) { call.padProblemRef = null; call.padMovedOn = true; syncPadOptions(call); publish(); }
+    }
     if (event.type === 'screen' && call && !call.finished) {
       const atMs = Number.isFinite(event.atMs) ? event.atMs : callMs(call);
       const speakerId = typeof event.speakerId === 'string' && event.speakerId ? event.speakerId : 'A';
@@ -3168,6 +3213,8 @@ export function createPracticeCallService(deps = {}) {
       if (!call || call.finished || !call.inCall || state.interviewerLeft) return snapshot();
       const choice = padLanguageName(name);
       if (!choice || choice === state.pad.choice) return snapshot();
+      // An exercise that allows only some languages takes a pick among those.
+      if (state.pad.options?.length && !state.pad.options.includes(choice)) return snapshot();
       state.pad = { ...state.pad, choice };
       if (call.padRecord && !state.pad.lang) call.padRecord.chosen = choice;
       dbg('pad-language', { choice });

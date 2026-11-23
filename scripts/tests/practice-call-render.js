@@ -383,6 +383,15 @@ export const presentingTests = [
         await act(async () => { select().value = 'Go'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
         strict.deepEqual(picks, ['Python', 'Go'], 'a pick is sent');
         strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), 'Go', 'and remembered for the next pad');
+        // An exercise that allows only some languages: the dropdown lists just those, starts on one of them, and a
+        // pick among them is not kept as the candidate's own preference.
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: '', options: ['C', 'C++'], text: '' } }));
+        strict.deepEqual([...select().querySelectorAll('option')].map(option => option.value).filter(Boolean), ['C', 'C++'], 'only the offered languages');
+        strict.equal(picks.at(-1), 'C', 'the saved pick (Go) is not offered, so the first offered one');
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', choice: 'C', options: ['C', 'C++'], text: '' } }));
+        await act(async () => { select().value = 'C++'; select().dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+        strict.equal(picks.at(-1), 'C++');
+        strict.equal(dom.window.localStorage.getItem('practiceCall.padLanguage'), 'Go', 'the preference is untouched');
         await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: 'SQL', choice: 'Go', text: '' } }));
         assert(!select(), 'a required language has no dropdown');
         strict.equal(dom.window.document.querySelector('[data-pad-lang]')?.textContent, 'SQL', 'only its label');

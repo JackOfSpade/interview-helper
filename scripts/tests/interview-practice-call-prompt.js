@@ -1048,6 +1048,11 @@ export default [
       const openData = JSON.parse(open.slice(open.indexOf('\nPREPARED PROBLEMS'), open.indexOf('\nPANEL\n')).replace(/^[\s\S]*?(?=\[\n)/u, '').replace(/\][^\]]*$/u, ']'));
       assert.equal(openData[0].language, 'any: the candidate chooses', 'a problem with no required language leaves the choice to the candidate');
       assert.equal('requiredLanguage' in openData[0], false);
+      const several = buildInterviewerInstructions({ persona, brief, plan, callPlan: { ...callPlan, problems: callPlan.problems.map(item => ({ ...item, language: '', languages: ['C', 'C++'] })) } });
+      const severalData = JSON.parse(several.slice(several.indexOf('\nPREPARED PROBLEMS'), several.indexOf('\nPANEL\n')).replace(/^[\s\S]*?(?=\[\n)/u, '').replace(/\][^\]]*$/u, ']'));
+      assert.deepEqual(severalData[0].languageOneOf, ['C', 'C++'], 'a role hired for several languages leaves the pick among those');
+      assert.equal('language' in severalData[0] || 'requiredLanguage' in severalData[0], false);
+      assert(text.includes('A prepared problem with "languageOneOf" sits between the two'));
       assert(text.includes('The programming language is the candidate\'s choice unless the exercise really tests one language'), 'the interviewer names no language unless one is required');
     },
   },

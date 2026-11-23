@@ -482,9 +482,13 @@ export default function InCall({ state, api }) {
   // The exercise leaves the language open: the candidate picks it in the pad (the last pick is remembered here, per
   // viewer), and the wand writes in it.
   const canChooseLanguage = typeof api?.setPadLanguage === 'function';
+  // The exercise may allow only some languages (the role is hired for several): the pad then offers just those. A
+  // pick among them is not kept as the candidate's own preference for the next open exercise.
+  const padOptions = Array.isArray(pad?.options) ? pad.options.filter(name => padLanguageName(name) === name) : [];
+  const optionsKey = padOptions.join('|');
   const chooseLanguage = name => {
-    if (!padLanguageName(name)) return;
-    try { window.localStorage.setItem(PAD_LANGUAGE_KEY, name); } catch { /* storage unavailable */ }
+    if (!padLanguageName(name) || (padOptions.length && !padOptions.includes(name))) return;
+    if (!padOptions.length) { try { window.localStorage.setItem(PAD_LANGUAGE_KEY, name); } catch { /* storage unavailable */ } }
     api.setPadLanguage(name)?.catch?.(() => {});
   };
   const needsLanguage = padOpen && canChooseLanguage && !pad?.lang && !pad?.choice && !interviewerLeft;
@@ -492,8 +496,10 @@ export default function InCall({ state, api }) {
     if (!needsLanguage) return;
     let saved = '';
     try { saved = window.localStorage.getItem(PAD_LANGUAGE_KEY) || ''; } catch { /* storage unavailable */ }
-    api.setPadLanguage(padLanguageName(saved) || DEFAULT_PAD_LANGUAGE)?.catch?.(() => {});
-  }, [needsLanguage, api]);
+    const offered = optionsKey ? optionsKey.split('|') : [];
+    const first = [padLanguageName(saved), DEFAULT_PAD_LANGUAGE].find(name => name && (!offered.length || offered.includes(name))) ?? offered[0];
+    api.setPadLanguage(first)?.catch?.(() => {});
+  }, [needsLanguage, api, optionsKey]);
   // While the interviewer is still setting a share up on their side, nothing shows here, as on a
   // real call: the layout changes only when the content arrives. state.sharing is not displayed.
   const presenting = !!screen || padOpen;
@@ -555,7 +561,7 @@ export default function InCall({ state, api }) {
               </div>
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
                 {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} visual={screen.visual} className="min-h-0 min-w-0 flex-1 basis-0" />}
-                {padOpen && <CodingPad key="pad" lang={pad.lang || ''} choice={pad.choice || ''} onChooseLanguage={canChooseLanguage ? chooseLanguage : undefined} initialText={pad.text || ''} disabled={interviewerLeft} typerRef={typerRef}
+                {padOpen && <CodingPad key="pad" lang={pad.lang || ''} choice={pad.choice || ''} options={padOptions} onChooseLanguage={canChooseLanguage ? chooseLanguage : undefined} initialText={pad.text || ''} disabled={interviewerLeft} typerRef={typerRef}
                   onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}
               </div>
             </div>

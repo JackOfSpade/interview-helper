@@ -189,6 +189,13 @@ export default [
       for (const leaked of ['SECRETMARK', 'CAREERMARK']) assert.equal(prompt.includes(leaked), false, leaked);
       assert.equal(/resume|résumé|\bcv\b|career|candidate|applicant history/i.test(prompt.replace(/Acme builds[\s\S]*?Benefits\./, '').replace(/https:\/\/acme\.example\.test\/careers/g, '')), false);
       assert.match(prompt, /no information about any person/);
+      assert.ok(!/typed-job-specifics/.test(prompt), 'no specifics, no section');
+      // Specifics of the job that the intake picked out of the typed text (a language, a level) reach the listing writer, fenced.
+      const specific = fakeCall({ 'typed-job-intake': intakeTarget({ specifics: '  C++,   senior ' }), 'typed-job-research': researchText, 'typed-job-listing': { title: 't', location: '', listingText: LISTING } });
+      await resolveTypedJob({ text: 'senior C++ Widget Engineer at Acme. My resume is SECRETMARK', callText: specific.callText, readPage: pageReader({}) });
+      const withSpecifics = specific.calls.find(c => c.claudeStage === 'typed-job-listing').prompt;
+      assert.ok(/<untrusted-typed-job-specifics-[^>]*>\s*C\+\+, senior\s*</.test(withSpecifics) && /do not limit the listing/.test(withSpecifics) && !withSpecifics.includes('SECRETMARK'));
+      assert.match(specific.calls[0].prompt, /"specifics"[\s\S]*Never put anything about the person there/);
       assert.match(prompt, /requisition/);
       assert.match(prompt, /Do not copy another company/);
     },
@@ -227,6 +234,8 @@ export default [
       assert.ok(calls[1].prompt.includes(vague) && /<untrusted-typed-job-description-/.test(calls[1].prompt));
       assert.match(calls[1].prompt, /"basis"/);
       assert.ok(calls[2].prompt.includes('Widget Reliability Engineer'), 'the listing is written for the role the research chose');
+      // The listing writer never gets the typed words, only the job specifics the intake picked out of them.
+      assert.ok(!calls[2].prompt.includes(vague) && !/typed-job-(description|specifics)/.test(calls[2].prompt));
       // Without a basis from the research, a plain note still says what was chosen.
       const bare = fakeCall({ 'typed-job-intake': intakeTarget({ inferred: true }), 'typed-job-research': research(), 'typed-job-listing': { title: '', location: '', listingText: LISTING } });
       const fallback = await resolveTypedJob({ text: vague, callText: bare.callText, readPage: pageReader({}) });

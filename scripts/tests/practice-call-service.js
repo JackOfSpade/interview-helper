@@ -3571,6 +3571,68 @@ test('pad: the candidate picks a listed language, which is published and kept in
   assert.equal(record.pad.lang, '');
 });
 
+test('pad: an exercise that allows several languages offers only those, and takes a pick only among them', async () => {
+  const problem = (ref, question, extra) => ({ ref, question, language: '', parts: [{ title: `Task ${ref}`, content: `Do ${ref}.` }], solution: 'Do it.', edgeCases: [], hints: [], ...extra });
+  const setup = panelHarness({ plan: drawn => soloPlan(drawn, { problems: [problem('p1', 1, { languages: ['C', 'C++'] }), problem('p2', 1, {})] }) });
+  setup.overrides.loadCards = async () => PLAN_CARDS;
+  const { service, deps } = await panelStart(setup);
+  await service.answer();
+  const emit = setup.engineOptions[0].onEvent;
+  emit({ type: 'pad', open: true, lang: 'C', atMs: 100 });
+  assert.deepEqual([service.getState().pad.lang, service.getState().pad.options], ['', []], 'two problems and none shown yet: no label, every language');
+  assert.equal(service.setPadLanguage('Python').pad.choice, 'Python');
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 200 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'the problem on screen allows two');
+  assert.equal(service.getState().pad.choice, '', 'a pick that is not offered is dropped');
+  assert.equal(service.setPadLanguage('Python').pad.choice, '', 'only an offered language');
+  assert.equal(service.setPadLanguage('c++').pad.choice, 'C++');
+  emit({ type: 'screen-stop', atMs: 300 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'the pad outlives its screen');
+  // A part shown with a picture's lead line above it (the prepared text, not the plan's) still names its problem.
+  emit({ type: 'screen', title: 'Task p2', content: 'Do p2.', speakerId: 'A', atMs: 320 });
+  assert.deepEqual(service.getState().pad.options, []);
+  setup.engineOptions[0].prepared.p1.parts[0].content = 'Look at the diagram.\n\nDo p1.';
+  emit({ type: 'screen', title: 'Task p1', content: 'Look at the diagram.\n\nDo p1.', speakerId: 'A', atMs: 340 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'matched by the text as shown');
+  emit({ type: 'screen', title: 'Task p2', content: 'Do p2.', speakerId: 'A', atMs: 400 });
+  assert.deepEqual([service.getState().pad.options, service.getState().pad.choice], [[], 'C++'], 'an open exercise offers every language again and keeps the pick');
+  // A screen the interviewer wrote while the pad is open is taken as part of the same exercise: the limit stays.
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 500 });
+  emit({ type: 'screen', title: 'Follow-up', content: 'Now make it reentrant.', speakerId: 'A', atMs: 520 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'a follow-up screen keeps the limit');
+  // Opening the open pad again with a screen of the interviewer's own starts a new exercise, whichever tag came first.
+  emit({ type: 'pad', open: true, lang: '', atMs: 522 });
+  assert.deepEqual(service.getState().pad.options, [], 'reopened for the interviewer\'s own screen');
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 524 });
+  emit({ type: 'pad', open: true, lang: '', atMs: 526 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++'], 'reopened on the prepared exercise: still limited');
+  emit({ type: 'screen', title: 'Own exercise', content: 'Parse a date.', speakerId: 'A', atMs: 528 });
+  assert.deepEqual(service.getState().pad.options, [], 'the screen right after a reopen is the new exercise');
+  // Moving on to another planned question ends the exercise too: a screen of their own after it is not a follow-up.
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 530 });
+  setup.clock.setNow(setup.clock.now() + 5000);
+  emit({ type: 'screen-stop', atMs: 532 });
+  emit({ type: 'question-asked', kind: 'question-asked', number: 3 });
+  assert.deepEqual(service.getState().pad.options, [], 'another planned question was asked');
+  emit({ type: 'screen', title: 'A sketch', content: 'Draw the flow.', speakerId: 'A', atMs: 534 });
+  assert.deepEqual(service.getState().pad.options, []);
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 536 });
+  emit({ type: 'screen', title: 'Follow-up', content: 'Now make it reentrant.', speakerId: 'A', atMs: 538 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++']);
+  // Closing the pad ends the exercise: a pad opened for a screen of the interviewer's own offers every language.
+  emit({ type: 'pad', open: false, atMs: 540 });
+  emit({ type: 'screen', title: 'Something else', content: 'Sketch a parser.', speakerId: 'A', atMs: 560 });
+  emit({ type: 'pad', open: true, lang: '', atMs: 580 });
+  assert.deepEqual(service.getState().pad.options, [], 'a new exercise of the interviewer\'s own is not limited');
+  // And a prepared exercise that is still on screen when the pad is reopened limits it again.
+  emit({ type: 'pad', open: false, atMs: 600 });
+  emit({ type: 'screen', title: 'Task p1', content: 'Do p1.', speakerId: 'A', atMs: 620 });
+  emit({ type: 'pad', open: true, lang: '', atMs: 640 });
+  assert.deepEqual(service.getState().pad.options, ['C', 'C++']);
+  await service.hangUp();
+  assert.equal((await deps.store.readRecord('call-1')).pad.chosen, 'C++');
+});
+
 test('history: timesAsked reaches the prompt options and a failing read never stops the call', async () => {
   const history = memoryHistory({ 'node-1': { q1: 2, q3: 1 } });
   const harness = recordingPrompts();
@@ -3672,14 +3734,14 @@ test('the shared screen and the pad appear in the published state with the prese
   await service.answer();
   const first = service.getState();
   assert.equal(first.screen, null);
-  assert.deepEqual(first.pad, { open: false, lang: '', text: '', choice: '' });
+  assert.deepEqual(first.pad, { open: false, lang: '', text: '', choice: '', options: [] });
   box.emit({ type: 'screen', title: 'Two sum', content: 'Find a pair.', speakerId: 'A', atMs: 1000 });
   const shown = service.getState().screen;
   assert.deepEqual({ title: shown.title, content: shown.content, speakerId: shown.speakerId }, { title: 'Two sum', content: 'Find a pair.', speakerId: 'A' });
   assert.equal(typeof shown.presenterName, 'string');
   assert.ok(shown.presenterName.length > 0, 'the lead is named');
   box.emit({ type: 'pad', open: true, lang: 'python', atMs: 1100 });
-  assert.deepEqual(service.getState().pad, { open: true, lang: 'python', text: '', choice: '' });
+  assert.deepEqual(service.getState().pad, { open: true, lang: 'python', text: '', choice: '', options: [] });
   box.emit({ type: 'screen-stop', atMs: 2000 });
   assert.equal(service.getState().screen, null);
   box.emit({ type: 'pad', open: false, atMs: 2100 });
