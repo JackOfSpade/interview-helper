@@ -4257,7 +4257,7 @@ test('plan: the engine gets the prepared problems by reference, and none when th
   }) });
   const first = await panelStart(withProblems);
   await first.service.answer();
-  assert.deepEqual(withProblems.engineOptions[0].prepared, { p1: { parts: [{ title: 'Task', content: 'Add two numbers.' }, { title: 'Example', content: 'add(1, 2) returns 3.' }] } }, 'only what the screen shows, never the solution');
+  assert.deepEqual(withProblems.engineOptions[0].prepared, { p1: { question: 1, parts: [{ title: 'Task', content: 'Add two numbers.' }, { title: 'Example', content: 'add(1, 2) returns 3.' }] } }, 'only what the screen shows, never the solution');
   const main = withProblems.built.find(item => item.kind === 'main');
   assert.equal(main.options.callPlan.problems[0].solution, 'return a + b', 'the solution goes to the interviewer prompt only');
 

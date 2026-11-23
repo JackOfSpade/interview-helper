@@ -17,6 +17,11 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   typingExpireMs: 6000,
   padIdleMs: 12000, // the candidate stopped typing in the coding pad this long ago: the interviewer, who can see it, gets one look
   padProgressMs: 25000, // while the pad keeps changing, the interviewer sees it this often (from the last time it had the text)
+  // The pad changed this recently when a candidate turn begins: they are still typing as they speak or just after. The
+  // wand types a key every 45 to 140 ms and a line end in under half a second; a person pausing to think stops longer.
+  // Heard 2026-11-22 (call-mwsri09o-h5eah0): the candidate said "I'll add that as a comment" and kept typing, and the
+  // interviewer, told nothing of it, asked about the half-typed code at once; the typing stopped and was never finished.
+  padTypingMs: 2500,
   turnTimeoutMs: 20000,
   classifierTimeoutMs: 2500,
   voiceGateMs: 1200,
@@ -108,6 +113,11 @@ export function joinPauseMs(text) {
 
 // Fallback if the helper never reports `cancelled` for a stopped utterance.
 const CANCEL_WAIT_MS = 500;
+// How many interviewer replies the note that the candidate's pad work was left unfinished goes with: the reply that
+// stopped them and the next two. By then the interviewer has handed back or moved on, and saying it again is noise.
+const PAD_HALT_TURNS = 3;
+// Listening sounds of five letters or more that every reaction may reuse (see repeatsRecentReaction).
+const BACKCHANNEL_WORDS = new Set(['right', 'alright', 'allright']);
 const OFFSET_WINDOW_MS = 2000;
 const START_WATCH_MS = 3000;
 // A look at live speech that cannot be sent yet (a reply is being made, no words yet) is tried again this often.
@@ -302,6 +312,10 @@ export function createPracticeCallEngine({
   let padDirty = false; // the pad was edited (live) since the interviewer last received its text
   let padDirtySince = null; // clock ms of the first such edit
   let padSentAt = null; // clock ms the interviewer last received the pad text, by any route
+  // The pad text as it stood when an interviewer began speaking while the candidate was still typing in it (they stop
+  // to listen); null once the pad changes again or closes. While it stands, the work in the pad was left unfinished.
+  let padHaltText = null;
+  let padHaltReplies = 0; // interviewer replies heard since then; the note stops after a few (the interviewer has decided)
   let screenShown = null; // { title, content, speakerId } while the interviewer shares their screen
   let padState = { open: false, lang: '' };
   let cutOffNote = null; // prefix for the next main message after a partial main failure
@@ -739,6 +753,10 @@ export function createPracticeCallEngine({
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
         ...(padText !== padSent ? { padText } : {}),
         ...(quiet !== null && !greeting ? { quietMs: quiet } : {}),
+        // Still typing as this line ends, or work left unfinished when an interviewer spoke over the typing: both are
+        // what an interviewer watching the pad would see. Pad progress looks carry their own note.
+        ...(!reply.padProgress && padTypingNow() ? { padTyping: true } : {}),
+        ...(!reply.padProgress && !padTypingNow() && padHalted() ? { padHalted: true } : {}),
       };
       reply.padSnapshot = padText;
       reply.padCarried = padText !== padSent && pausedAck === null;
@@ -746,7 +764,9 @@ export function createPracticeCallEngine({
       reply.rawCandidateText = text; // what a later look compares with (recognised words, as candidateText gives them)
       // A silence prompt or pad progress answers nothing the candidate said, so there is nothing to acknowledge first.
       // Nor does a cut-in: the interviewer is taking the floor, not reacting to a finished answer.
-      const withOpener = !reply.checkIn && !reply.padProgress && !handover && !cutInCheck;
+      // Nor a line said while the candidate is still typing: a reaction is the interviewer taking the floor, and the
+      // candidate stops typing to listen. Whether to speak into their work at all is the main reply's call.
+      const withOpener = !reply.checkIn && !reply.padProgress && !handover && !cutInCheck && !base.padTyping;
       reply.pausedAck = pausedAck;
       reply.messages = {
         // The short opening reaction never needs the pad's code or the unheard rest of a cut-off reply, so only the main message carries them.
@@ -1236,7 +1256,16 @@ export function createPracticeCallEngine({
     return { title: String(part.title ?? ''), content: part.content, ...(part.visual?.id ? { visualId: String(part.visual.id) } : {}) };
   }
 
-  function noteUnknownScreen(reply, ref) {
+  /** The plan question (1 or more) the prepared problem a reference names belongs to, or null. */
+  function preparedQuestion(ref) {
+    const text = String(ref ?? '').trim();
+    const dot = text.lastIndexOf('.');
+    const key = dot > 0 && /^\d+$/.test(text.slice(dot + 1)) ? text.slice(0, dot) : text;
+    const number = prepared && Object.hasOwn(prepared, key) ? prepared[key]?.question : null;
+    return Number.isInteger(number) && number >= 1 ? number : null;
+  }
+
+    function noteUnknownScreen(reply, ref) {
     if (!reply.unknownScreens.includes(ref)) reply.unknownScreens.push(ref);
     if (reply.committed && !unknownScreens.includes(ref)) unknownScreens.push(ref);
   }
@@ -1288,6 +1317,7 @@ export function createPracticeCallEngine({
   function emitPad(control, atMs) {
     // Opening an open pad keeps its text; a label given again replaces the old one.
     padState = control.open ? { open: true, lang: control.lang || (padState.open ? padState.lang : '') } : { open: false, lang: padState.lang };
+    if (!padState.open) padHaltText = null;
     emit({ type: 'pad', open: padState.open, lang: padState.lang, atMs });
   }
 
@@ -1515,7 +1545,10 @@ export function createPracticeCallEngine({
     // Heard 2026-11-22: "all followed", "I followed all of that", "I followed that" in three reactions running, and
     // "Sure, happy to" twice. A reaction that reuses a word of five or more letters (in any ending) from one of the
     // last few is dropped too; the short sounds every reaction is made of ("okay", "yeah", "sure", "mm-hm") stay free.
-    const stems = line => words(line).map(word => word.replace(/'/gu, '').replace(/(?:ing|ed|es|s)$/u, '')).filter(stem => stem.length >= 5);
+    // "Right" and "alright" are such sounds too, though five letters long: heard 2026-11-22 (call-mwsri09o-h5eah0),
+    // "Right, that landed fine." was dropped for the "right" in an earlier "Right, I followed all of that.", and the
+    // interviewer was silent 5.6 s while the main reply was written. The two-word opening check still stops a repeat.
+    const stems = line => words(line).map(word => word.replace(/'/gu, '').replace(/(?:ing|ed|es|s)$/u, '')).filter(stem => stem.length >= 5 && !BACKCHANNEL_WORDS.has(stem));
     const used = new Set(recent.flatMap(item => stems(item.text)));
     return stems(written).some(stem => used.has(stem));
   }
@@ -1637,6 +1670,15 @@ export function createPracticeCallEngine({
                 const found = resolvePrepared(shown.ref);
                 if (!found) { noteUnknownScreen(reply, String(shown.ref)); continue; }
                 shown = { ...found, delaySeconds: shown.delaySeconds };
+                // A prepared problem belongs to a plan question, so showing it asks that question even when the reply
+                // left out its <asked> tag. Seen 2026-11-22 (call-mwsri09o-h5eah0): a colleague shared the exercise for
+                // a topic card with no tag, and the review listed the exercise as never asked.
+                const number = preparedQuestion(item.screen.ref);
+                if (number !== null && !reply.asked.includes(number) && !askedQuestions.includes(number)) {
+                  reply.asked.push(number);
+                  if (!Number.isInteger(reply.planNumber)) reply.planNumber = number;
+                  if (reply.committed) { latestPlanNumber = number; lastPlanNumber = number; noteAsked(reply); }
+                }
               }
               const control = {
                 kind: 'screen', speakerId: writerNow(reply),
@@ -2183,6 +2225,7 @@ export function createPracticeCallEngine({
         // An interviewer has the floor: the candidate gives way like a person, after a reaction time. A voice line
         // stops at a word boundary (yieldInjected); the window's wand typing in the pad stops the same way.
         const yieldMs = yieldDelayMs();
+        if (padTypingNow()) { padHaltText = padText; padHaltReplies = 0; } else if (padHaltText !== null) padHaltReplies += 1;
         emit({ type: 'floor', speakerId: reply.writer ?? null, yieldMs: Math.round(yieldMs) });
         yieldInjected(yieldMs);
       }
@@ -2652,6 +2695,16 @@ export function createPracticeCallEngine({
    * Not a check-in (not counted, nothing acknowledged first). When it is held back (the interviewer speaking,
    * a reply being made, the candidate speaking, a pause) it is simply tried again when that ends, so at most one is pending.
    */
+  /** The candidate is typing in the open pad right now (it changed within padTypingMs). */
+  function padTypingNow() {
+    return padState.open && !paused && padEditedAt !== null && now() - padEditedAt < th.padTypingMs;
+  }
+
+  /** The work in the pad stopped when an interviewer began speaking over the typing, and the pad has not changed since. */
+  function padHalted() {
+    return padState.open && padHaltText !== null && padHaltText === padText && padHaltReplies < PAD_HALT_TURNS;
+  }
+
   function padProgressDueAt() {
     if (!padDirty || !padText || padText === padSent || padEditedAt === null) return null;
     const base = Math.max(padSentAt ?? -Infinity, padDirtySince ?? -Infinity);
@@ -3695,6 +3748,7 @@ export function createPracticeCallEngine({
     const next = String(value ?? '').slice(0, PAD_TEXT_CAP);
     if (next === padText) return;
     padText = next;
+    padHaltText = null; // they went back to it
     // An edit during a pause or before the call is live opens no burst: the text simply goes with the next turn.
     if (phase === 'ended' || phase === 'connecting' || paused) return;
     padEditedAt = now();

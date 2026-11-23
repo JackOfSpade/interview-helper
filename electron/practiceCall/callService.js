@@ -1393,7 +1393,8 @@ export function createPracticeCallService(deps = {}) {
         persona, factory, panel,
         picked: (plan.questions || []).map(question => question.number).filter(number => number >= 1),
         joinDraws: panel.map(entry => ({ joins: entry.joins, joinDelayMs: entry.joinDelayMs })),
-        prepared: Object.fromEntries((plan.problems || []).map(problem => [problem.ref, { parts: problem.parts.map(part => ({ title: part.title, content: part.content })) }])),
+        // The plan question each problem belongs to goes with it: showing it asks that question (see the engine).
+        prepared: Object.fromEntries((plan.problems || []).map(problem => [problem.ref, { question: problem.question, parts: problem.parts.map(part => ({ title: part.title, content: part.content })) }])),
         setup: {
           plan,
           planAttempts: (planned.attempts || []).map(item => item?.problems).filter(problems => Array.isArray(problems) && problems.length),

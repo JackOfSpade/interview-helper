@@ -200,7 +200,7 @@ const test = (name, run) => suite.push({ name: `interview practice engine: ${nam
 
 test('exports the default thresholds and does no direct timing or I/O', () => {
   assert.deepEqual({ ...DEFAULT_CALL_THRESHOLDS }, {
-    speculateMs: 500, commitMs: 1200, interruptWords: 2, interruptMs: 700, silencePromptMs: 20000, typingExpireMs: 6000, padIdleMs: 12000, padProgressMs: 25000, turnTimeoutMs: 20000, classifierTimeoutMs: 2500,
+    speculateMs: 500, commitMs: 1200, interruptWords: 2, interruptMs: 700, silencePromptMs: 20000, typingExpireMs: 6000, padIdleMs: 12000, padProgressMs: 25000, padTypingMs: 2500, turnTimeoutMs: 20000, classifierTimeoutMs: 2500,
     voiceGateMs: 1200,
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
     smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
@@ -574,6 +574,15 @@ test('an opener that reuses a longer word of a recent reaction, in any ending, i
   assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text]), [
     ['spoken', 'Okay, all followed.'], ['dropped', 'Right, I follow you.'], ['spoken', 'Mm-hm, okay.'], ['spoken', 'Sure, happy to.'], ['dropped', 'Glad, happy to.'],
   ]);
+});
+
+test('an opener may reuse "right": it is a listening sound, not a word to vary (call of 2026-11-22: 5.6 s of silence)', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await answerTurn(rig, 'Go on.', 'Right, I followed all of that.');
+  await answerTurn(rig, 'Go on.', 'Okay, got it.');
+  await answerTurn(rig, 'Go on.', 'Right, that landed fine.');
+  assert.deepEqual(rig.of('opener').map(event => event.outcome), ['spoken', 'spoken', 'spoken']);
 });
 
 test('an opener whose later sentence repeats a recent reaction is cut there, and what came before is still said', async () => {
@@ -3598,6 +3607,117 @@ test('pad idle: an unchanged-since-received or emptied pad sends nothing', async
 });
 
 // Pad progress: periodic looks while the pad keeps changing.
+// Still typing as a line ends, and work left unfinished when an interviewer spoke over the typing (call of 2026-11-22:
+// the interviewer asked about half-typed code at once, the typing stopped and nobody went back to it).
+async function openPad(rig) {
+  await deliver(rig, 'Write it in the pad.[[pad-open:python]]');
+  await rig.clock.advance(PAD_IDLE * 3); // anything the greeting left behind has run
+}
+const spokenTurns = rig => rig.options.filter(option => option.padProgress === undefined && typeof option.candidateText === 'string' && option.candidateText);
+
+test('pad typing: a line said while the pad is still changing is marked, and gets no quick reaction first', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await openPad(rig);
+  const openers = rig.sessions.opener.calls.length;
+  rig.engine.setPadText('def total(items):');
+  await speak(rig, 'and now I add the loop', 'typing');
+  await rig.clock.advance(600);
+  const turn = spokenTurns(rig).at(-1);
+  assert.equal(turn.padTyping, true, JSON.stringify(turn));
+  assert.equal(turn.padHalted, undefined);
+  await rig.clock.advance(1200);
+  assert.equal(rig.sessions.opener.calls.length, openers, 'no opener while the candidate is typing');
+});
+
+test('pad typing: a pad left alone for longer than padTypingMs is not typing, and the opener runs as usual', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await openPad(rig);
+  rig.engine.setPadText('def total(items):');
+  await rig.clock.advance(DEFAULT_CALL_THRESHOLDS.padTypingMs);
+  const openers = rig.sessions.opener.calls.length;
+  await speak(rig, 'I think that is it', 'done');
+  await rig.clock.advance(600);
+  const turn = spokenTurns(rig).at(-1);
+  assert.equal(turn.padTyping, undefined);
+  assert.equal(turn.padHalted, undefined);
+  await rig.clock.advance(1200);
+  assert.equal(rig.sessions.opener.calls.length, openers + 1);
+});
+
+test('pad halted: an interviewer speaking over the typing leaves a note on the next turns until the pad changes', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await openPad(rig);
+  rig.engine.setPadText('-- portable version:\n-- SELECT');
+  await speak(rig, 'I will add that as a comment', 'c1');
+  await rig.clock.advance(600);
+  rig.sessions.main.answer('Why row number and not rank?');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(700);
+  let id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started'); // the pad changed under 2.5 s ago: the candidate stops typing to listen
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  await rig.clock.advance(PAD_IDLE * 2);
+  await speak(rig, 'rank would keep ties, so two rows could come back for one database', 'c2');
+  await rig.clock.advance(1800);
+  let turn = spokenTurns(rig).at(-1);
+  assert.equal(turn.padHalted, true, JSON.stringify(turn));
+  assert.equal(turn.padTyping, undefined);
+  rig.sessions.opener.answer('Mm-hm.');
+  await flush();
+  rig.sessions.main.answer('Fair enough.');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(700);
+  id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started');
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  rig.engine.setPadText('-- portable version:\n-- SELECT db_name'); // back at it
+  await rig.clock.advance(PAD_IDLE * 2);
+  await speak(rig, 'so that is the portable one finished as well', 'c3');
+  await rig.clock.advance(1800);
+  turn = spokenTurns(rig).at(-1);
+  assert.equal(turn.padHalted, undefined, 'the candidate went back to the pad');
+});
+
+test('pad halted: the note goes with the reply that stopped the typing and the next two only', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await openPad(rig);
+  rig.engine.setPadText('SELECT');
+  await speak(rig, 'I will write the query now', 'h0');
+  await rig.clock.advance(600);
+  rig.sessions.main.answer('Quick one first.');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(700);
+  rig.h.playback(`utt${rig.streams.length}`, 'started');
+  rig.h.playback(`utt${rig.streams.length}`, 'finished', 1500);
+  await flush();
+  const halted = [];
+  for (let i = 1; i <= 4; i += 1) {
+    await rig.clock.advance(PAD_IDLE * 2);
+    await speak(rig, `this is my answer number ${i} to your question`, `h${i}`);
+    await rig.clock.advance(1800);
+    halted.push(spokenTurns(rig).at(-1).padHalted === true);
+    rig.sessions.opener.answer('Mm-hm.');
+    await flush();
+    rig.sessions.main.answer('Next question then.');
+    rig.streams.at(-1).audio(1000);
+    await flush();
+    await rig.clock.advance(700);
+    rig.h.playback(`utt${rig.streams.length}`, 'started');
+    rig.h.playback(`utt${rig.streams.length}`, 'finished', 1500);
+    await flush();
+  }
+  assert.deepEqual(halted, [true, true, true, false]);
+});
+
 const PAD_PROGRESS = DEFAULT_CALL_THRESHOLDS.padProgressMs;
 const listenReply = async rig => { rig.sessions.main.answer('<listen/>', { chunks: ['<listen/>'] }); await flush(); };
 
@@ -6064,6 +6184,18 @@ test('prepared screen: a reference resolves to the part title and content; p1 is
   assert.deepEqual(rig.engine.state().screen, { title: 'Follow-up', content: 'Now sort them.', speakerId: 'A' });
   assert.equal(rig.of('screen')[0].delayMs, 6000, 'first share keeps the default set-up time');
   assert.equal(rig.of('screen')[1].delayMs, 1000, 'a swap takes the delay the interviewer wrote');
+});
+
+test('prepared screen: showing the problem of a plan question counts that question asked, tag or not', async () => {
+  // Call of 2026-11-22: a colleague shared the exercise for a topic card without an asked tag, and the review listed it unasked.
+  const rig = preparedRig({ prepared: { p1: { question: 4, parts: PREPARED.p1.parts }, p2: { question: 0, parts: PREPARED.p1.parts } } });
+  await greet(rig);
+  await deliver(rig, 'Have a look.[[ref:p1]]');
+  assert.deepEqual(rig.engine.state().askedQuestions, [4]);
+  assert.deepEqual(rig.of('question-asked').map(event => event.number), [4]);
+  await deliver(rig, 'Part two.[[ref:p1.2]]');
+  await deliver(rig, 'Your own one.[[ref:p2]]');
+  assert.deepEqual(rig.engine.state().askedQuestions, [4], 'once only, and never for the interviewer\'s own question');
 });
 
 test('prepared screen: the first share gives the setup gap in the voice log, like a written screen', async () => {

@@ -125,6 +125,10 @@ const base = [
       // The acknowledgement session never chooses a temperament: it is told the manner and how the voice sounds.
       assert(opener.includes('listening sounds of an interviewer') && opener.endsWith('Reply only READY now.') && opener.includes('Manner: professional and even;'));
       assert(!buildInterviewerInstructions({ persona, brief, plan }).includes('YOUR VOICE'));
+      // After speaking over unfinished work (an answer or code in the pad), the interviewer settles what happens to the rest.
+      const rules = buildInterviewerInstructions({ persona, brief, plan });
+      assert(rules.includes('[coding pad: the candidate is still typing as this line ends]') && rules.includes('settle what happens to the unfinished work'));
+      assert(rules.includes('the answer you cut into is unfinished') && rules.includes('never leave it hanging'));
     },
   },
   {
@@ -144,6 +148,12 @@ const base = [
       const all = formatTurnMessage({ elapsedMs: 1_000, candidateText: 'y', acknowledgements: ['yeah'], interruption: { heardText: 'abc' } });
       assert(all.indexOf('acknowledgements') < all.indexOf('interrupted') && all.indexOf('interrupted') < all.indexOf('Candidate:'));
       assert(!formatTurnMessage({ elapsedMs: 0, candidateText: 'z' }).includes('acknowledgements'));
+      // Still typing as the line ends, or the work in the pad left as it was when an interviewer spoke over the typing.
+      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'now the loop', padTyping: true }),
+        "[elapsed 00:00] [coding pad: the candidate is still typing as this line ends] Candidate: 'now the loop'");
+      assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'rank keeps ties', padHalted: true }),
+        "[elapsed 00:00] [coding pad: the candidate stopped typing when an interviewer began speaking over their work and has not typed since, so the pad is as they left it] Candidate: 'rank keeps ties'");
+      assert(!formatTurnMessage({ elapsedMs: 0, candidateText: 'x', padTyping: true, padHalted: true }).includes('stopped typing'), 'typing again wins');
     },
   },
   {
