@@ -346,7 +346,7 @@ export function stampInjectedLines(transcript, spans) {
 
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, level: 0, speaking: null, candidateSpeaking: false,
+    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, microphoneFailed: false, microphoneNeedsRejoin: false, microphoneReconnecting: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '', choice: '' },
@@ -1020,6 +1020,17 @@ export function createPracticeCallService(deps = {}) {
     // (found 2026-11-21: every call had run unheard and nothing on screen told the candidate).
     if (event?.type === 'muted-speech') { if (state.muted && self.inCall && !self.finished) noteMutedHint('speech'); return; }
     if (event?.type === 'status' && event.state === 'ready') { state.microphoneUnavailable = event.microphone === false; publish(); }
+    // The microphone stopped working, or came back after Reconnect: the call goes on either way, and the window says which.
+    if (event?.type === 'status' && event.state === 'microphone') {
+      state.microphoneUnavailable = !event.available;
+      state.microphoneFailed = !event.available && !event.reason;
+      // Reconnecting cannot help in this call: the window says to rejoin and offers no Reconnect.
+      state.microphoneNeedsRejoin = !event.available && event.reason === 'rejoin';
+      state.microphoneReconnecting = false;
+      if (self.reconnectTimer !== undefined) { clock.clearTimeout?.(self.reconnectTimer); self.reconnectTimer = undefined; }
+      publish();
+      return;
+    }
     if (event?.type === 'level') { state.level = Math.max(0, Math.min(1, Number(event.rms) || 0)); publish(); }
     if (event?.type === 'vad') {
       self.candidateVad = !!event.speaking;
@@ -2933,6 +2944,23 @@ export function createPracticeCallService(deps = {}) {
       dbg('user', { action: 'window-closed' });
       chooseFeedback(false);
       return call && !call.finished ? finishCall('window-closed', { analyze: false }) : snapshot();
+    },
+    // The microphone stopped working (or access was refused, then granted): ask the audio helper to try it again.
+    reconnectMicrophone: () => {
+      dbg('user', { action: 'reconnect-microphone' });
+      const self = call;
+      if (!self || self.finished || !state.microphoneUnavailable || state.microphoneReconnecting || state.microphoneNeedsRejoin) return snapshot();
+      let sent = false;
+      try { sent = self.helper?.reconnectMicrophone?.() === true; } catch { sent = false; }
+      if (!sent) return snapshot();
+      state.microphoneReconnecting = true;
+      // The helper always answers; this only keeps the button from spinning forever if it never does.
+      self.reconnectTimer = clock.setTimeout(() => {
+        self.reconnectTimer = undefined;
+        if (call === self && state.microphoneReconnecting) { state.microphoneReconnecting = false; publish(); }
+      }, 15000);
+      publish();
+      return snapshot();
     },
     setMuted: muted => {
       dbg('user', { action: 'mute', muted: !!muted });

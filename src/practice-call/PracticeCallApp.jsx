@@ -122,6 +122,7 @@ export default function PracticeCallApp() {
       // Without it the pad shows no Language dropdown (missing from this list in the call of 2026-11-22).
       ...(typeof readApi()?.setPadLanguage === 'function' ? { setPadLanguage: name => invoke('setPadLanguage', name) } : {}),
       openMicrophoneSettings: () => invoke('openMicrophoneSettings'),
+      ...(typeof readApi()?.reconnectMicrophone === 'function' ? { reconnectMicrophone: () => invoke('reconnectMicrophone') } : {}),
       ...(typeof readApi()?.getVoice === 'function' ? { getVoice: () => invoke('getVoice'), setVoice: gender => invoke('setVoice', gender) } : {}),
       // Testing aid: the button shows only when the bridge has the call.
       ...(typeof readApi()?.draftAnswer === 'function' ? { draftAnswer: () => invoke('draftAnswer') } : {}),

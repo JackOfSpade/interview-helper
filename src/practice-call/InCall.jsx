@@ -559,11 +559,17 @@ export default function InCall({ state, api }) {
         </section>}
       </div>}
     </div>
-    {/* macOS refused the microphone: the interviewer cannot hear the candidate, so the call says so the way a meeting app would. */}
-    {state?.microphoneUnavailable && <div role="alert" data-mic-unavailable="true" className="mx-auto mb-1 flex max-w-[640px] shrink-0 items-center gap-3 rounded-lg bg-[#3c4043] px-4 py-2 text-[13px] text-[#e8eaed]">
+    {/* No microphone (macOS refused it, or it stopped working): the call goes on, the interviewer cannot hear the candidate,
+        so the call says so the way a meeting app would and offers to reconnect. */}
+    {state?.microphoneUnavailable && <div role="alert" data-mic-unavailable={state.microphoneNeedsRejoin ? 'rejoin' : state.microphoneFailed ? 'failed' : 'denied'} className="mx-auto mb-1 flex max-w-[640px] shrink-0 items-center gap-3 rounded-lg bg-[#3c4043] px-4 py-2 text-[13px] text-[#e8eaed]">
       <MicOff size={16} aria-hidden="true" className="shrink-0 text-[#f28b82]" />
-      <span className="min-w-0 flex-1">Your microphone isn't available, so no one can hear you. Allow microphone access in System Settings, then rejoin.</span>
-      {typeof api?.openMicrophoneSettings === 'function' && <button type="button" onClick={() => { api.openMicrophoneSettings(); }} className="shrink-0 rounded-md px-2 py-1 font-medium text-[#8ab4f8] hover:bg-white/10">Open settings</button>}
+      <span className="min-w-0 flex-1">{state.microphoneNeedsRejoin
+        ? "Your microphone can't be used in this call, so no one can hear you. Leave and rejoin to be heard. You can still type in the chat."
+        : state.microphoneFailed
+          ? "Your microphone stopped working, so no one can hear you. Check it's connected, then reconnect. You can still type in the chat."
+          : "Your microphone isn't available, so no one can hear you. Allow microphone access in System Settings, then reconnect."}</span>
+      {!state.microphoneFailed && !state.microphoneNeedsRejoin && typeof api?.openMicrophoneSettings === 'function' && <button type="button" onClick={() => { api.openMicrophoneSettings(); }} className="shrink-0 rounded-md px-2 py-1 font-medium text-[#8ab4f8] hover:bg-white/10">Open settings</button>}
+      {!state.microphoneNeedsRejoin && typeof api?.reconnectMicrophone === 'function' && <button type="button" data-mic-reconnect="true" disabled={!!state.microphoneReconnecting} onClick={() => { api.reconnectMicrophone(); }} className="shrink-0 rounded-md px-2 py-1 font-medium text-[#8ab4f8] hover:bg-white/10 disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent">{state.microphoneReconnecting ? 'Reconnecting…' : 'Reconnect'}</button>}
     </div>}
     {shownHint && <p key={shownHint.id} role="status" data-muted-hint={shownHint.reason} className="pc-rise pointer-events-none fixed bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-lg bg-[#3c4043] px-4 py-2 text-[13px] text-[#e8eaed] shadow-lg">
       {shownHint.reason === 'speech' ? 'Are you talking? Your mic is off. Unmute to speak.' : "You're muted. Unmute to be heard."}

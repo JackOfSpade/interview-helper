@@ -132,6 +132,18 @@ export default [
       }
       assert.deepEqual(h.events, inputs);
       assert(h.events.every(event => !('extra' in event) && !('path' in event)));
+      // The microphone dropping out (or coming back) mid-call is passed on and leaves the helper ready: the call goes on.
+      h.send({ type: 'status', state: 'microphone', available: false, reason: 'failed', extra: 'x' });
+      h.send({ type: 'status', state: 'microphone', available: false, reason: 'denied' });
+      h.send({ type: 'status', state: 'microphone', available: false, reason: 'rejoin' });
+      h.send({ type: 'status', state: 'microphone', available: true, reason: 'denied' });
+      assert.deepEqual(h.events.slice(-4), [
+        { type: 'status', state: 'microphone', available: false },
+        { type: 'status', state: 'microphone', available: false, reason: 'denied' },
+        { type: 'status', state: 'microphone', available: false, reason: 'rejoin' },
+        { type: 'status', state: 'microphone', available: true },
+      ]);
+      assert.equal(h.helper.state().status, 'ready');
       const source = { type: 'vad', speaking: false, atMs: 1 };
       h.raw(`${JSON.stringify(source)}\n`);
       assert.notEqual(h.events.at(-1), source);
@@ -162,6 +174,7 @@ export default [
         { type: 'recording', state: 'open', durationMs: 1 }, { type: 'recording', state: 'closed', durationMs: -1 },
         { type: 'recording', state: 'closed' },
         { type: 'mystery', state: 'ready' }, { state: 'ready' }, { type: 5 },
+        { type: 'status', state: 'microphone' }, { type: 'status', state: 'microphone', available: 'no' },
       ];
       for (const value of bad) h.send(value);
       for (const text of ['null', '[]', '7', '"status"', 'not json', '{"type":"status"', '', '   ', '{"type":"vad","speaking":true,"atMs":1']) h.raw(`${text}\n`);
@@ -209,6 +222,7 @@ export default [
       const h = harness();
       assert.equal(h.helper.play('u1', 24000), false, 'commands before start are no-ops');
       assert.equal(h.helper.mute(true), false);
+      assert.equal(h.helper.reconnectMicrophone(), false);
       assert.throws(() => h.helper.play('bad id', 24000), TypeError);
       h.helper.start({ recordingPath: RECORDING });
       const child = h.children[0];
@@ -219,6 +233,7 @@ export default [
       assert.equal(h.helper.mute(true), true);
       assert.equal(h.helper.mute(false), true);
       assert.equal(h.helper.play('Utt_2-x', 44100), true);
+      assert.equal(h.helper.reconnectMicrophone(), true);
       assert.deepEqual(child.stdin.lines, [
         '{"type":"play","utteranceId":"u1","sampleRate":24000}\n',
         '{"type":"audio","utteranceId":"u1","pcm":"AQD/fw=="}\n',
@@ -227,6 +242,7 @@ export default [
         '{"type":"mute","muted":true}\n',
         '{"type":"mute","muted":false}\n',
         '{"type":"play","utteranceId":"Utt_2-x","sampleRate":44100}\n',
+        '{"type":"reconnect-microphone"}\n',
       ]);
       const before = child.stdin.lines.length;
       for (const id of ['', 'a b', 'a'.repeat(65), 'ü', 7, null, undefined, 'a\n']) {

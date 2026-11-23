@@ -196,6 +196,15 @@ export const presentingTests = [
         const refused = html({ ...PRESENT_STATE, microphoneUnavailable: true }, { openMicrophoneSettings: () => true });
         assert(refused.includes('data-mic-unavailable') && refused.includes('no one can hear you') && refused.includes('Open settings'), refused);
         assert(!/Interview Helper|practice/iu.test(refused.match(/data-mic-unavailable[^]*?<\/div>/u)[0]), 'the notice never names the app');
+        const api = { openMicrophoneSettings: () => true, reconnectMicrophone: () => true };
+        const failed = html({ ...PRESENT_STATE, microphoneUnavailable: true, microphoneFailed: true }, api);
+        assert(failed.includes('data-mic-unavailable="failed"') && failed.includes('stopped working') && failed.includes('>Reconnect<'), failed);
+        assert(!failed.includes('Open settings'), 'a broken microphone is not a settings problem');
+        const trying = html({ ...PRESENT_STATE, microphoneUnavailable: true, microphoneFailed: true, microphoneReconnecting: true }, api);
+        assert(trying.includes('Reconnecting…') && /data-mic-reconnect="true" disabled=""/u.test(trying), trying);
+        assert(html({ ...PRESENT_STATE, microphoneUnavailable: true }, api).includes('>Reconnect<'), 'a refused microphone can be reconnected once allowed');
+        const rejoin = html({ ...PRESENT_STATE, microphoneUnavailable: true, microphoneNeedsRejoin: true }, api);
+        assert(rejoin.includes('data-mic-unavailable="rejoin"') && rejoin.includes('rejoin to be heard') && !rejoin.includes('>Reconnect<') && !rejoin.includes('Open settings'), rejoin);
         const hinted = html({ ...PRESENT_STATE, muted: true, mutedHint: { id: 1, reason: 'speech' } });
         assert(hinted.includes('data-muted-hint="speech"') && hinted.includes('Your mic is off'), 'talking into a muted mic gets the hint');
         assert(html({ ...PRESENT_STATE, muted: true, mutedHint: { id: 2, reason: 'wand' } }).includes("You&#x27;re muted"), 'so does the wand pressed while muted');

@@ -1872,6 +1872,54 @@ test('a helper running without the microphone is shown on the call; one with the
   assert.equal(service.getState().microphoneUnavailable, false);
 });
 
+test('a microphone that stops working mid-call keeps the call going, and Reconnect asks the helper to try it again', async () => {
+  let helperEvent;
+  let reconnects = 0;
+  const { service } = await liveCall({ deps: {
+    helperFactory: ({ onEvent }) => {
+      helperEvent = onEvent;
+      return { start: async () => ({ ok: true }), play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, reconnectMicrophone: () => { reconnects += 1; return true; }, stop: async () => { onEvent({ type: 'recording', state: 'closed' }); } };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  assert.equal(service.reconnectMicrophone().microphoneReconnecting, false, 'nothing to reconnect while the microphone works');
+  assert.equal(reconnects, 0);
+  helperEvent({ type: 'status', state: 'microphone', available: false });
+  let state = service.getState();
+  assert.equal(state.phase, 'in-call', 'the call goes on');
+  assert.equal(state.error, null);
+  assert.equal(state.microphoneUnavailable, true);
+  assert.equal(state.microphoneFailed, true);
+  assert.equal(service.reconnectMicrophone().microphoneReconnecting, true);
+  assert.equal(service.reconnectMicrophone().microphoneReconnecting, true, 'a second press while trying is ignored');
+  assert.equal(reconnects, 1);
+  helperEvent({ type: 'status', state: 'microphone', available: false });
+  state = service.getState();
+  assert.equal(state.microphoneReconnecting, false, 'a failed reconnect frees the button');
+  assert.equal(state.microphoneUnavailable, true);
+  service.reconnectMicrophone();
+  helperEvent({ type: 'status', state: 'microphone', available: true });
+  state = service.getState();
+  assert.equal(state.phase, 'in-call');
+  assert.equal(state.microphoneUnavailable, false);
+  assert.equal(state.microphoneFailed, false);
+  assert.equal(state.microphoneReconnecting, false);
+  assert.equal(reconnects, 2);
+  // Access still refused when Reconnect is pressed: the notice keeps pointing at the settings.
+  helperEvent({ type: 'status', state: 'microphone', available: false, reason: 'denied' });
+  assert.equal(service.getState().microphoneFailed, false);
+  assert.equal(service.getState().microphoneUnavailable, true);
+  // Only a new call can use the microphone: the window says to rejoin and Reconnect does nothing more.
+  service.reconnectMicrophone();
+  helperEvent({ type: 'status', state: 'microphone', available: false, reason: 'rejoin' });
+  assert.equal(service.getState().microphoneNeedsRejoin, true);
+  assert.equal(service.getState().microphoneFailed, false);
+  const pressed = reconnects;
+  assert.equal(service.reconnectMicrophone().microphoneReconnecting, false);
+  assert.equal(reconnects, pressed);
+});
+
 test('the candidate tile lights for their microphone and for a line in their AI voice, even over the interviewer', async () => {
   let helperEvent;
   const { service, engine } = await liveCall({ deps: {

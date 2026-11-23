@@ -10,7 +10,7 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'ready', 'answer', 'decline', 'call-back', 'cancel-call-back', 'hang-up', 'leave', 'choose-feedback', 'set-muted', 'send-chat',
-  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'close', 'log-event',
+  'set-typing', 'set-paused', 'update-pad', 'draft-answer', 'get-prepared-cards', 'get-replay', 'delete-recording', 'open-microphone-settings', 'reconnect-microphone', 'close', 'log-event',
 ]);
 // The call window's own event lines kept for bug reports (newest last), in memory only.
 const WINDOW_EVENTS_KEPT = 300;
@@ -192,6 +192,7 @@ export function createPracticeCallController(deps = {}) {
     // Off unless the app passes it in: a unit suite must never open System Settings.
     async [WINDOW_PREFIX + 'open-microphone-settings']() { return typeof deps.openMicrophoneSettings === 'function' ? Boolean(await deps.openMicrophoneSettings()) : false; },
     // The candidate's own voice (female or male), the same setting as in the app's Settings. Off unless the app passes it in.
+    async [WINDOW_PREFIX + 'reconnect-microphone']() { return typeof service.reconnectMicrophone === 'function' ? service.reconnectMicrophone() : service.getState(); },
     async [WINDOW_PREFIX + 'get-voice']() { return typeof deps.getCandidateVoice === 'function' ? deps.getCandidateVoice() : null; },
     async [WINDOW_PREFIX + 'set-voice'](gender) {
       if (typeof deps.setCandidateVoice !== 'function') return null;

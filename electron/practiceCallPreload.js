@@ -52,6 +52,7 @@ const practiceCallAPI = Object.freeze({
   onReplayUpdated: cb => subscribe(`${PREFIX}replay-updated`, cb),
   deleteRecording: () => invoke('delete-recording'),
   openMicrophoneSettings: () => invoke('open-microphone-settings'),
+  reconnectMicrophone: () => invoke('reconnect-microphone'),
   getVoice: () => invoke('get-voice'),
   setVoice: gender => invoke('set-voice', gender === 'female' || gender === 'male' ? gender : fail('setVoice expects female or male')),
   close: () => invoke('close'),

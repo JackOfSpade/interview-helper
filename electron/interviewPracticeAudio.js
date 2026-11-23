@@ -41,6 +41,14 @@ function validateHelperEvent(value) {
   if (!isObject(value)) return null;
   switch (value.type) {
     case 'status':
+      // `microphone`: the microphone stopped working (available false; the call runs on silence) or came back after
+      // a reconnect (available true). The call goes on either way.
+      // `reason`: 'denied' while access is still refused (the window points at System Settings), 'rejoin' when only a new
+      // call can use the microphone (recognition could not be prepared when this one began).
+      if (value.state === 'microphone') {
+        return typeof value.available === 'boolean'
+          ? { type: 'status', state: 'microphone', available: value.available, ...(!value.available && (value.reason === 'denied' || value.reason === 'rejoin') ? { reason: value.reason } : {}) } : null;
+      }
       // `inject: true` on ready: the helper can mix a line into the microphone signal. Anything else is no capability.
       // `microphone: false` on ready: macOS refused the microphone and the helper runs on silence.
       return value.state === 'preparing' || value.state === 'ready'
@@ -175,7 +183,7 @@ export function createPracticeAudioHelper({
       return;
     }
     if (event.type === 'error') { fail(session, event.code); return; }
-    if (event.type === 'status') {
+    if (event.type === 'status' && event.state !== 'microphone') {
       state = { status: event.state === 'ready' ? 'ready' : 'starting', errorCode: null, message: '' };
       if (event.state === 'ready') session.canInject = event.inject === true;
     }
@@ -311,6 +319,13 @@ export function createPracticeAudioHelper({
     send(session, 'control', utteranceId, { type: 'resume', utteranceId });
     return true;
   };
+  /** Ask the helper to try the microphone again; it answers with a `microphone` status either way. */
+  const reconnectMicrophone = () => {
+    const session = current;
+    if (!session) return false;
+    send(session, 'control', null, { type: 'reconnect-microphone' });
+    return true;
+  };
   const mute = muted => {
     if (typeof muted !== 'boolean') throw new TypeError('muted must be a boolean.');
     const session = current;
@@ -363,5 +378,5 @@ export function createPracticeAudioHelper({
     return true;
   };
 
-  return Object.freeze({ start, play, pause, resume, pushAudio, endUtterance, cancel, mute, canInject, inject, injectAudio, injectEnd, injectCancel, stop, state: () => ({ ...state }) });
+  return Object.freeze({ start, play, pause, resume, pushAudio, endUtterance, cancel, mute, reconnectMicrophone, canInject, inject, injectAudio, injectEnd, injectCancel, stop, state: () => ({ ...state }) });
 }

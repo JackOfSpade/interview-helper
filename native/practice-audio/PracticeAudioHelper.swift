@@ -209,6 +209,8 @@ enum Command: Sendable {
     case injectAudio(id: String, pcm: Data)
     case injectEnd(id: String)
     case injectCancel(id: String, fadeMs: Int)
+    /// The candidate asked to try the microphone again after it stopped working (or after access was granted).
+    case reconnectMicrophone
     case stop
 
     static let maxLineBytes = 262_144
@@ -269,6 +271,7 @@ enum Command: Sendable {
                 fade = value
             }
             return .injectCancel(id: id, fadeMs: fade)
+        case "reconnect-microphone": return .reconnectMicrophone
         case "stop": return .stop
         default: return nil
         }
@@ -420,6 +423,9 @@ final class MicProcessor: @unchecked Sendable {
         self.analyzerFormat = analyzerFormat; self.input = input; self.writer = writer
         self.wav = wav; self.clock = clock; self.spans = spans; self.fail = fail
     }
+
+    /// Whether speech reaching this processor is transcribed. Without it a microphone could be heard but not understood.
+    var recognizes: Bool { input != nil }
 
     func startLevelTimer() {
         queue.async {
@@ -1274,7 +1280,9 @@ final class SilentMic: @unchecked Sendable {
     private let writer: ProtocolWriter
     private let wav: WavWriter
     private let finish: AsyncStream<String>.Continuation
-    private let engine = AVAudioEngine()
+    /// Replaced, never reused, when the microphone is dropped or reconnected: an engine whose input
+    /// node was touched keeps asking for that device, so a call without one runs on a fresh engine.
+    private var engine = AVAudioEngine()
     private let clock = TimelineClock()
     private var playback: PlaybackController?
     private var injectMonitor: InjectMonitor?
@@ -1288,7 +1296,13 @@ final class SilentMic: @unchecked Sendable {
     private var configObserver: NSObjectProtocol?
     private var stopped = false
     private var muted = false
-    private var lastRestartAt: TimeInterval?
+    /// When the engine was last restarted after a configuration change (device switches come in bursts).
+    private var restartTimes: [TimeInterval] = []
+    /// The microphone stopped working during this call (not refused): the call runs on silence until it is reconnected.
+    private var microphoneFailed = false
+    private var reconnecting = false
+    private static let restartsPerWindow = 4
+    private static let restartWindowSec = 10.0
 
     init(parentPID: pid_t, locale: Locale, writer: ProtocolWriter, wav: WavWriter,
          finish: AsyncStream<String>.Continuation) {
@@ -1313,6 +1327,7 @@ final class SilentMic: @unchecked Sendable {
         case .injectEnd(let id): mic?.injectEnd(id: id); injectMonitor?.end(id: id)
         case .injectCancel(let id, let fadeMs):
             mic?.injectCancel(id: id, fadeMs: fadeMs); injectMonitor?.cancel(id: id, fadeMs: fadeMs)
+        case .reconnectMicrophone: Task { await reconnectMicrophone() }
         case .stop: finish.yield("stopped")
         }
     }
@@ -1333,30 +1348,20 @@ final class SilentMic: @unchecked Sendable {
             try Task.checkCancellation()
             guard !stopped else { return }
 
-            // Voice processing (echo cancellation) must be on before anything
-            // is attached or started. Never continue without it.
-            // The output side of the graph must exist before voice processing is switched on,
-            // and the mixer must be joined to the output explicitly afterwards (below). With the
-            // implicit connection the engine refuses to start (-10875 on the output unit); measured
-            // on macOS 27.2: 0 of 6 starts as it was, 6 of 6 with either step, so both are done.
-            _ = engine.outputNode
-            _ = engine.mainMixerNode
-            do { try engine.inputNode.setVoiceProcessingEnabled(true) }
-            catch { diagnose("voice processing", error); throw HelperFailure.code("capture-failed") }
-
             let continuation = try await startAnalysis(prepared)
             try Task.checkCancellation()
             guard !stopped else { return }
             let micProcessor = makeMicProcessor(format: prepared.format, input: continuation)
-            let playbackController = makePlayback()
-
-            playbackController.attach()
-            injectMonitor?.attach()
-            connectMixerToOutput()
-            hasMicrophone = true
-            installTap()
-            engine.prepare()
-            do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("capture-failed") }
+            let playbackController: PlaybackController
+            do { playbackController = try buildEngine(microphone: true) }
+            catch {
+                // The microphone would not start. The call still goes ahead, as it does without microphone
+                // access: the interviewer is heard, the candidate can type or reconnect from the call window.
+                let silent = try startSilentEngine(after: "microphone start", processor: micProcessor)
+                micProcessor.startLevelTimer()
+                engineStarted(silent)
+                return
+            }
             micProcessor.startLevelTimer()
             engineStarted(playbackController)
         } catch is CancellationError {
@@ -1367,11 +1372,7 @@ final class SilentMic: @unchecked Sendable {
 
     /// The engine is running: watch it and the parent, then report ready.
     private func engineStarted(_ playbackController: PlaybackController) {
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.engineConfigurationChanged() }
-        }
-        playbackController.startTimer()
+        watchEngine(playbackController)
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1))
         timer.setEventHandler { [weak self] in
@@ -1383,6 +1384,125 @@ final class SilentMic: @unchecked Sendable {
         parentTimer = timer; timer.resume()
         // microphone false: access was refused and a silent signal stands in, so the call can say so.
         writer.send(["type": "status", "state": "ready", "inject": true, "microphone": hasMicrophone])
+    }
+
+    /// Follows the running engine's configuration changes and starts the playback clock. Again after each new engine.
+    private func watchEngine(_ playbackController: PlaybackController) {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.engineConfigurationChanged() }
+        }
+        playbackController.startTimer()
+    }
+
+    /// Builds the graph on the current (fresh) engine and starts it, with or without the microphone.
+    /// On failure the input tap is gone again and the error says which side failed.
+    private func buildEngine(microphone: Bool) throws -> PlaybackController {
+        // Voice processing (echo cancellation) must be on before anything
+        // is attached or started. Never capture without it.
+        // The output side of the graph must exist before voice processing is switched on,
+        // and the mixer must be joined to the output explicitly afterwards (below). With the
+        // implicit connection the engine refuses to start (-10875 on the output unit); measured
+        // on macOS 27.2: 0 of 6 starts as it was, 6 of 6 with either step, so both are done.
+        _ = engine.outputNode
+        _ = engine.mainMixerNode
+        if microphone {
+            do { try engine.inputNode.setVoiceProcessingEnabled(true) }
+            catch { diagnose("voice processing", error); throw HelperFailure.code("capture-failed") }
+        }
+        let playbackController = makePlayback()
+        playbackController.attach()
+        injectMonitor?.attach()
+        connectMixerToOutput()
+        if microphone {
+            // No input device (unplugged, nothing built in): tapping a 0-channel input raises an Objective-C exception
+            // that would take the whole helper down, so it counts as a failed microphone instead.
+            guard inputUsable() else { throw HelperFailure.code("capture-failed") }
+            hasMicrophone = true; installTap()
+        }
+        engine.prepare()
+        do { try engine.start() } catch {
+            diagnose("engine start", error)
+            if hasMicrophone { engine.inputNode.removeTap(onBus: 0); hasMicrophone = false }
+            throw HelperFailure.code(microphone ? "capture-failed" : "playback-failed")
+        }
+        return playbackController
+    }
+
+    /// Stops and drops the running graph; the next one is built on a fresh engine.
+    private func tearDownEngine() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
+        playback?.shutdown(); playback = nil
+        injectMonitor?.shutdown(); injectMonitor = nil
+        if hasMicrophone { engine.inputNode.removeTap(onBus: 0) }
+        hasMicrophone = false
+        engine.stop()
+        engine = AVAudioEngine()
+    }
+
+    /// The microphone failed: the graph is rebuilt without it and a silent signal stands in, so the
+    /// call goes on (the interviewer heard, the timeline and recording moving) and the call window
+    /// can say so and offer to reconnect. Throws playback-failed when even that will not start.
+    private func startSilentEngine(after step: String, processor: MicProcessor) throws -> PlaybackController {
+        FileHandle.standardError.write(Data("practice-audio-helper: microphone failed (\(step)), running without capture\n".utf8))
+        microphoneFailed = true
+        // The tap goes first: a buffer it already sent is then processed before the interruption mark, and the
+        // first silent buffer carries the whole gap (the rebuild included) into the timeline and the recording.
+        tearDownEngine()
+        processor.markInterruption()
+        processor.injectCancelAll()
+        // The engine without a microphone gets its own restart budget; the burst that dropped the mic is not held against it.
+        restartTimes.removeAll()
+        let playbackController = try buildEngine(microphone: false)
+        let silent = SilentMic(processor: processor)
+        silentMic = silent
+        silent.start()
+        writer.send(["type": "status", "state": "microphone", "available": false, "reason": "failed"])
+        return playbackController
+    }
+
+    /// The microphone stopped working mid-call (a device change it could not survive, or its audio
+    /// could not be converted): carry on without it rather than end the call.
+    private func microphoneLost(_ step: String) {
+        guard !stopped, !reconnecting else { return }
+        // Already running on silence: a late failure from the old microphone's buffers changes nothing.
+        guard hasMicrophone, let mic else { if !microphoneFailed { fail("capture-failed") }; return }
+        do { watchEngine(try startSilentEngine(after: step, processor: mic)) } catch { fail("playback-failed") }
+    }
+
+    /// The candidate pressed Reconnect: try the microphone again on a fresh engine. Success swaps
+    /// the silent stand-in for the microphone; failure leaves the call on silence as it was.
+    private func reconnectMicrophone() async {
+        guard !stopped, !reconnecting, let mic else { return }
+        // Every request is answered, so the call window never waits on a reconnect that is not happening.
+        guard !hasMicrophone else { writer.send(["type": "status", "state": "microphone", "available": true]); return }
+        // Without access, or without a recogniser to hear it, a microphone would change nothing.
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            writer.send(["type": "status", "state": "microphone", "available": false, "reason": "denied"]); return
+        }
+        // Recognition could not be set up when this call began (no access and no speech assets then): a microphone
+        // now would still not be understood, and only a new call can prepare it.
+        guard mic.recognizes else { writer.send(["type": "status", "state": "microphone", "available": false, "reason": "rejoin"]); return }
+        reconnecting = true
+        defer { reconnecting = false }
+        let silent = silentMic
+        silentMic = nil
+        await silent?.stop() // Its last silence reaches the processor first, so the timeline has no hole.
+        guard !stopped else { return }
+        mic.markInterruption()
+        mic.injectCancelAll()
+        tearDownEngine()
+        do {
+            let playbackController = try buildEngine(microphone: true)
+            microphoneFailed = false
+            restartTimes.removeAll()
+            watchEngine(playbackController)
+            writer.send(["type": "status", "state": "microphone", "available": true])
+        } catch {
+            do { watchEngine(try startSilentEngine(after: "reconnect", processor: mic)) } catch { fail("playback-failed") }
+        }
     }
 
     /// Speech recognition set-up, shared by both paths: on-device assets are checked and the
@@ -1452,7 +1572,8 @@ final class SilentMic: @unchecked Sendable {
     private func makeMicProcessor(format: AVAudioFormat?, input: AsyncStream<AnalyzerInput>.Continuation?) -> MicProcessor {
         let processor = MicProcessor(analyzerFormat: format, input: input, writer: writer, wav: wav,
                                      clock: clock, spans: injectSpans) { [weak self] code in
-            Task { @MainActor in self?.fail(code) }
+            // A microphone whose audio cannot be converted is dropped, not the call.
+            Task { @MainActor in if code == "capture-failed" { self?.microphoneLost("conversion") } else { self?.fail(code) } }
         }
         mic = processor
         return processor
@@ -1493,12 +1614,7 @@ final class SilentMic: @unchecked Sendable {
         try Task.checkCancellation()
         guard !stopped else { return }
         let micProcessor = makeMicProcessor(format: format, input: continuation)
-        let playbackController = makePlayback()
-        playbackController.attach()
-        injectMonitor?.attach()
-        connectMixerToOutput()
-        engine.prepare()
-        do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("playback-failed") }
+        let playbackController = try buildEngine(microphone: false)
         let silent = SilentMic(processor: micProcessor)
         silentMic = silent
         micProcessor.startLevelTimer()
@@ -1518,6 +1634,12 @@ final class SilentMic: @unchecked Sendable {
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: engine.outputNode.inputFormat(forBus: 0))
     }
 
+    /// Whether the engine's input has a real format (a device with channels and a rate).
+    private func inputUsable() -> Bool {
+        let format = engine.inputNode.inputFormat(forBus: 0)
+        return format.channelCount > 0 && format.sampleRate > 0
+    }
+
     private func installTap() {
         guard hasMicrophone, let mic else { return }
         // format: nil taps the input node at its native (voice-processed) output
@@ -1527,12 +1649,17 @@ final class SilentMic: @unchecked Sendable {
         }
     }
 
-    /// One restart with the same graph; a second change within 10 s fails.
+    /// Restart with the same graph. Device switches come in bursts, so a few restarts in a row are
+    /// fine; past that, or when the engine will not start again, the microphone is dropped and the
+    /// call goes on without it (an engine already without one has nothing left to drop: that fails).
     private func engineConfigurationChanged() {
-        guard !stopped, !engine.isRunning else { return }
+        guard !stopped, !reconnecting, !engine.isRunning else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if let last = lastRestartAt, now - last < 10 { fail("capture-failed"); return }
-        lastRestartAt = now
+        restartTimes = restartTimes.filter { now - $0 < Self.restartWindowSec } + [now]
+        guard restartTimes.count <= Self.restartsPerWindow else {
+            if hasMicrophone { microphoneLost("repeated configuration changes") } else { fail("playback-failed") }
+            return
+        }
         mic?.markInterruption()
         mic?.injectCancelAll() // The monitor's queued buffers do not survive either.
         playback?.cancelActive() // The queued buffers do not survive a reconfiguration.
@@ -1540,9 +1667,14 @@ final class SilentMic: @unchecked Sendable {
         playback?.reconnect()
         injectMonitor?.reconnect()
         connectMixerToOutput()
+        // The input device went away with this change: carry on without it rather than tap a 0-channel input.
+        if hasMicrophone, !inputUsable() { microphoneLost("input device gone"); return }
         installTap()
         engine.prepare()
-        do { try engine.start() } catch { fail("capture-failed") }
+        do { try engine.start() } catch {
+            diagnose("engine restart", error)
+            if hasMicrophone { microphoneLost("restart") } else { fail("playback-failed") }
+        }
     }
 
     private func fail(_ code: String) {
