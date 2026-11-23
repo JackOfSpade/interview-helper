@@ -186,15 +186,19 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     // The question is the contiguous run of spoken interviewer entries just before the answer. A back-channel
     // laid over it (an overlay) ends early and is not the question, so the latest end of the run counts, and paused time does not.
     let questionEndMs = null;
+    let askedNothing = false; // the line just before asked nothing: the time until the candidate spoke is not a response time
     for (let i = prior; i >= 0; i -= 1) {
       const before = entries[i];
-      if (before?.speaker === 'interviewer' && before.channel !== 'chat' && !before.overlay) questionEndMs = Math.max(questionEndMs ?? -Infinity, before.endMs);
+      if (before?.speaker === 'interviewer' && before.channel !== 'chat' && !before.overlay) {
+        if (questionEndMs === null) askedNothing = before.statement === true;
+        questionEndMs = Math.max(questionEndMs ?? -Infinity, before.endMs);
+      }
       else if (before?.overlay === true && before.speaker === 'interviewer') continue;
       // A back-channel ("mm-hm") said right after the question is not the end of an earlier answer.
       else if (before?.speaker === 'candidate' && before.acknowledgement) continue;
       else if (questionEndMs !== null || before?.speaker === 'candidate') break;
     }
-    const responseLatencyMs = finite(questionEndMs)
+    const responseLatencyMs = finite(questionEndMs) && !askedNothing
       ? Math.max(0, answer.startMs - questionEndMs - pausedOverlapMs(pauseSpans, questionEndMs, answer.startMs)) : null;
     return {
       index: answerIndex,

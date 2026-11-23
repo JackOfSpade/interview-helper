@@ -5260,6 +5260,47 @@ test('silence: a check-in answered with listen still counts, its wait sets the n
   assert.equal(rig.sessions.main.calls.length, 5, 'no fourth check-in message');
 });
 
+// A reply that asked nothing (<wait s="N" statement/>): after N s of quiet the interviewer picks the conversation up once,
+// uncounted, and only then do the check-ins start. Call of 2026-11-22: the panel sat 18.5 s after answering a question.
+test('statement: a quiet stretch after a line that asked nothing brings one uncounted carry-on, then the usual check-ins', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'We run blameless post-mortems.<wait s="5" statement/>');
+  const entry = rig.engine.state().transcript.filter(item => item.speaker === 'interviewer').at(-1);
+  assert.equal(entry.statement, true, 'the transcript marks the line');
+  assert.equal(await checkInAt(rig, 5, 'carry-on'), 5);
+  const carry = rig.sessions.main.calls.at(-1).message;
+  assert(carry.includes('after your last line, which asked them nothing') && !carry.includes('check 1'), carry);
+  await answerCheckIn(rig, 'Did that answer what you were after?');
+  assert.equal(rig.engine.state().transcript.filter(item => item.speaker === 'interviewer').at(-1).statement, undefined);
+  await checkInAt(rig, 20, 'first check');
+  assert(rig.sessions.main.calls.at(-1).message.includes('check 1 of 3'), rig.sessions.main.calls.at(-1).message);
+});
+
+test('statement: only one carry-on in a row; a second statement into the quiet is followed by a real check-in', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'That is how on-call works here.<wait s="1" statement/>');
+  assert.equal(await checkInAt(rig, 3, 'carry-on, clamped up to 3 s'), 3);
+  await answerCheckIn(rig, 'Happy to say more about it.<wait s="4" statement/>');
+  await checkInAt(rig, 4, 'second quiet stretch');
+  assert(rig.sessions.main.calls.at(-1).message.includes('check 1 of 3'), rig.sessions.main.calls.at(-1).message);
+});
+
+test('statement: the candidate speaking makes the next statement get its carry-on again; a plain wait is still at least 6 s', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'Fair enough.<wait s="4" statement/>');
+  await checkInAt(rig, 4, 'carry-on');
+  await answerCheckIn(rig, 'Anything else on that?');
+  await deliver(rig, 'Good, that is our setup.<wait s="4" statement/>');
+  await checkInAt(rig, 4, 'carry-on again after the candidate spoke');
+  assert(rig.sessions.main.calls.at(-1).message.includes('which asked them nothing'));
+  await answerCheckIn(rig, 'Over to you.');
+  await deliver(rig, 'Tell me more.<wait s="3"/>');
+  await checkInAt(rig, 6, 'plain wait keeps its floor');
+});
+
 test('silence: the candidate speaking resets the check count', async () => {
   const options = [];
   const rig = makeRig({ createParser: patienceParser, formatTurn: option => { options.push(option); return `[candidate silent ${Math.round((option.silenceMs ?? 0) / 1000)}s]`; } });

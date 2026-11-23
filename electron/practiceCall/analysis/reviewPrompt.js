@@ -195,9 +195,11 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
       ? turn.segments.filter(segment => line(segment?.text)) : [];
     // A hand-over inside one turn: each segment gets its own line so the reviewer sees who said what.
     const overlap = turn.overlay && turn.speaker !== 'candidate' ? ' (overlapping remark, said over the speaker)' : '';
+    // A line that asked the candidate nothing: a silence after it, and the interviewer picking it up again, are not the candidate's doing.
+    const statement = turn.statement === true && turn.speaker !== 'candidate' ? ' (asked nothing; left room for a reaction)' : '';
     // A voiced chat line was spoken on the call: it carries no (chat) mark, so it reads as the speech it was.
     const channelMark = turn.channel && turn.channel !== 'audio' && !(turn.voiced === true && turn.speaker === 'candidate') ? ` (${turn.channel})` : '';
-    const head = `[${index}] ${who}${overlap} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
+    const head = `[${index}] ${who}${overlap}${statement} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
     const extras = segments.map(segment => `    ${names.get(segment.speakerId) || 'interviewer'}: ${line(segment.text)}`);
     // The recogniser's text can carry mis-hearings; for a line the AI voice spoke the known words lead and the recogniser's version follows.
     if (sentOf(turn) && line(turn.text) && line(turn.text) !== line(sentOf(turn))) extras.push(`    recogniser heard it as: ${line(turn.text)}`);
@@ -256,6 +258,8 @@ const PICKED_RULE = [
   '- Planned questions: this call picked only the cards listed under PICKED QUESTIONS, and the card number is a card\'s identity. The planned list has exactly one entry per listed card, in the listed order, with the question copied exactly as written there. Take "asked" from the engine line of that card, never from a similar-sounding interviewer line; when it was asked, askedAs is the interviewer\'s own line that asked that card\'s question and the score and notes judge the answer to it. Follow-ups and every other interviewer line (small talk, a different topic, the closing) go into moments, never into another card\'s entry. Pool cards that were not picked are not part of this call: do not list or judge them. The unprepared question, when listed, is its own entry at the position listed.',
 ].join('\n');
 
+// Only on a call that has such a turn: a line that ended on a statement rather than a question.
+const STATEMENT_RULE = '- An interviewer turn marked (asked nothing; left room for a reaction) ended on a statement, not a question. The candidate was not required to answer it: never fault them for a silence after it or for the interviewer picking the conversation up again, and never count that silence as slow responding. A reaction to it, when they gave one, is judged like any other answer.';
 const PANEL_RULE = '- Panel: more than one interviewer was on this call. Say how the candidate handled that (addressing the right person, coping with a hand-over between interviewers or with a colleague who joined late), but only when the transcript shows it. Do not comment on it otherwise, and do not fault the candidate for how the interviewers dealt with each other.';
 
 const TYPED_ONLY_NOTE = [
@@ -356,7 +360,7 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const unprepared = unpreparedText(callRecord);
   const picked = pickedCards(callRecord, plan);
   const sections = [
-    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : ''].filter(Boolean).join('\n'),
+    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', transcript.some(turn => turn?.statement === true && turn.speaker !== 'candidate') ? STATEMENT_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : ''].filter(Boolean).join('\n'),
     '--- CALL ---', header,
     ...(typedOnly ? ['--- HOW THE CANDIDATE ANSWERED ---', TYPED_ONLY_NOTE] : []),
     ...(picked

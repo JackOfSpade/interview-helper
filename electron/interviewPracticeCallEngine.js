@@ -146,6 +146,9 @@ const INJECTED_MATCH_LATE_MS = 800;
 const INJECTED_HEARD_MAX = 30;
 const OVERLAP_WORD_WAIT_MS = 600;
 const WAIT_MIN_S = 6;
+// A reply that asked nothing (<wait s="N" statement/>) may leave less room: a person who has made a point, answered the
+// candidate's question or told them something picks the conversation up again themselves after a few seconds.
+const STATEMENT_WAIT_MIN_S = 3;
 const WAIT_MAX_S = 300;
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 
@@ -335,6 +338,11 @@ export function createPracticeCallEngine({
   let pausedAt = null;
   let pausedTotalMs = 0;
   let silencePrompts = 0; // silence prompts sent since the candidate last said or typed anything
+  // The last reply asked the candidate nothing (a statement), so a silence after it is nobody's failure: the interviewer
+  // carries the conversation on once, uncounted, before any check-in. carriedOn: that turn has been used since the
+  // candidate last did anything, so a second quiet stretch is a real silence and the check-ins run as usual.
+  let floorOpen = false;
+  let carriedOn = false;
   let silenceTotalMs = 0;
   let patienceS = null; // seconds of normal silence after the last delivered reply (its <wait>); null = the default
   let nextGapMs = null; // a check-in reply's own <wait>: the gap to the next check-in, once
@@ -700,7 +708,7 @@ export function createPracticeCallEngine({
   }
 
   function beginTurn({
-    greeting = false, typed = false, candidates = [], text = '', channel, silenceMs = null, padProgress = null, immediate = false,
+    greeting = false, typed = false, candidates = [], text = '', channel, silenceMs = null, padProgress = null, immediate = false, carryOn = false,
     lastWordAt = null, respeculated = 0, specTokens = null, pausedAck = null, spokenText = '', handover = false, cutInCheck = false, liveLook = false, voicedNote = null, mostRecent = '', cutInBy = null, watched = false,
   }) {
     listenedText = null; // any new look supersedes the one that listened
@@ -716,6 +724,7 @@ export function createPracticeCallEngine({
     reply.quietLook = quiet !== null && !greeting; // the look a quiet stretch after an unfinished verdict asked for
     reply.heldTurn = audioHint && !greeting; // the ear heard unfinished audio: a listen then means "still mid-thought"
     reply.checkIn = silenceMs !== null && silenceMs !== undefined;
+    reply.carryOn = reply.checkIn && carryOn === true;
     reply.padProgress = padProgress !== null && padProgress !== undefined;
     // A look at the candidate's voice line while it is still being spoken: the interviewer may cut in or listen on.
     reply.cutIn = cutInCheck;
@@ -749,7 +758,7 @@ export function createPracticeCallEngine({
       const base = {
         elapsedMs: elapsed(), candidateText: asHeard(text), channel, silenceMs, acknowledgements: pendingAcks.slice(),
         interruption: pendingInterruption ? { heardText: pendingInterruption.reply.heardText ?? '', unheardText: unheardFor(pendingInterruption.reply) } : null,
-        notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true, ...(mostRecent ? { mostRecent } : {}), ...(cutInBy ? { cutInBy } : {}) } : {}), ...(reply.checkIn ? { silenceCheck: silencePrompts } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
+        notSpoken, typing: typingNow, spokenText, ...(cutInCheck ? { stillSpeaking: true, ...(mostRecent ? { mostRecent } : {}), ...(cutInBy ? { cutInBy } : {}) } : {}), ...(reply.checkIn && !reply.carryOn ? { silenceCheck: silencePrompts } : {}), ...(reply.carryOn ? { carryOn: true } : {}), ...(reply.padProgress ? { padProgress } : {}), ...(joined.length ? { joined } : {}),
         ...(presence ? { presence } : {}), ...(absentHandover.length ? { absentHandover } : {}), ...(unknownSpeaker ? { unknownSpeaker: true } : {}), ...(!greeting && unknownScreens.length ? { unknownScreen: unknownScreens.slice() } : {}),
         ...(padText !== padSent ? { padText } : {}),
         ...(quiet !== null && !greeting ? { quietMs: quiet } : {}),
@@ -1651,6 +1660,7 @@ export function createPracticeCallEngine({
           }
           else if (item.wait !== undefined) {
             reply.wait = Number.isFinite(item.wait) ? item.wait : reply.wait; // the last one counts
+            reply.statement = item.statement === true;
             // The tag is written last, so it usually arrives after commit: it still sets the next gap.
             if (reply.committed) noteWait(reply);
           }
@@ -1936,10 +1946,17 @@ export function createPracticeCallEngine({
 
   /** Only a delivered reply sets how long the interviewer waits next; a check-in without its own <wait> keeps the schedule. */
   function noteWait(reply) {
-    const own = reply.wait === null ? null : clamp(Math.round(reply.wait), WAIT_MIN_S, WAIT_MAX_S);
-    if (reply.checkIn) { nextGapMs = own === null ? null : own * 1000; return; }
+    const statement = reply.statement === true && !reply.endCall;
+    const own = reply.wait === null ? null : clamp(Math.round(reply.wait), statement ? STATEMENT_WAIT_MIN_S : WAIT_MIN_S, WAIT_MAX_S);
+    // A check-in keeps the check-in schedule; the turn that carried the conversation on is an ordinary reply.
+    if (reply.checkIn && !reply.carryOn) { nextGapMs = own === null ? null : own * 1000; return; }
     patienceS = own;
     nextGapMs = null;
+    floorOpen = statement;
+    if (reply.entry) {
+      if (statement) reply.entry.statement = true;
+      else delete reply.entry.statement;
+    }
   }
 
   /** The notes the delivered message carried (acknowledgements, joins, absences, interruption...) are told: forget them. */
@@ -1992,7 +2009,7 @@ export function createPracticeCallEngine({
     if (reply.liveLook && cutEntry) openLiveCut(reply, cutEntry, fromMs);
     if (reply.parts.length) {
       const at = helperTimelineMs();
-      reply.entry = addEntry({ speaker: 'interviewer', text: stripAudioTags(reply.parts.join(' ')), startMs: at, endMs: at });
+      reply.entry = addEntry({ speaker: 'interviewer', text: stripAudioTags(reply.parts.join(' ')), startMs: at, endMs: at, ...(reply.statement === true && (!reply.checkIn || reply.carryOn) ? { statement: true } : {}) });
       refreshEntry(reply);
       emit(captionEvent(reply, false));
     }
@@ -2679,6 +2696,14 @@ export function createPracticeCallEngine({
         : silencePrompts === 1 ? clamp(first, 12000, 30000) : clamp(first * 1.5, 20000, 45000);
     arm('silence', waitMs, () => {
       if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting) return;
+      // The last line asked nothing: the interviewer picks the conversation up, once, and it is not a check-in.
+      if (silencePrompts === 0 && floorOpen && !carriedOn && !listenCheck) {
+        floorOpen = false;
+        carriedOn = true;
+        patienceS = null; // a carry-on that stays silent waits the usual time before the first check-in
+        beginTurn({ silenceMs: waitMs, carryOn: true, immediate: true });
+        return;
+      }
       // The interviewer has checked in the allowed number of times: the line drops, whatever the model would say.
       if (silencePrompts >= MAX_SILENCE_CHECKS) return end('interviewer', undefined, { cause: 'silence' });
       nextGapMs = null;
@@ -3090,7 +3115,7 @@ export function createPracticeCallEngine({
     dropSupersededVolatile(event);
     segments.set(event.segmentId, { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final });
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
-    if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; } // the candidate actually said something
+    if (String(event.text ?? '').trim()) { silencePrompts = 0; carriedOn = false; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; } // the candidate actually said something
     if (liveCutProtects(current)) syncLiveCut();
     else if (candidateSpoke && speaking) armLiveLook();
     // A cut-in waiting for the end of the sentence on live speech: a final that ends one is that moment.
@@ -3435,7 +3460,7 @@ export function createPracticeCallEngine({
       voicedNotes.set(entry, pending);
     }
     emit({ type: 'candidate-voice', state: whole ? 'finished' : 'cut', heardChars: heard.length, ...(whole ? { chatIds: chatIdsOf(utterance.texts) } : { messages: heardByMessage(utterance.texts, heard) }) });
-    if (heard) { silencePrompts = 0; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; }
+    if (heard) { silencePrompts = 0; carriedOn = false; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; }
     const reply = utterance.cutBy;
     if (reply && current === reply && !reply.committed) {
       // The interviewer's reply answers everything heard so far; the unspoken rest of the line is dropped.
@@ -3758,7 +3783,7 @@ export function createPracticeCallEngine({
     // that signal means chat typing and holds the progress messages back). The hold lapses a
     // little after the last edit, and the normal silence wait starts from there.
     disarm('silence');
-    silencePrompts = 0;
+    silencePrompts = 0; carriedOn = false;
     silenceTotalMs = 0;
     checkInAt = null; // the candidate is working: the normal silence wait starts after the edits
     arm('padTyping', th.typingExpireMs, () => { armSilence(); });
@@ -3770,7 +3795,7 @@ export function createPracticeCallEngine({
     disarm('silence');
     disarm('typing');
     typingNow = false;
-    silencePrompts = 0;
+    silencePrompts = 0; carriedOn = false;
     silenceTotalMs = 0;
     nextGapMs = null;
     checkInAt = null;

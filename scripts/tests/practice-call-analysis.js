@@ -451,6 +451,16 @@ export default [
     },
   },
   {
+    name: 'practice call analysis: an interviewer line that asked nothing is labelled, and the reviewer is told not to fault the silence after it',
+    async run() {
+      const marked = transcript.map((turn, index) => (index === 0 ? { ...turn, statement: true } : turn));
+      const prompt = buildReviewPrompt({ callRecord: { ...callRecord, transcript: marked }, plan, brief, metrics });
+      assert.match(prompt, /\[0\] [^\n]*\(asked nothing; left room for a reaction\)/u);
+      assert(prompt.includes('never fault them for a silence after it'));
+      assert.doesNotMatch(buildReviewPrompt({ callRecord, plan, brief, metrics }), /\(asked nothing; left room/u);
+    },
+  },
+  {
     name: 'practice call analysis: an overlay entry is labelled as an overlapping remark and a call without one prompts as before',
     async run() {
       const plain = buildReviewPrompt({ callRecord, plan, brief, metrics });

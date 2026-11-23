@@ -457,6 +457,17 @@ export default [
     },
   },
   {
+    name: 'practice call audio: no response latency after an interviewer line that asked nothing',
+    run() {
+      const statement = { speaker: 'interviewer', statement: true, text: 'Synthetic statement.', startMs: 0, endMs: 20000 };
+      const answer = { speaker: 'candidate', text: 'Synthetic reaction here.', startMs: 38000, endMs: 45000 };
+      assert.equal(callMetrics({ transcript: [statement, answer] }).answers[0].responseLatencyMs, null);
+      // The interviewer picked it up with a question: that question is what the answer responds to.
+      const followUp = { speaker: 'interviewer', text: 'Did that answer it?', startMs: 25000, endMs: 27000 };
+      assert.equal(callMetrics({ transcript: [statement, followUp, answer] }).answers[0].responseLatencyMs, 0 + 38000 - 27000);
+    },
+  },
+  {
     name: 'practice call audio: response latency leaves out paused time and ignores overlay back-channels',
     run() {
       const question = { speaker: 'interviewer', text: 'Synthetic question.', startMs: 0, endMs: 20000 };

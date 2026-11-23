@@ -132,6 +132,20 @@ const base = [
     },
   },
   {
+    name: 'interview practice parser: <wait s="N" statement/> marks a reply that asked nothing, with the word on either side',
+    run() {
+      const waits = text => { const parser = createReplyStreamParser(); const a = parser.push(text); const b = parser.end(); return [...(a.items ?? []), ...(b.items ?? [])].filter(item => item.wait !== undefined); };
+      assert.deepEqual(waits('That is how we do it.<wait s="5" statement/>'), [{ wait: 5, statement: true }]);
+      assert.deepEqual(waits('That is how we do it.<wait statement s="6"/>'), [{ wait: 6, statement: true }]);
+      assert.deepEqual(waits('What would you do?<wait s="20"/>'), [{ wait: 20 }]);
+      const spoken = createReplyStreamParser();
+      const said = [...spoken.push('Fair enough.<wait s="5" statement/>').sentences, ...spoken.end().sentences].join(' ');
+      assert.equal(said, 'Fair enough.', 'never spoken');
+      const rules = buildInterviewerInstructions({ persona: { name: 'Synthetic Lead', role: 'Lead' }, brief: {}, plan: [] });
+      assert(rules.includes('<wait s="N" statement/>') && rules.includes('which asked them nothing]'));
+    },
+  },
+  {
     name: 'interview practice prompt: turn messages have the exact documented shapes',
     run() {
       assert.equal(formatTurnMessage({ elapsedMs: 754_000, candidateText: 'hello there' }), "[elapsed 12:34] Candidate: 'hello there'");
@@ -154,6 +168,8 @@ const base = [
       assert.equal(formatTurnMessage({ elapsedMs: 0, candidateText: 'rank keeps ties', padHalted: true }),
         "[elapsed 00:00] [coding pad: the candidate stopped typing when an interviewer began speaking over their work and has not typed since, so the pad is as they left it] Candidate: 'rank keeps ties'");
       assert(!formatTurnMessage({ elapsedMs: 0, candidateText: 'x', padTyping: true, padHalted: true }).includes('stopped typing'), 'typing again wins');
+      // A quiet stretch after a line that asked nothing is not a check-in.
+      assert.equal(formatTurnMessage({ elapsedMs: 0, silenceMs: 5000, carryOn: true }), '[elapsed 00:00] [candidate silent 5s after your last line, which asked them nothing]');
     },
   },
   {
