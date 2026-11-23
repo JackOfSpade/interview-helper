@@ -55,13 +55,46 @@ function interruptionMarkers(metrics) {
   }).filter(Boolean);
 }
 
-/** The interview's farewell is the last interviewer turn after the last question. */
+/**
+ * The interview's farewell is the last interviewer turn after the last question; Closing starts at its start,
+ * except when the candidate spoke just before it (a question of theirs) and the turn is segmented by voice.
+ * The engine has the lead take the floor back for the thanks and goodbye, with colleagues adding theirs after,
+ * so the farewell is the lead's last segment and whatever follows it; segments before it answer the candidate
+ * and belong to the previous chapter. The lead is the voice of the first segment. When the lead speaks only in
+ * the first segment, or the turn has one segment, nothing can be told apart and the whole turn is Closing (a
+ * single segment that answers and says goodbye cannot be split). The farewell's time is the segment's own
+ * `startMs` when recorded, else the turn's start plus the share of characters before it, over the turn's length.
+ */
+function closingStartOf(turn, total) {
+  const startMs = ms(turn.startMs) ?? total;
+  const segments = list(turn.segments);
+  const lead = segments[0]?.speakerId;
+  if (lead === undefined || lead === null) return startMs;
+  const farewell = segments.findLastIndex(segment => segment?.speakerId === lead);
+  if (farewell <= 0) return startMs;
+  const endMs = ms(turn.endMs) ?? total;
+  const recorded = ms(segments[farewell].startMs);
+  if (recorded !== null) return Math.max(startMs, Math.min(recorded, endMs));
+  const size = segment => label(segment?.text).length;
+  const all = segments.reduce((sum, segment) => sum + size(segment), 0);
+  if (!all) return startMs;
+  const before = segments.slice(0, farewell).reduce((sum, segment) => sum + size(segment), 0);
+  return Math.round(startMs + (before / all) * Math.max(0, endMs - startMs));
+}
+
 function closingIndex(transcript, questionIndices) {
   const lastQuestion = questionIndices.length ? Math.max(...questionIndices) : -1;
   for (let index = transcript.length - 1; index > lastQuestion; index -= 1) {
     if (isInterviewer(transcript[index])) return index;
   }
   return -1;
+}
+
+/** Whether the closing turn follows something the candidate said, so that it may open with an answer. */
+function answersCandidate(transcript, index, questionIndices) {
+  const lastQuestion = questionIndices.length ? Math.max(...questionIndices) : -1;
+  const before = transcript[index - 1];
+  return index - 1 > lastQuestion && before?.speaker === 'candidate' && !before.acknowledgement;
 }
 
 function chapterFor(chapters, atMs) {
@@ -85,7 +118,9 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
   }
   anchors.sort((left, right) => left.startMs - right.startMs);
   const closing = closingIndex(turns, anchors.map(anchor => anchor.index));
-  const closingStart = closing >= 0 ? ms(turns[closing].startMs) ?? total : total;
+  const anchorIndices = anchors.map(anchor => anchor.index);
+  const closingStart = closing < 0 ? total
+    : answersCandidate(turns, closing, anchorIndices) ? closingStartOf(turns[closing], total) : ms(turns[closing].startMs) ?? total;
 
   const chapters = [];
   const firstQuestion = anchors[0]?.startMs ?? closingStart;

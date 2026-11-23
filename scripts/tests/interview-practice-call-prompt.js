@@ -245,6 +245,11 @@ const base = [
       assert.doesNotMatch(OPENER_BLOCK, /I hear you, thank|Ah, okay, I hear you|Yeah, good question|Right, yeah, got it/u, 'no copyable sample phrases');
       assert.match(OPENER_BLOCK, /No "thank you" or "thanks" unless the candidate shared something long or personal, and never in two reactions running/u);
       assert.match(OPENER_BLOCK, /Never praise how an answer was laid out/u);
+      // Measured 2026-11-23 (docs/ai-model-selection.md): these rules halved reactions that agree to answer or tell the candidate to go ahead.
+      assert.match(OPENER_BLOCK, /an agreement to do what they asked, or a word of permission or instruction to the candidate/u);
+      assert.match(OPENER_BLOCK, /A question or a request, alone or along with anything else in the line[^.]*: only a small sound of taking it up, never [^.]*any other yes/u);
+      assert.match(OPENER_BLOCK, /A plan they are about to carry out[^.]*: a sound of attention only, never a go-ahead/u);
+      assert.match(OPENER_BLOCK, /never tell the candidate what to do/u);
       assert.match(OPENER_BLOCK, /Never pad it to fill time/u);
       assert.doesNotMatch(OPENER_BLOCK, /Say about|this time/u, 'there is no word target');
       assert.doesNotMatch(OPENER_BLOCK, /one to three words/u);
@@ -259,7 +264,7 @@ const base = [
       for (const absent of ['SEALED BRIEF', 'INTERVIEW PLAN', 'INTERVIEW FOCUS', 'HOW TO RUN THE INTERVIEW', 'candidatePrivatePrep', 'A long steering note']) {
         assert(!opener.includes(absent), `no ${absent} in the acknowledgement instructions`);
       }
-      assert(opener.length < 4000, 'small enough to answer fast');
+      assert(opener.length < 4600, 'small enough to answer fast'); // 4000 until 2026-11-23: about 500 characters of rules added, measured at no cost in first-word time
       assert(!buildInterviewerInstructions({ persona, brief, plan }).includes('listening sounds of an interviewer'));
     },
   },
@@ -1278,7 +1283,7 @@ export default [
       const opener = buildOpenerInstructions({ persona, brief, plan });
       assert.match(opener, /only an acknowledgement that needs no reply/u);
       assert.match(opener, /reply exactly <pass\/> instead/u);
-      assert(opener.length < 4000, 'still small enough to answer fast');
+      assert(opener.length < 4600, 'still small enough to answer fast'); // 4000 until 2026-11-23: about 500 characters of rules added, measured at no cost in first-word time
     },
   },
   {
@@ -1525,7 +1530,7 @@ export default [
       const opener = buildOpenerInstructions({ persona, brief, plan });
       assert.match(opener, /the answer plainly has more coming \(they announced steps or points not yet given, or have not reached what you asked\)/u);
       assert.match(opener, /<listen\/> only if they were plainly partway through/u);
-      assert(opener.length < 4000, 'the acknowledgement instructions stay small');
+      assert(opener.length < 4600, 'the acknowledgement instructions stay small'); // 4000 until 2026-11-23: about 500 characters of rules added, measured at no cost in first-word time
       const note = '[The candidate has been quiet for 3s since these words. You already waited once.]';
       assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'First I would extract the DNA.', quietMs: 3040 }), `[elapsed 01:01] ${note} Candidate: 'First I would extract the DNA.'`);
       assert.equal(formatTurnMessage({ elapsedMs: 61_000, candidateText: 'x', quietMs: 400 }), "[elapsed 01:01] [The candidate has been quiet for 1s since these words. You already waited once.] Candidate: 'x'", 'never 0 s');

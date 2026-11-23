@@ -300,7 +300,8 @@ export function generatedRunFor(sent, line) {
  * Seen 2026-11-22: the recogniser joined the seven lines of a worked exercise (with the typing between them) into one
  * 116 s entry that no single line covered half of, so it went unstamped and the review judged the wand's typing gaps
  * as the candidate's silences. An entry counts as generated when the generated lines together cover half of it, and
- * one made of several whole lines (each in no other entry) carries their texts joined.
+ * one made of several whole lines (each in no other entry) carries their texts joined, with the heard part of a cut last
+ * line at the end (call-mwt3ga4p-jo97ab: three lines, the third cut, went unstamped and the review read the recogniser's words).
  */
 export function stampInjectedLines(transcript, spans) {
   const entries = Array.isArray(transcript) ? transcript : [];
@@ -332,8 +333,13 @@ export function stampInjectedLines(transcript, spans) {
     // A whole line is its full text; a cut line is the part the engine reported heard (never the unplayed rest).
     let sent = sole && sole.whole === true && typeof sole.text === 'string' ? sole.text
       : sole && sole.whole !== true && typeof sole.heardText === 'string' && sole.heardText.trim() ? sole.heardText.trim() : '';
-    if (!sole && own && spansHere.every(span => span.whole === true && typeof span.text === 'string')) {
-      sent = [...spansHere].sort((a, b) => a.startMs - b.startMs).map(span => span.text.trim()).filter(Boolean).join(' ');
+    if (!sole && own) {
+      // Whole lines, then at most one cut last line, which counts as the part heard (a cut line before the end, or one
+      // with nothing heard, leaves the entry unstamped: its sent text is not known).
+      const ordered = [...spansHere].sort((a, b) => a.startMs - b.startMs);
+      const parts = ordered.map((span, at) => (span.whole === true && typeof span.text === 'string' ? span.text
+        : at === ordered.length - 1 && span.whole !== true && typeof span.heardText === 'string' ? span.heardText : null));
+      if (parts.every(part => part !== null)) sent = parts.map(part => part.trim()).filter(Boolean).join(' ');
     }
     return {
       ...entry,
@@ -342,6 +348,62 @@ export function stampInjectedLines(transcript, spans) {
       ...(sent && entry.sentText === undefined ? { sentText: sent } : {}),
     };
   });
+}
+
+const CUT_CLAMP_MARGIN_MS = 500;
+const NUMBER_WORDS = Object.freeze({ zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12' });
+const wordsOfText = text => String(text ?? '').toLowerCase().replace(/'/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/u).filter(Boolean).map(word => NUMBER_WORDS[word] ?? word);
+
+/**
+ * A final recogniser segment that ran on past the cut of a line in the candidate's AI voice, clamped to the cut. The
+ * recogniser closes a segment only on silence, so it stays open through the interviewer's whole reply and the record
+ * showed the candidate talking for seconds after they were cut (call-mwt3ga4p-jo97ab: 7.5 s). It is clamped only when
+ * that is provably safe: every word of the segment is a word of the cut line's sent text (in order, the recogniser's
+ * digits for number words, the last word possibly a partial one), so nothing in it is the candidate's own speech. A
+ * segment with any other word, one that starts after the cut, and a whole line are left as they are.
+ * Returns the end to use, or null to leave the segment alone.
+ */
+export function clampedEndOfCutSegment(event, spans) {
+  if (!(Number.isFinite(event?.startMs) && Number.isFinite(event?.endMs))) return null;
+  const list = [...(spans ?? [])].filter(span => Number.isFinite(span?.startMs) && Number.isFinite(span?.endMs));
+  const cut = list.filter(span => span.whole === false && typeof span.text === 'string' && event.startMs < span.endMs && event.endMs > span.startMs)
+    .sort((left, right) => right.startMs - left.startMs)[0];
+  const limit = cut ? cut.endMs + CUT_CLAMP_MARGIN_MS : NaN;
+  if (!cut || !(event.endMs > limit)) return null;
+  // The segment began before the line did, or another injected line touches it: it holds more than this line.
+  if (event.startMs < cut.startMs || list.some(span => span !== cut && span.startMs < event.endMs && span.endMs > event.startMs)) return null;
+  const sent = wordsOfText(`${cut.text} ${cut.heardText ?? ''}`);
+  const said = wordsOfText(event.text);
+  if (!said.length || !sent.length) return null;
+  let at = 0;
+  for (let index = 0; index < said.length; index += 1) {
+    let found = -1;
+    for (let next = at; next < sent.length; next += 1) {
+      if (sent[next] === said[index] || (index === said.length - 1 && said[index].length >= 2 && sent[next].startsWith(said[index]))) { found = next; break; }
+    }
+    if (found < 0) return null;
+    at = found + 1;
+  }
+  return Math.max(event.startMs, limit);
+}
+
+/**
+ * What the call knows about its clock, for the suggestion prompts: active time so far, the planned length (the planned
+ * questions' minutes, as the late-join draw reads them) and the minutes planned for the question most recently asked.
+ * A fact the call does not have is left out. Seen 2026-11-23: a "last quick one" at 4:56 of five minutes got a 49 s answer
+ * because nothing told the reply how little time was left.
+ */
+export function draftTimingOf(self, engineState) {
+  const questions = Array.isArray(self?.settledPlan?.questions) ? self.settledPlan.questions : [];
+  const minutes = question => (Number(question?.minutes) > 0 ? Number(question.minutes) : 0);
+  const plannedMs = questions.reduce((sum, question) => sum + minutes(question), 0) * 60000;
+  const asked = Array.isArray(engineState?.askedQuestions) ? engineState.askedQuestions : [];
+  const current = asked.length ? questions.find(question => question.number === asked[asked.length - 1]) : null;
+  return {
+    ...(Number.isFinite(engineState?.elapsedMs) ? { elapsedMs: engineState.elapsedMs } : {}),
+    ...(plannedMs > 0 ? { plannedMs } : {}),
+    ...(current && minutes(current) > 0 ? { questionMinutes: minutes(current) } : {}),
+  };
 }
 
 function freshState() {
@@ -1091,6 +1153,9 @@ export function createPracticeCallService(deps = {}) {
       refreshSpeaking(self);
     }
     if (event?.type === 'transcript' && event.final && Number.isFinite(event.startMs) && Number.isFinite(event.endMs)) {
+      // A segment of the voice's own cut line that stayed open past the cut ends at the cut: the entry, the answer timings and the tone notes all read it.
+      const clampedEnd = clampedEndOfCutSegment(event, self.injectSpans?.values());
+      if (clampedEnd !== null) { dbg('transcript-clamped', { segmentId: event.segmentId, fromMs: event.endMs, toMs: clampedEnd }); event = { ...event, endMs: clampedEnd }; }
       self.timings.answers.push({ startMs: event.startMs, endMs: event.endMs });
       try {
         // Speech that overlaps an injected AI-voice line is that voice, not the candidate's microphone: it feeds the
@@ -3296,6 +3361,7 @@ export function createPracticeCallService(deps = {}) {
           participants: (state.participants || []).map(item => ({ id: item.id, name: item.name })),
           // What is on the shared screen now; when nothing is, the last screen shown (the question may still be about it).
           screen: sharedScreenForDraft(self),
+          timing: draftTimingOf(self, engineState),
           pool: (self.plan || []).filter(card => !card.topic).map(card => ({ question: card.question, answer: card.answer })),
         });
         if (working) {

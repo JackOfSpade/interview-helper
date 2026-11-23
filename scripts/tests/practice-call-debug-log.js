@@ -161,7 +161,7 @@ test('recentDiagnostics returns every call of the run (else the newest) with its
   assert.equal(newest.hasAudio, true);
   assert.deepEqual(newest.record, {
     durationMs: 61_000, pausedMs: null, reason: 'candidate', endedBy: null, returnedCall: null, transcriptEntries: 2, candidateTurns: 1, interviewers: 2,
-    answeredQuestions: 1, setupAttempts: null, timings: { setupLeadMs: 1200 }, pickedQuestions: 2, askedQuestions: 1, feedbackSkipped: true, recordingPruned: false,
+    answeredQuestions: 1, setupAttempts: null, timings: { setupLeadMs: 1200 }, pickedQuestions: 2, askedQuestions: 1, unpreparedQuestion: null, feedbackSkipped: true, recordingPruned: false,
   });
   assert.equal(newest.analysis.status, 'failed');
   assert.equal(newest.analysis.hasFeedback, false);

@@ -116,6 +116,9 @@ const CANCEL_WAIT_MS = 500;
 // How many interviewer replies the note that the candidate's pad work was left unfinished goes with: the reply that
 // stopped them and the next two. By then the interviewer has handed back or moved on, and saying it again is noise.
 const PAD_HALT_TURNS = 3;
+// The hands finish the word they are on after an interviewer takes the floor (the yield time, then a moment more); those
+// last keys still belong to the halted work, so they do not count as going back to it.
+const PAD_HALT_GRACE_MS = 2000;
 // Listening sounds of five letters or more that every reaction may reuse (see repeatsRecentReaction).
 const BACKCHANNEL_WORDS = new Set(['right', 'alright', 'allright']);
 const OFFSET_WINDOW_MS = 2000;
@@ -318,6 +321,7 @@ export function createPracticeCallEngine({
   // The pad text as it stood when an interviewer began speaking while the candidate was still typing in it (they stop
   // to listen); null once the pad changes again or closes. While it stands, the work in the pad was left unfinished.
   let padHaltText = null;
+  let padHaltUntil = 0; // clock ms until which the keys still typed after the halt belong to it
   let padHaltReplies = 0; // interviewer replies heard since then; the note stops after a few (the interviewer has decided)
   let screenShown = null; // { title, content, speakerId } while the interviewer shares their screen
   let padState = { open: false, lang: '' };
@@ -355,6 +359,7 @@ export function createPracticeCallEngine({
   // every line after the exercise was given as "plan question 19", so the watcher judged a 2.5-minute question and the
   // follow-ups against the exercise's 7 minutes.
   let latestPlanNumber = null;
+  const entryReplies = new WeakMap(); // an interviewer's transcript entry -> the reply that spoke it
   let lastPlanNumber = null; // the plan question asked most recently, whatever came after it
   let answerWords = 0; // words the candidate has said or typed since those were asked
   let padAtAsk = 0; // length of the pad text when they were asked
@@ -738,6 +743,8 @@ export function createPracticeCallEngine({
     // A look the watcher asked for: how many words the answer had when it began (the stale guard), and the hold at the next breath.
     reply.watched = watched;
     reply.snapshotWords = tokens(text).length;
+    reply.judgedWords = reply.snapshotWords; // what the watcher judged (startWatchedLook sets it when that was earlier than this look)
+    reply.judgedEndsSentence = false;
     reply.cutInInfo = cutInBy ? { who: cutInBy.id ?? null, reason: cutInBy.reason ?? null, when: cutInBy.when === 'sentence-end' ? 'sentence-end' : 'now' } : null;
     reply.holdAt = null;
     reply.holdTimer = null;
@@ -1850,7 +1857,17 @@ export function createPracticeCallEngine({
    */
   function gateWatchedCutIn(reply) {
     const info = reply.cutInInfo ?? {};
-    if (info.when === 'sentence-end' && !paused && !reply.sentenceGaveUp) {
+    // The sentence the watcher judged was already over when it answered: waiting for "the end of the sentence" would
+    // release it into whatever is said next. Once speech has resumed it is about something said before, so it is dropped
+    // and the watcher asked again; if they have not spoken on, it goes the "now" way (at the next breath).
+    const sentenceOver = info.when === 'sentence-end' && !reply.sentenceHeld && reply.judgedEndsSentence;
+    if (sentenceOver && !paused && tokens(candidateText()).length > reply.judgedWords) {
+      emit({ type: 'cut-in', state: 'stale', ...info, dropped: 'sentence-over', wordsSinceSnapshot: wordsSinceLook(reply) });
+      discardPending(true, 'stale-cut-in');
+      if (watcherOn && answerSince !== null) { disarm('watch'); runWatch('stale'); }
+      return false;
+    }
+    if (info.when === 'sentence-end' && !sentenceOver && !paused && !reply.sentenceGaveUp) {
       if (!reply.sentenceHeld && !cutInIsStale(reply)) {
         reply.sentenceHeld = true;
         reply.holdAt ??= now();
@@ -2021,6 +2038,7 @@ export function createPracticeCallEngine({
     if (reply.parts.length) {
       const at = helperTimelineMs();
       reply.entry = addEntry({ speaker: 'interviewer', text: stripAudioTags(reply.parts.join(' ')), startMs: at, endMs: at, ...(reply.statement === true && (!reply.checkIn || reply.carryOn) ? { statement: true } : {}) });
+      entryReplies.set(reply.entry, reply);
       refreshEntry(reply);
       emit(captionEvent(reply, false));
     }
@@ -2253,7 +2271,7 @@ export function createPracticeCallEngine({
         // An interviewer has the floor: the candidate gives way like a person, after a reaction time. A voice line
         // stops at a word boundary (yieldInjected); the window's wand typing in the pad stops the same way.
         const yieldMs = yieldDelayMs();
-        if (padTypingNow()) { padHaltText = padText; padHaltReplies = 0; } else if (padHaltText !== null) padHaltReplies += 1;
+        if (padTypingNow()) { padHaltText = padText; padHaltReplies = 0; padHaltUntil = now() + yieldMs + PAD_HALT_GRACE_MS; } else if (padHaltText !== null) padHaltReplies += 1;
         emit({ type: 'floor', speakerId: reply.writer ?? null, yieldMs: Math.round(yieldMs) });
         yieldInjected(yieldMs);
       }
@@ -2882,15 +2900,32 @@ export function createPracticeCallEngine({
     return list.length > 30 || (parts.length === 1 && list.length > 20) ? list.slice(-20).join(' ') : last;
   }
 
-  /** The question this answer is for: the last interviewer line before it, who asked it and its plan number. */
+  /**
+   * A finished reply that was only the quick reaction (a few words of taking it in): nothing the main session added, no
+   * question in it, no plan question, no chat or control. It is not a question the candidate is answering, so the watcher
+   * keeps the question before it. A reply with any words of its own beyond the reaction, or a "?", is not one.
+   */
+  function reactionOnly(reply) {
+    if (!reply?.done || !reply.entry || !reply.ackText) return false;
+    if (Number.isInteger(reply.planNumber) || reply.asked.length || reply.chats.length || reply.controls.length) return false;
+    const said = stripAudioTags(reply.entry.text ?? '');
+    return !/[?]/u.test(said) && tokens(said).length <= tokens(reply.ackText).length;
+  }
+
+  /** The question this answer is for: the last interviewer line before it, who asked it and its plan number (a bare reaction is not one). */
   function watchQuestion() {
+    let skipped = false;
     for (let index = transcript.length - 1; index >= 0; index -= 1) {
       const entry = transcript[index];
       if (entry.speaker !== 'interviewer' || entry.channel === 'chat' || entry.overlay || !entry.text) continue;
+      const reply = entryReplies.get(entry);
+      if (reactionOnly(reply) && transcript.slice(0, index).some(item => item.speaker === 'interviewer' && item.channel !== 'chat' && !item.overlay && item.text)) { skipped = true; continue; }
       const segment = entry.segments?.at(-1);
-      return { text: stripAudioTags(segment?.text ?? entry.text), askedBy: segment?.speakerId ?? entry.speakerId ?? leadId };
+      // Past a reaction the number is that line's own (latestPlanNumber was reset by the reaction); otherwise as before.
+      const number = skipped ? (Number.isInteger(reply?.planNumber) ? reply.planNumber : null) : latestPlanNumber;
+      return { text: stripAudioTags(segment?.text ?? entry.text), askedBy: segment?.speakerId ?? entry.speakerId ?? leadId, number };
     }
-    return { text: '', askedBy: leadId };
+    return { text: '', askedBy: leadId, number: latestPlanNumber };
   }
 
   function runWatch(trigger) {
@@ -2908,7 +2943,7 @@ export function createPracticeCallEngine({
     let message;
     try {
       message = formatWatch({
-        elapsedMs: elapsed(), questionText: question.text, questionNumber: latestPlanNumber, ...(latestPlanNumber === null && lastPlanNumber !== null ? { lastPlanNumber } : {}),
+        elapsedMs: elapsed(), questionText: question.text, questionNumber: question.number, ...(question.number === null && lastPlanNumber !== null ? { lastPlanNumber } : {}),
         askedBy: question.askedBy, answerText: heardText, answerMs: Math.max(0, now() - answerSince), mostRecent,
         ...(veto ? { declined: { reason: veto.reason, agoMs: Math.max(0, now() - veto.at), count: veto.count } } : {}),
         ...(padShown !== null ? { padText: padShown } : {}),
@@ -2942,7 +2977,7 @@ export function createPracticeCallEngine({
         wordsSinceSnapshot: Math.max(0, tokens(candidateText()).length - snapshotWords), trigger, ...(ready ? {} : { ignored: true }),
       });
       if (!ready) { watch.again = false; if (answerSince === answerAt) armWatch(); return; }
-      if (decision.decision === 'cut-in') { watch.again = false; startWatchedLook(decision, question.askedBy); return; }
+      if (decision.decision === 'cut-in') { watch.again = false; startWatchedLook(decision, question.askedBy, text); return; }
       // A breath came while this one ran: the check it owed starts as soon as this one returns. A failed or timed-out
       // check never chains straight into another one (review 2026-11-21: a slow watcher ran back to back): the
       // periodic schedule decides when the next one goes.
@@ -2971,7 +3006,7 @@ export function createPracticeCallEngine({
   }
 
   /** The watcher said a real interviewer would cut in: the main session gets a look and writes it as that person. */
-  function startWatchedLook(decision, askedBy) {
+  function startWatchedLook(decision, askedBy, judgedText) {
     let id = leadId;
     if (speakers) id = onCall(decision.who) ? decision.who : (onCall(askedBy) ? askedBy : leadId);
     const name = speakers?.find(item => item.id === id)?.name;
@@ -2980,6 +3015,8 @@ export function createPracticeCallEngine({
       text, channel: 'voice', immediate: true, cutInCheck: true, liveLook: true, candidates: [], watched: true,
       mostRecent: lastSentenceOf(text), cutInBy: { id, ...(name ? { name } : {}), reason: decision.reason ?? undefined, when: decision.when === 'sentence-end' ? 'sentence-end' : 'now' },
     });
+    // What the watcher judged: when that already ended a sentence, the moment it meant for "sentence-end" has passed.
+    if (current === reply && judgedText !== undefined) { reply.judgedWords = tokens(judgedText).length; reply.judgedEndsSentence = endsSentence(judgedText); }
     if (current !== reply) { if (!speaking && candidateSpoke) scheduleTurnEnd(lastVadEndMs); return; } // the voice would not open
     if (speaking) return;
     // The look began in a breath: if the pause lasts to the speculation point the look is dropped and the turn ends as usual.
@@ -3784,9 +3821,13 @@ export function createPracticeCallEngine({
     const next = String(value ?? '').slice(0, PAD_TEXT_CAP);
     if (next === padText) return;
     padText = next;
-    padHaltText = null; // they went back to it
+    // Keys typed while they gave way (the yield time, the end of the word) are still the halted work: the note follows
+    // the text. Any edit after that is the candidate going back to it.
+    if (padHaltText !== null && now() < padHaltUntil) padHaltText = next; else padHaltText = null;
     // An edit during a pause or before the call is live opens no burst: the text simply goes with the next turn.
     if (phase === 'ended' || phase === 'connecting' || paused) return;
+    // The first edit of a burst of typing is logged (not every key), so a report shows when the typing reached the engine.
+    if (padEditedAt === null || now() - padEditedAt >= th.padTypingMs) emit({ type: 'pad-edit', chars: next.length, atMs: helperTimelineMs() });
     padEditedAt = now();
     if (!padDirty) { padDirty = true; padDirtySince = padEditedAt; }
     // Writing in the pad is the candidate working, not the candidate being silent: every edit

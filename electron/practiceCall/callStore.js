@@ -293,6 +293,10 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
             : null,
           pickedQuestions: Array.isArray(record.pickedQuestions) ? record.pickedQuestions.length : 0,
           askedQuestions: Array.isArray(record.askedQuestions) ? record.askedQuestions.length : 0,
+          // Who asked the unprepared question (it is outside the picked/asked counts); the bug report notes it.
+          unpreparedQuestion: record.unpreparedQuestion && typeof record.unpreparedQuestion === 'object'
+            ? { askedBy: typeof record.unpreparedQuestion.askedBy === 'string' ? record.unpreparedQuestion.askedBy : null }
+            : null,
           feedbackSkipped: record.feedbackSkipped === true,
           recordingPruned: record.recordingPruned === true,
         } : null,

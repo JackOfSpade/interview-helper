@@ -377,18 +377,21 @@ test('tags are inserted by code before the named sentences: the words never chan
   assert.equal(wordsOf('[warmly] Hi  there [light laugh] yes'), 'Hi there yes');
   const prompt = candidateTagPrompt({ text: 'Thanks for having me.', transcript: [{ speaker: 'interviewer', text: '[warm] Hi Sam.' }], role: 'Backend Engineer' });
   assert(prompt.includes('Interviewer: Hi Sam.') && prompt.includes('1. Thanks for having me.') && prompt.includes('Backend Engineer'));
+  const batchPrompt = candidateTagPrompt({ sentences: ['One.', 'Two.'] });
+  assert(batchPrompt.includes('in each line') && !batchPrompt.includes('whole line'), 'a batch is told the limit per line');
+  assert(prompt.includes('in the whole line') && !prompt.includes('in each line'), 'the single-line wording stays');
   const tagged = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => '1: [warmly]' });
-  assert.deepEqual(tagged, { text: '[warmly] Thanks for having me.', tagged: true });
+  assert.deepEqual(tagged, { text: '[warmly] Thanks for having me.', tagged: true, tags: 1 });
   const retyped = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => 'Thank you for having me.' });
-  assert.deepEqual(retyped, { text: 'Thanks for having me.', tagged: false });
+  assert.deepEqual(retyped, { text: 'Thanks for having me.', tagged: false, tags: 0 });
   const failed = await tagCandidateLine({ text: 'Thanks.', tagText: async () => { throw new Error('down'); } });
-  assert.deepEqual(failed, { text: 'Thanks.', tagged: false });
+  assert.deepEqual(failed, { text: 'Thanks.', tagged: false, tags: 0 });
   let timer = null;
   const clock = { setTimeout: (fn) => { timer = fn; return 1; }, clearTimeout: () => {} };
   const slow = tagCandidateLine({ text: 'Thanks.', tagText: () => new Promise(() => {}), clock });
   await flush();
   timer();
-  assert.deepEqual(await slow, { text: 'Thanks.', tagged: false });
+  assert.deepEqual(await slow, { text: 'Thanks.', tagged: false, tags: 0 });
   assert.deepEqual({ ...careerWritingStageProfile(CANDIDATE_VOICE_STAGE) }, { model: 'sonnet', effort: 'low' });
 });
 
@@ -432,6 +435,29 @@ test('lines prepared ahead are tagged in one call and spoken with those tags; an
   await voice.open({ utteranceId: 'u3', text: 'Something else.' }).done;
   assert.equal(asked.length, 2, 'a line nobody prepared is tagged as before');
   assert.deepEqual(sent, ['[thoughtful] First I set up the window. Then', '[confident] Then I shrink it.', '[thoughtful] Something else.']);
+});
+
+test('the line event says how many tags landed, and a prepared batch shows its reply, so an untagged line is told from a failed call', async () => {
+  const run = async tagText => {
+    const events = [];
+    const factory = { open: () => ({ sampleRate: 24000, onAudio() {}, onWords() {}, cancel() {}, sendText() {}, finish: async () => 'done' }) };
+    const voice = createCandidateVoice({ factories: { male: factory }, gender: () => 'male', tagText, onEvent: event => events.push(event) });
+    voice.prepare(['One. Two.', 'Three.']);
+    await flush();
+    await voice.open({ utteranceId: 'a', text: 'One. Two.' }).done;
+    await voice.open({ utteranceId: 'b', text: 'Three.' }).done;
+    await voice.open({ utteranceId: 'c', text: 'Unprepared.' }).done;
+    return events;
+  };
+  const ok = await run(async () => '1: [warm]\n2: [lift]');
+  assert.deepEqual(ok.map(event => [event.tagged, event.tags, event.prepared]), [[true, 2, true], [false, 0, true], [true, 1, false]]);
+  assert.equal(ok[1].reply, '1: [warm]\n2: [lift]', 'a reply that tagged nothing for this line is shown');
+  assert.equal('reply' in ok[2], false);
+  const none = await run(async () => 'none');
+  assert.equal(none[0].reply, 'none');
+  const failed = await run(async () => { throw new Error('down'); });
+  assert.equal(failed[0].reply, null, 'no reply at all: the call failed or ran late');
+  assert.equal(failed[0].tags, 0);
 });
 
 test('a line prepared ahead whose tags are late waits at most the line limit, then speaks plain', async () => {

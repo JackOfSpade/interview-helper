@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createCallStore } from '../../electron/practiceCall/callStore.js';
 import { createSavedInterviewStore } from '../../electron/practiceCall/savedInterviews.js';
 import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
-import { createPracticeCallService, generatedRunFor, stampInjectedLines, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
+import { createPracticeCallService, clampedEndOfCutSegment, draftTimingOf, generatedRunFor, stampInjectedLines, technicalTopicQuestion, MAIN_REPLY_MODELS, DEFAULT_MAIN_REPLY_MODEL } from '../../electron/practiceCall/callService.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../../electron/interviewPracticeCallEngine.js';
 import { createPanelVoiceFactory } from '../../electron/practiceCall/eleven/panelVoice.js';
 import { createReplayHandler } from '../../electron/practiceCall/replayProtocol.js';
@@ -5118,6 +5118,8 @@ test('draftAnswer: off without draftText, refused before the call is answered, a
   assert.equal(request.application.resume, 'Synthetic resume text.');
   assert.deepEqual(request.transcript, transcript);
   assert.equal(request.brief.company, 'Acme');
+  assert.equal(request.timing.elapsedMs, 0);
+  assert.equal(request.timing.questionMinutes, undefined, 'no question has been asked yet, so no minutes are made up');
   assert.equal(request.screen, null, 'nothing has been shared, so no screen goes with the suggestion');
   assert.equal(typeof request.callText, 'function');
   assert(request.signal instanceof AbortSignal);
@@ -5302,6 +5304,36 @@ test('one recognised entry that joins several AI-voice lines (a worked exercise 
   assert.equal(mostlyLive.generated, undefined, 'lines covering less than half of a long entry do not make it generated');
 });
 
+test('an entry made of whole AI-voice lines and one cut last line carries them joined, ending with the part that was heard', () => {
+  const lines = [
+    { startMs: 10000, endMs: 20000, generated: true, whole: true, text: 'First line. ' },
+    { startMs: 22000, endMs: 32000, generated: true, whole: true, text: 'Second line.' },
+  ];
+  const entry = { speaker: 'candidate', text: 'recogniser words', startMs: 10200, endMs: 52000 };
+  const cut = { startMs: 34000, endMs: 50000, generated: true, whole: false, text: 'Third line and the unplayed rest.', heardText: ' Third ' };
+  const [stamped] = stampInjectedLines([entry], [...lines, cut]);
+  assert.equal(stamped.sentText, 'First line. Second line. Third');
+  assert.equal(stamped.generated, true);
+  const [unheard] = stampInjectedLines([entry], [...lines, { ...cut, heardText: undefined }]);
+  assert.equal(unheard.sentText, undefined, 'a cut line with nothing reported heard leaves the entry unstamped');
+  assert.equal(unheard.generated, true);
+  const [early] = stampInjectedLines([{ ...entry, endMs: 50000 }], [{ ...cut, startMs: 10000, endMs: 20000, text: 'x', heardText: 'x' }, { ...lines[1], startMs: 22000 }, { ...lines[0], startMs: 34000, endMs: 50000 }]);
+  assert.equal(early.sentText, undefined, 'a cut line that is not the last one is not joined');
+  const [whole] = stampInjectedLines([{ ...entry, endMs: 33000 }], lines);
+  assert.equal(whole.sentText, 'First line. Second line.', 'whole lines join as before');
+  // The cut line is shared with another entry: not this entry's alone, so nothing is stamped.
+  const shared = stampInjectedLines([entry, { speaker: 'candidate', text: 'more', startMs: 40000, endMs: 49000 }], [...lines, cut]);
+  assert.equal(shared[0].sentText, undefined);
+});
+
+test('draftTimingOf gives the active time, the planned length and the minutes of the question last asked, each only when known', () => {
+  const self = { settledPlan: { questions: [{ number: 3, minutes: 1.5 }, { number: 1, minutes: 2 }, { number: 0, minutes: 1.5 }] } };
+  assert.deepEqual(draftTimingOf(self, { elapsedMs: 283000, askedQuestions: [1, 3] }), { elapsedMs: 283000, plannedMs: 300000, questionMinutes: 1.5 });
+  assert.deepEqual(draftTimingOf(self, { elapsedMs: 5000, askedQuestions: [] }), { elapsedMs: 5000, plannedMs: 300000 });
+  assert.deepEqual(draftTimingOf(self, { askedQuestions: [9] }), { plannedMs: 300000 }, 'a question the plan does not hold has no minutes');
+  assert.deepEqual(draftTimingOf({}, {}), {});
+});
+
 test('the engine\'s spoken line is matched back to the sent messages it was joined from', () => {
   const fresh = () => [{ text: 'one', generated: false }, { text: 'two', generated: true }, { text: 'three', generated: true }];
   assert.equal(generatedRunFor(fresh(), 'two three'), true);
@@ -5313,4 +5345,56 @@ test('the engine\'s spoken line is matched back to the sent messages it was join
   assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), true);
   assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), false);
   assert.equal(generatedRunFor(twice, 'Yes, absolutely.'), null, 'a used message is not matched again');
+});
+
+// Seen 2026-11-23 (call-mwt3ga4p-jo97ab): the recogniser kept one segment open for 7.5 s past the cut of a line in the
+// candidate's AI voice, and the record showed the candidate talking through the interviewer's reply.
+const CUT_LINE = Object.freeze({ startMs: 1569300, endMs: 1577300, whole: false, generated: true, text: 'Checking the second example with n of two, the first one counts to one and outputs zero, the second one reaches zero and stops.', heardText: 'Checking the second example with n of two, the first one counts to one and outputs zero, the second one' });
+test('a segment of a cut line that ran on past the cut is clamped only when it holds no word beyond the sent text', () => {
+  const segment = (text, startMs = 1576140, endMs = 1584780) => ({ type: 'transcript', final: true, segmentId: 's1', text, startMs, endMs });
+  const spans = [CUT_LINE];
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches'), spans), 1577800, 'the last words of the line, 7 s past the cut');
+  assert.equal(clampedEndOfCutSegment(segment('The 2nd one reach'), spans), null, 'a form the sent text does not hold is not provably the voice');
+  assert.equal(clampedEndOfCutSegment(segment('second one reaches zero and stops', 1576140, 1577350), spans), null, 'already inside the margin: nothing to clamp');
+  assert.equal(clampedEndOfCutSegment(segment('Counts to 1 and outputs 0 the second one rea'), spans), 1577800, 'digits for number words and a trailing partial word');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches and then I would add a guard'), spans), null, 'the candidate carried on: left as it is');
+  assert.equal(clampedEndOfCutSegment(segment('Stops and reaches the second one'), spans), null, 'the words out of order are not the line');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches'), [{ ...CUT_LINE, whole: true }]), null, 'a whole line is never clamped');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches', 1578000, 1584780), spans), null, 'a segment that starts after the cut is not part of the line');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches'), [CUT_LINE, { startMs: 1580000, endMs: 1581000, whole: true, text: 'Next.' }]), null, 'a later line inside the segment');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches'), [{ ...CUT_LINE, text: undefined }]), null, 'a line with no known text');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches', 1568000, 1584780), spans), null, 'a segment that began before the line did holds the candidate\'s own speech');
+  assert.equal(clampedEndOfCutSegment(segment('The second one reaches'), [CUT_LINE, { startMs: 1560000, endMs: 1576500, whole: true, text: 'Earlier.' }]), null, 'an earlier line reaching into the segment');
+});
+
+test('the service hands the engine, the answer timings and the tone notes the clamped end of a cut line\'s segment', async () => {
+  let helperEvent;
+  let options;
+  const heard = [];
+  const noted = [];
+  const { service } = await liveCall({ deps: {
+    candidateVoices: true,
+    candidateVoice: () => ({ open() { return { sendText() {}, finish: async () => {}, cancel() {} }; } }),
+    helperFactory: ({ onEvent }) => {
+      helperEvent = onEvent;
+      return { start: async () => ({ ok: true }), play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, stop: async () => { onEvent({ type: 'recording', state: 'closed' }); } };
+    },
+    earFactory: () => ({ noteSpeech: item => { noted.push(item); }, voiceNote: () => null, endOfTurn: async () => 0.5, floorBid: async () => ({ decision: 'pause' }), toneSamples: () => [] }),
+    engineFactory: opts => {
+      options = opts;
+      return { start() { opts.onEvent({ type: 'phase', phase: 'listening' }); }, hangUp() {}, helperEvent: event => heard.push(event), typed() {}, state: () => ({ transcript: [], elapsedMs: 0 }) };
+    },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  const text = 'Checking the second example, the first one counts to one and the second one reaches zero.';
+  service.sendChat(text, { generated: true });
+  options.candidateVoice.open({ utteranceId: 'u1', text });
+  helperEvent({ type: 'inject', utteranceId: 'u1', state: 'started', positionMs: 0, atMs: 1000 });
+  helperEvent({ type: 'inject', utteranceId: 'u1', state: 'cancelled', positionMs: 8000, atMs: 9000 });
+  helperEvent({ type: 'transcript', final: true, segmentId: 'a', text: 'The first one counts to one', startMs: 2000, endMs: 15000 });
+  helperEvent({ type: 'transcript', final: true, segmentId: 'b', text: 'The first one counts to one and then I add more', startMs: 2000, endMs: 15000 });
+  const finals = heard.filter(event => event.type === 'transcript');
+  assert.deepEqual(finals.map(event => event.endMs), [9500, 15000], 'only the segment with no word of its own is clamped');
+  assert.deepEqual(noted.map(item => item.endMs), [9500, 15000], 'the tone notes read the same ends');
 });

@@ -105,7 +105,36 @@ test('the prompt fits the length to the kind of question without cutting realist
   assert(prompt.includes('Never more than 250 words.'), 'the ceiling is unchanged');
   assert(prompt.includes('A yes/no or one-fact question') && prompt.includes('no story'), 'a one-fact question gets a short direct answer');
   assert(prompt.includes('gets the answer first and the reason after, usually 25 to 60 words'), 'a follow-up does not start a new story');
-  assert(prompt.includes('"briefly", "quick one", "in a sentence"'), 'a request for brevity is honoured');
+  assert(!prompt.includes('"quick one"'), 'no quoted phrase to match');
+});
+
+test('brevity is its own bullet that overrides the ranges, in both prompts, and the call time is data given only when known', () => {
+  const work = { ...CONTEXT, pad: { open: true, lang: 'python', text: '' } };
+  for (const prompt of [draftAnswerPrompt(CONTEXT), draftWorkPrompt(work)]) {
+    const bullet = prompt.split('\n').find(line => line.startsWith('- When the interviewer asks for something quick or brief'));
+    assert(bullet, 'a bullet of its own');
+    assert(bullet.includes('the last question') && bullet.includes('nearly over') && bullet.includes('overrides every range'));
+    assert(!prompt.includes('<call-time'), 'no timing, no section');
+  }
+  const timing = { elapsedMs: 283000, plannedMs: 300000, questionMinutes: 1.5 };
+  for (const prompt of [draftAnswerPrompt({ ...CONTEXT, timing }), draftWorkPrompt({ ...work, timing })]) {
+    assert(prompt.includes('Time on the call so far: 4:43') && prompt.includes('Planned length of the interview: 5:00') && prompt.includes('Time planned for the question being asked: 1.5 minutes'));
+    assert(prompt.indexOf('<call-time') < prompt.indexOf('<conversation-so-far>'));
+  }
+  const partial = draftAnswerPrompt({ ...CONTEXT, timing: { elapsedMs: 60000 } });
+  assert(partial.includes('Time on the call so far: 1:00') && !partial.includes('Planned length') && !partial.includes('being asked:'));
+});
+
+test('a topic the documents never touch is answered as a prepared candidate would, without disclaiming; consistency stays', () => {
+  const prompt = draftAnswerPrompt(CONTEXT);
+  assert(prompt.includes('A topic the documents never touch at all') && prompt.includes('without saying it is outside your experience'));
+  assert(prompt.includes('Keep anything you make up consistent with the documents'));
+});
+
+test('work: the silent typing budget is given in numbers', () => {
+  const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
+  assert(prompt.includes('about eight to ten seconds') && prompt.includes('ninety to a hundred characters') && prompt.includes('three to four short lines'));
+  assert(prompt.includes('signature at most') && prompt.includes('never more than about a hundred characters typed in silence'));
 });
 
 test('prepared answers are offered as ideas to take in a few sentences, not as scripts', () => {

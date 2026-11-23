@@ -169,11 +169,15 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     // Each recogniser segment is measured alone, so the silence between two segments of one answer is a pause no
     // segment saw. It counts unless the call was paused through it or an interviewer spoke in it.
     const ordered = prosody.filter(item => finite(item.startMs) && finite(item.endMs)).sort((a, b) => a.startMs - b.startMs);
+    let deliveryGapMs = 0; // the aid's delivery time between its own lines, which is not the candidate's time on the clock
     for (let i = 1; i < ordered.length; i += 1) {
       const fromMs = ordered[i - 1].endMs;
       const toMs = ordered[i].startMs;
       if (toMs - fromMs < PAUSE_MIN_MS) continue;
-      if (generatedItems.has(ordered[i - 1]) && generatedItems.has(ordered[i])) continue;
+      if (generatedItems.has(ordered[i - 1]) && generatedItems.has(ordered[i])) {
+        deliveryGapMs += toMs - fromMs - pausedOverlapMs(pauseSpans, fromMs, toMs);
+        continue;
+      }
       if (pausedOverlapMs(pauseSpans, fromMs, toMs) > 0) continue;
       if (entries.some(other => other?.speaker === 'interviewer' && other.channel !== 'chat' && finite(other.startMs) && finite(other.endMs) && other.startMs < toMs && other.endMs > fromMs)) continue;
       pauses.push({ startMs: fromMs, endMs: toMs });
@@ -181,8 +185,9 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     const speechMs = prosody.reduce((sum, item) => sum + (finite(item.speechMs) ? item.speechMs : 0), 0);
     const durationMs = Math.max(0, answer.endMs - answer.startMs);
     // Pace is over the time the candidate was on the clock: wall clock less any paused time. The speech-frame rate
-    // (articulationWpm) leaves out every silence, so it reads faster and is a separate figure.
-    const activeMs = Math.max(0, durationMs - pausedOverlapMs(pauseSpans, answer.startMs, answer.endMs));
+    // (articulationWpm) leaves out every silence, so it reads faster and is a separate figure. The gaps between
+    // two lines the aid wrote are its delivery, so they come off the clock too.
+    const activeMs = Math.max(0, durationMs - pausedOverlapMs(pauseSpans, answer.startMs, answer.endMs) - deliveryGapMs);
     const pitchRangeSt = median(prosody.map(item => item.pitchRangeSt));
     const base = answer.voicedOnly ? (voicedBaselineSnapshot ?? voicedFallback) : baselineSnapshot;
     const prior = answer.turnIndexes[0] - 1;

@@ -1,5 +1,6 @@
 import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_FEEDBACK_LIMITS as LIMITS } from '../../ipc/interviewQaPractice.js';
 import { prosodyByEntry } from '../audio/callMetrics.js';
+import { activeClock } from './activeTime.js';
 
 /** Limits of the chapters and moments lists, shared by the schema, the prompt and the trimming in analyzeCall. */
 export const REVIEW_LIMITS = Object.freeze({ chapters: 40, moments: 40, chapterTitle: 120, momentLabel: 200 });
@@ -75,13 +76,14 @@ function startedText(value) {
  * How the candidate answered: spoken answers, typed answers, or both. Acknowledgements are neither.
  * A chat line the call voiced in the candidate's voice (`voiced`) is spoken, exactly like live speech;
  * `live` counts only what the microphone heard, which is what the recording can be transcribed for.
+ * A voiced entry may carry no `channel` (it came from the recogniser), so `voiced` alone keeps it out of `live`.
  */
 export function candidateAnswerKinds(transcript) {
   const turns = Array.isArray(transcript) ? transcript : [];
   const own = turns.filter(turn => turn?.speaker === 'candidate' && !turn.acknowledgement);
   const typed = own.filter(turn => turn.channel === 'chat' && turn.voiced !== true).length;
   const spoken = own.length - typed;
-  const live = own.filter(turn => turn.channel !== 'chat').length;
+  const live = own.filter(turn => turn.channel !== 'chat' && turn.voiced !== true).length;
   return { spoken, live, typed, typedOnly: spoken === 0 && typed > 0 };
 }
 
@@ -145,13 +147,15 @@ export function pickedCards(callRecord, plan) {
 
 const yesNo = value => (value === null ? 'unknown' : value ? 'yes' : 'no');
 
+const PROBES_LABEL = 'possible probes the planner wrote (the transcript shows which were actually asked; an unasked one is not a question the candidate faced)';
+
 function formatPicked(cards) {
   return cards.map(entry => {
     if (entry.unprepared) {
-      return [`card 0 (the unprepared question, no prepared answer): ${entry.question}`, ...(entry.probes.length ? [`   interviewer's probes: ${entry.probes.join(' | ')}`] : [])].join('\n');
+      return [`card 0 (the unprepared question, no prepared answer): ${entry.question}`, ...(entry.probes.length ? [`   ${PROBES_LABEL}: ${entry.probes.join(' | ')}`] : [])].join('\n');
     }
     const status = `   engine: asked ${yesNo(entry.asked)}, answered ${entry.asked === false ? 'no' : yesNo(entry.answered)}`;
-    return formatCard(entry.card, `card ${entry.number}: ${entry.question}`, [status, ...(entry.probes.length ? [`   interviewer's probes for this card: ${entry.probes.join(' | ')}`] : [])]);
+    return formatCard(entry.card, `card ${entry.number}: ${entry.question}`, [status, ...(entry.probes.length ? [`   ${PROBES_LABEL}: ${entry.probes.join(' | ')}`] : [])]);
   }).join('\n');
 }
 
@@ -174,12 +178,12 @@ function panelInterviewers(callRecord) {
   return [lead, ...panel.filter(member => member !== lead)];
 }
 
-function interviewerText(member) {
+function interviewerText(member, onClock = clock) {
   const parts = [line(member.name) || `interviewer ${line(member.id)}`.trim()];
   if (line(member.role)) parts.push(line(member.role));
   const focus = line(member.focus);
   const late = member.joins === 'late';
-  const when = typeof member.joinedAtMs === 'number' && Number.isFinite(member.joinedAtMs) ? ` at ${clock(member.joinedAtMs)}` : '';
+  const when = typeof member.joinedAtMs === 'number' && Number.isFinite(member.joinedAtMs) ? ` at ${onClock(member.joinedAtMs)}` : '';
   const tail = [
     focus ? `focus: ${focus}` : '',
     late ? (when ? `joined late${when}` : 'joined late, but never joined the call') : '',
@@ -189,7 +193,7 @@ function interviewerText(member) {
 
 const sentOf = turn => (turn?.speaker === 'candidate' && typeof turn.sentText === 'string' ? line(turn.sentText) : '');
 
-function formatTranscript(transcript, wordsByTurn, interviewers = []) {
+function formatTranscript(transcript, wordsByTurn, interviewers = [], onClock = clock) {
   const names = new Map(interviewers.map(member => [member.id, line(member.name)]).filter(([, name]) => name));
   return transcript.map((turn, index) => {
     const named = turn.speaker !== 'candidate' ? names.get(turn.speakerId) : '';
@@ -202,7 +206,7 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
     const statement = turn.statement === true && turn.speaker !== 'candidate' ? ' (asked nothing; left room for a reaction)' : '';
     // A voiced chat line was spoken on the call: it carries no (chat) mark, so it reads as the speech it was.
     const channelMark = turn.channel && turn.channel !== 'audio' && !(turn.voiced === true && turn.speaker === 'candidate') ? ` (${turn.channel})` : '';
-    const head = `[${index}] ${who}${overlap}${statement} ${clock(turn.startMs)}-${clock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
+    const head = `[${index}] ${who}${overlap}${statement} ${onClock(turn.startMs)}-${onClock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
     const extras = segments.map(segment => `    ${names.get(segment.speakerId) || 'interviewer'}: ${line(segment.text)}`);
     // The recogniser's text can carry mis-hearings; for a line the AI voice spoke the known words lead and the recogniser's version follows.
     if (sentOf(turn) && line(turn.text) && line(turn.text) !== line(sentOf(turn))) extras.push(`    recogniser heard it as: ${line(turn.text)}`);
@@ -220,9 +224,27 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
   }).join('\n');
 }
 
-function formatToneTimeline(samples) {
+function formatToneTimeline(samples, onClock = clock) {
   if (!Array.isArray(samples) || !samples.length) return '(no tone samples)';
-  return samples.map(sample => `${clock(sample?.atMs)} arousal ${sample?.arousal} dominance ${sample?.dominance} valence ${sample?.valence}`).join('\n');
+  return samples.map(sample => `${onClock(sample?.atMs)} arousal ${sample?.arousal} dominance ${sample?.dominance} valence ${sample?.valence}`).join('\n');
+}
+
+/** The metrics block for the prompt: every recording time in its lists (answers, cut-ins, interruptions) as active-clock mm:ss, not raw recording milliseconds. */
+const METRIC_TIMES = Object.freeze({ atMs: 'at', startMs: 'start', endMs: 'end', interviewerEndMs: 'interviewerEnd' });
+function metricsOnClock(metrics, onClock) {
+  if (!metrics || typeof metrics !== 'object') return metrics;
+  const timed = items => (Array.isArray(items) ? items.map(entry => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const copy = {};
+    for (const [key, value] of Object.entries(entry)) {
+      if (METRIC_TIMES[key] && Number.isFinite(value)) copy[METRIC_TIMES[key]] = onClock(value);
+      else copy[key] = value;
+    }
+    return copy;
+  }) : items);
+  const copy = { ...metrics };
+  for (const key of ['answers', 'typedAnswers', 'interviewerCutIns', 'candidateInterruptions']) if (key in copy) copy[key] = timed(copy[key]);
+  return copy;
 }
 
 function formatMetrics(metrics) {
@@ -242,7 +264,7 @@ const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
   // The schema's maxLength is not enforced on the model's side, so the limits are stated here, from the numbers the validator enforces.
   `- ${lengthLimits()}`,
-  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace.',
+  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace. A difference in pace between answers is never a reason to praise or fault how dense an explanation was.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
@@ -252,12 +274,13 @@ const RULES = [
   '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the candidate was still speaking when the interviewer came in. Why they came in is a separate question, and the turn says it when recorded: an interviewer can cut in to probe a detail, to move on once they have enough, or because an answer really ran long, and a persona that interrupts readily does so on short answers too. Judge each cut by its recorded reason and by how long the answer had run, and call an answer long only when the reason or its length shows that. A turn that says the interviewer came in after the candidate had essentially finished is not a cut-in. When the reason is not recorded, say so rather than guessing at length. Mention cut-ins in delivery when they happened, and count them from the metrics (interviewerCutInCount), never from memory.',
   '- Never print transcript turn numbers (the bracketed indices) in any feedback text: refer to the question, or to a time as mm:ss. The indices are only for the chapter and moment index fields.',
   '- Words: for a candidate line that has a "recogniser heard it as" note, the words on the main line are what was actually said; the note is speech recognition and may be wrong. Never criticise a word that appears only in the recogniser version.',
-  '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). Never fault the interviewer for asking about something the candidate has not done.',
+  '- Fit for the role: this interview was held whether or not the candidate\'s background matches the job. Judge every answer against what this role really needs, as its interviewers would, never against an easier bar because of the candidate\'s background. Saying honestly that they have not done something is not a bad answer in itself: name it as a gap for this role, and judge what they did with it (the closest experience they offered, the approach they described, or nothing). In that planned entry\'s improve, say in one sentence what the role needs, that this is a gap, and whether they offered any real, closest experience; the score is the answer\'s own quality, not lifted for the honesty. Never fault the interviewer for asking about something the candidate has not done.',
   '- Typed turns: a transcript turn marked (chat) was typed, not spoken. Every turn without that mark was spoken, and all spoken answers are judged the same way. A typed line from the candidate is one of their answers and is judged for content, structure and relevance like any spoken answer. Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn: typing has no voice to measure. Never critique typos, spelling, stray characters or missing punctuation in typed text as if they were speech; typed text is judged for content only.',
 ].join('\n');
 
 const SCOPE_RULES = [
   '- Scope: judge each answer against the question that was actually asked and the follow-ups the interviewer put to it. A prepared point the candidate was not asked about may appear only in the optional extension of that entry, never in improve and never as a gap or something they missed.',
+  '- Priorities, improve, communication and delivery notes rest only on what the transcript shows. A prepared point or probe that was never put to the candidate, and a check the interviewer cut short, moved on from or ended, is never a priority, a gap or an improvement; it may only appear in extension.',
   '- Hedges: report a hedged statement as hedged. Quote the hedge ("perhaps", "maybe", "I might") and never upgrade it into a decision, a commitment or a fact the candidate did not state.',
 ].join('\n');
 
@@ -295,10 +318,10 @@ function turnAt(transcript, atMs) {
   return index < 0 ? 'before the first transcript turn' : `during or after transcript turn [${index}]`;
 }
 
-function formatScreens(screens, transcript) {
+function formatScreens(screens, transcript, onClock = clock) {
   return screens.map((screen, index) => {
-    const ended = typeof screen.endMs === 'number' && Number.isFinite(screen.endMs) ? `, until ${clock(screen.endMs)}` : ', until the end of the call';
-    const head = `screen ${index + 1}: "${line(screen.title) || '(untitled)'}" shown at ${clock(screen.atMs)} (${turnAt(transcript, screen.atMs)})${ended}`;
+    const ended = typeof screen.endMs === 'number' && Number.isFinite(screen.endMs) ? `, until ${onClock(screen.endMs)}` : ', until the end of the call';
+    const head = `screen ${index + 1}: "${line(screen.title) || '(untitled)'}" shown at ${onClock(screen.atMs)} (${turnAt(transcript, screen.atMs)})${ended}`;
     // What a picture or diagram above the text showed: a stale diagram can contradict the text, and the candidate saw both.
     const visual = screen.visual && typeof screen.visual === 'object' && line(screen.visual.description)
       ? `\n(${screen.visual.kind === 'picture' ? 'picture' : 'diagram'} above the text, showing: ${cut(line(screen.visual.description), 600)})` : '';
@@ -320,14 +343,14 @@ const UNPREPARED_NOTE = (text) => [
   'There is no prepared answer for it. Judge it only if the transcript shows the interviewer actually reached it: then judge the candidate\'s answer on its own, as a test of adaptability (structure, relevance, composure) and never fault it for departing from prepared material. If the transcript never shows it being asked, say nothing about it and give it no score.',
 ].join('\n');
 
-const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written. Before marking an answer down for misreading a screen, check that screen as shown (its text and the picture or diagram above it): when the screen contradicted itself or was wrong, for example an earlier traffic list or a diagram of starting positions left on screen beside an update, an answer that followed one of its versions is not a misreading, so do not count it against the candidate; say the screen was unclear, and credit a candidate who noticed the contradiction or asked which was current.';
+const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written. Before marking an answer down for misreading a screen, check that screen as shown (its text and the picture or diagram above it): when the screen contradicted itself or was wrong, for example an earlier traffic list or a diagram of starting positions left on screen beside an update, an answer that followed one of its versions is not a misreading, so do not count it against the candidate; say the screen was unclear, and credit a candidate who noticed the contradiction or asked which was current. What the screen states (input ranges, types, start state) is a given: restating it is not the candidate\'s assumption, and advice to defend against a case the screen excludes is not made. Say when the interviewer ended or moved on from an exercise and which parts the candidate had not reached; do not count them as missed or as a priority.';
 
 /** Active length: the call's length minus the time it was paused (the candidate typing). */
 function lengthLine(callRecord) {
   const total = Number(callRecord.durationMs);
   const paused = Number(callRecord.pausedMs);
   if (!(paused > 0) || !Number.isFinite(total)) return `length: ${clock(callRecord.durationMs)}`;
-  return `length: ${clock(Math.max(0, total - paused))} active. The call was also paused for ${clock(paused)}; that paused time is excluded from the length and from every rate. Transcript times run on the recording's clock and include the pauses, so large gaps between turns are pauses, not silence.`;
+  return `length: ${clock(Math.max(0, total - paused))} active. The call was also paused for ${clock(paused)}; that paused time is excluded from the length and from every rate. Every clock time in this prompt is on that active clock, with the pauses left out, the same clock the replay shows.`;
 }
 
 /** The one review prompt: timed transcript, plan, metrics, tone, Scribe words. */
@@ -340,12 +363,15 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const candidateEnded = reason === 'candidate' || reason === 'window-closed';
   // Anything else but the interviewer's own wrap-up (audio helper, session or other failure) cut the call short.
   const technicalEnd = Boolean(reason) && !candidateEnded && reason !== 'interviewer';
+  // Every time the reviewer sees is on the active clock (pauses removed), the clock the replay shows.
+  const toActive = activeClock(callRecord.pauseSpans);
+  const at = ms => clock(toActive(ms));
   const { typedOnly } = candidateAnswerKinds(transcript);
   const interviewers = panelInterviewers(callRecord);
   const header = [
     `call id: ${line(callRecord.callId) || '(unknown)'}`,
     `interviewer persona: ${personaText(callRecord.persona) || '(unknown)'}`,
-    interviewers.length ? `interviewers on this call (a panel): ${interviewers.map(interviewerText).join('; ')}` : '',
+    interviewers.length ? `interviewers on this call (a panel): ${interviewers.map(member => interviewerText(member, at)).join('; ')}` : '',
     focus ? `interview focus requested by the candidate: ${focus}` : '',
     focus ? 'judge the call against that requested focus: a stage, depth or topic the focus asked to skip or lighten is not a gap, so do not penalise the interviewer for leaving it out' : '',
     `started: ${startedText(callRecord.startedAt) || '(unknown)'}`,
@@ -374,13 +400,13 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
       ? ['--- PICKED QUESTIONS (the planned questions of this call; the interviewers did not see the prepared answers) ---', formatPicked(picked)]
       : ['--- PLAN (prepared answers the candidate could draw on; the interviewers did not see them) ---', formatPlan(plan)]),
     ...(unprepared ? ['--- THE UNPREPARED QUESTION ---', UNPREPARED_NOTE(unprepared)] : []),
-    '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers),
-    ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metrics)]),
-    ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript)] : []),
+    '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers, at),
+    ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at))]),
+    ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
     ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP))] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),
-      '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples),
+      '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples, at),
     ]),
   ];
   if (transcriptionError) sections.push(`--- TRANSCRIPTION NOTE ---\nThe verbatim Scribe pass failed (${line(transcriptionError) || 'unknown error'}), so no word-level transcript is available. Judge fillers only from the readable transcript, and do not claim a filler count you cannot support.`);

@@ -96,6 +96,10 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
     const typeKeys = async (target, { stopped = () => false, paused = () => false, yielding = () => false, pace = 1 } = {}) => {
         const rate = Number.isFinite(pace) && pace > 0 ? pace : 1;
         let flushedAt = Date.now();
+        // The first key of a run goes out at once: the debounce never fires while keys come this fast, and a turn that
+        // began in the first second would find the pad untouched and not know the candidate is typing.
+        let first = true;
+        const sendFirst = () => { if (!first) return; first = false; flushRef.current(); flushedAt = Date.now(); };
         const goal = String(target ?? '').slice(0, PAD_TEXT_MAX);
         const step = async ms => {
           await sleep(ms);
@@ -115,6 +119,7 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
             const cut = at + remove;
             cursorRef.current = cut - 1;
             editRef.current(`${now.slice(0, cut - 1)}${now.slice(cut)}`);
+            sendFirst();
             continue;
           }
           const char = insert[0];
@@ -125,6 +130,7 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
           const now = textRef.current;
           cursorRef.current = at + 1;
           editRef.current(`${now.slice(0, at)}${char}${now.slice(at)}`);
+          sendFirst();
         }
     };
     return () => { alive = false; if (typerRef.current) typerRef.current = null; };

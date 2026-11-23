@@ -276,7 +276,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan: givenPlan, b
   // A call with no live speech has a silent candidate track: there is nothing to transcribe,
   // and the review is not told that transcription failed.
   const answerKinds = candidateAnswerKinds(transcript);
-  // Only the microphone has anything to transcribe: a line the voice spoke is not on the candidate track.
+  // Only the microphone is worth transcribing: a voiced line's words are known, and a call of voiced lines only has no live speech.
   const nothingSpoken = answerKinds.live === 0;
   event('answers', { ...answerKinds });
   if (!nothingSpoken && !clients.transcribe) {

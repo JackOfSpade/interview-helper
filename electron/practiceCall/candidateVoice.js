@@ -27,6 +27,7 @@ export const TAG_TIMEOUT_MS = 4000;
 export const PREPARE_TIMEOUT_MS = 15000;
 const TRANSCRIPT_TURNS = 12;
 const TURN_MAX = 600;
+const REPLY_LOGGED_MAX = 400;
 const TAG = /\[[^[\]\n]{1,80}\]/gu;
 
 const clip = (value, max) => {
@@ -75,7 +76,8 @@ export function candidateTagPrompt({ text, sentences: given = null, transcript =
     'Rules:',
     '- A tag is a short, plain, lower-case description of how the voice sounds, in square brackets, for example [warmly], [engaged], [thoughtful], [confident], [matter-of-fact], [brightening], [earnest], [light laugh], [slightly slower]. Write the one each moment calls for. It is placed right before the sentence you number.',
     '- Choose them from what the line says and where the conversation is: friendly for small talk, steady and confident for an experience story, a lift for a result they are proud of, thoughtful for a hard question, a light laugh only when something is actually funny.',
-    '- Most sentences need no tag. Usually one or two tags in the whole line, at most one per sentence. A very short line often needs none.',
+    // The batch holds several lines, so "the whole line" read as the whole batch and left most lines plain (call of 2026-11-22).
+    `- Most sentences need no tag. ${Array.isArray(given) ? 'Usually one or two tags in each line (a line of several sentences usually has one), at most one per sentence.' : 'Usually one or two tags in the whole line, at most one per sentence.'} A very short line often needs none.`,
     '- Keep every sound professional: never a sigh, groan, gasp or yawn. Describe only the voice, never an action, a gesture or a sound effect.',
     '- Output one tagged sentence per line, as the sentence number, a colon and the tag, for example "1: [warmly]". Nothing else: no sentence text, no explanation. If no sentence needs a tag, output "none".',
     '',
@@ -130,10 +132,10 @@ function insertTags(sentences, tags, offset = 0) {
  */
 export async function tagCandidateLine({ tagText, text, transcript, brief, signal, clock = globalThis, timeoutMs = TAG_TIMEOUT_MS } = {}) {
   const line = String(text ?? '').trim();
-  if (!line || typeof tagText !== 'function') return { text: line, tagged: false };
+  if (!line || typeof tagText !== 'function') return { text: line, tagged: false, tags: 0 };
   const controller = new AbortController();
   const stop = () => { try { controller.abort(); } catch { /* already stopped */ } };
-  if (signal?.aborted) return { text: line, tagged: false };
+  if (signal?.aborted) return { text: line, tagged: false, tags: 0 };
   signal?.addEventListener?.('abort', stop, { once: true });
   let timer = null;
   try {
@@ -142,8 +144,10 @@ export async function tagCandidateLine({ tagText, text, transcript, brief, signa
       Promise.resolve(tagText({ prompt: candidateTagPrompt({ text: line, transcript, role: brief?.role, company: brief?.company }), signal: controller.signal })).catch(() => null),
       timeout,
     ]);
-    const tagged = applyTags(line, typeof reply === 'string' ? reply : reply?.text);
-    return tagged ? { text: tagged, tagged: true } : { text: line, tagged: false };
+    const sentences = splitSentences(line);
+    const tags = parseTags(typeof reply === 'string' ? reply : reply?.text, sentences.length);
+    const tagged = insertTags(sentences, tags);
+    return tagged ? { text: tagged, tagged: true, tags: tags.size } : { text: line, tagged: false, tags: 0 };
   } finally {
     try { if (timer !== null) clock.clearTimeout(timer); } catch { /* fired */ }
     signal?.removeEventListener?.('abort', stop);
@@ -157,7 +161,9 @@ export async function tagCandidateLine({ tagText, text, transcript, brief, signa
  */
 export async function tagCandidateLines({ tagText, texts = [], transcript, brief, clock = globalThis, timeoutMs = PREPARE_TIMEOUT_MS } = {}) {
   const lines = (Array.isArray(texts) ? texts : []).map(value => String(value ?? '').trim());
-  const plain = () => lines.map(text => ({ text, tagged: false }));
+  // `reply` is the model's answer (clipped) or null when there was none: a failed or late call, told apart in the log
+  // from a reply that tagged nothing.
+  const plain = () => lines.map(text => ({ text, tagged: false, tags: 0, reply: null }));
   const split = lines.map(line => splitSentences(line));
   const all = split.flat();
   if (!all.length || typeof tagText !== 'function') return plain();
@@ -169,12 +175,15 @@ export async function tagCandidateLines({ tagText, texts = [], transcript, brief
       Promise.resolve(tagText({ prompt: candidateTagPrompt({ sentences: all, transcript, role: brief?.role, company: brief?.company }), signal: controller.signal })).catch(() => null),
       timeout,
     ]);
-    const tags = parseTags(typeof reply === 'string' ? reply : reply?.text, all.length);
+    const replyText = typeof reply === 'string' ? reply : reply?.text;
+    const tags = parseTags(replyText, all.length);
+    const shown = typeof replyText === 'string' ? clip(replyText, REPLY_LOGGED_MAX) : null;
     let offset = 0;
     return lines.map((text, index) => {
       const tagged = insertTags(split[index], tags, offset);
+      const landed = split[index].filter((_, at) => tags.has(offset + at)).length;
       offset += split[index].length;
-      return tagged ? { text: tagged, tagged: true } : { text, tagged: false };
+      return tagged ? { text: tagged, tagged: true, tags: landed, reply: shown } : { text, tagged: false, tags: 0, reply: shown };
     });
   } catch {
     return plain();
@@ -217,8 +226,8 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
       if (!keys.length) return;
       const { transcript, brief } = attemptValue(context) || {};
       // One call for all of them (see tagCandidateLines), shared by each line's entry.
-      const batch = tagCandidateLines({ tagText, texts: keys, transcript, brief, clock }).catch(() => keys.map(text => ({ text, tagged: false })));
-      keys.forEach((key, index) => prepared.set(key, batch.then(results => results[index] ?? { text: key, tagged: false })));
+      const batch = tagCandidateLines({ tagText, texts: keys, transcript, brief, clock }).catch(() => keys.map(text => ({ text, tagged: false, tags: 0, reply: null })));
+      keys.forEach((key, index) => prepared.set(key, batch.then(results => results[index] ?? { text: key, tagged: false, tags: 0, reply: null })));
       while (prepared.size > PREPARED_MAX) prepared.delete(prepared.keys().next().value);
     },
     open({ utteranceId, text, signal } = {}) {
@@ -232,9 +241,9 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
       const done = (async () => {
         const { transcript, brief } = attemptValue(context) || {};
         const tagged = ready
-          ? await within(ready, TAG_TIMEOUT_MS, { text: String(text ?? '').trim(), tagged: false }, clock)
+          ? await within(ready, TAG_TIMEOUT_MS, { text: String(text ?? '').trim(), tagged: false, tags: 0, reply: null }, clock)
           : await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
-        attemptValue(() => onEvent({ type: 'candidate-voice', gender: chosen.gender, tagged: tagged.tagged, tagMs: Math.round((typeof clock.now === 'function' ? clock.now() : Date.now()) - started), chars: tagged.text.length }));
+        attemptValue(() => onEvent({ type: 'candidate-voice', gender: chosen.gender, tagged: tagged.tagged, tags: tagged.tags ?? 0, prepared: Boolean(ready), ...(ready ? { reply: tagged.reply ?? null } : {}), tagMs: Math.round((typeof clock.now === 'function' ? clock.now() : Date.now()) - started), chars: tagged.text.length }));
         if (signal?.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
         stream.sendText(tagged.text);
         return stream.finish();

@@ -278,6 +278,13 @@ function transcriptLine(entry) {
   return reportLine(`${at}${span} ${speaker ?? '?'}${speakerId ? ` (${speakerId})` : ''}: ${text ?? ''}${extra}`);
 }
 
+/** The call's length: durationMs is wall time, the app's own length leaves the paused spans out, so a paused call gives both. */
+function recordLength(record) {
+  const { durationMs, pausedMs } = record;
+  if (!(pausedMs > 0) || !Number.isFinite(durationMs) || pausedMs > durationMs) return `${seconds(durationMs)}${pausedMs ? ` · paused ${seconds(pausedMs)}` : ''}`;
+  return `${seconds(durationMs - pausedMs)} active (${seconds(durationMs)} recorded) · paused ${seconds(pausedMs)}`;
+}
+
 function practiceCallsSection({ calls, windowEvents, logStats, now }) {
   const list = Array.isArray(calls) ? calls : [];
   const yes = value => (value ? 'yes' : 'no');
@@ -294,9 +301,9 @@ function practiceCallsSection({ calls, windowEvents, logStats, now }) {
     out.push('', `### Call ${position + 1}${position === 0 ? ' (newest)' : ''}: started ${isoTime(call?.startedAt)}${Number.isFinite(call?.startedAt) ? ` (${seconds(now - call.startedAt)} ago)` : ''}${before}`);
     if (typeof call?.dir === 'string') out.push(`- Folder: \`${call.dir}\` (call.json, analysis.json, debug.jsonl, call.m4a)`);
     out.push(record
-      ? `- Record: length ${seconds(record.durationMs)}${record.pausedMs ? ` · paused ${seconds(record.pausedMs)}` : ''} · ended ${code(record.reason) || 'unknown'}${record.endedBy ? ` (${code(record.endedBy) || 'other'})` : ''}${record.returnedCall ? ` · returned call (${code(record.returnedCall) || 'yes'})` : ''}`
+      ? `- Record: length ${recordLength(record)} · ended ${code(record.reason) || 'unknown'}${record.endedBy ? ` (${code(record.endedBy) || 'other'})` : ''}${record.returnedCall ? ` · returned call (${code(record.returnedCall) || 'yes'})` : ''}`
         + ` · ${count(record.transcriptEntries)} transcript entries (${count(record.candidateTurns)} the candidate's) · ${count(record.interviewers)} interviewer(s)`
-        + ` · questions picked ${count(record.pickedQuestions)}, asked ${count(record.askedQuestions)}, answered ${count(record.answeredQuestions)}`
+        + ` · questions picked ${count(record.pickedQuestions)}, asked ${count(record.askedQuestions)}, answered ${count(record.answeredQuestions)}${record.unpreparedQuestion ? ` (plus an unprepared question${code(record.unpreparedQuestion.askedBy) ? ` asked by ${code(record.unpreparedQuestion.askedBy)}` : ''}, not counted)` : ''}`
         + ` · feedback skipped ${yes(record.feedbackSkipped)} · recording ${call.hasAudio ? 'kept' : record.recordingPruned ? 'pruned' : 'none'}`
       : '- Record: none (the call never reached its record: a setup that failed, a missed call, or a call still running).');
     if (record?.timings && Object.keys(record.timings).length) {

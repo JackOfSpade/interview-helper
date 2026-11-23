@@ -5,7 +5,7 @@ import path from 'node:path';
 import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
 import { buildChapters } from '../../electron/practiceCall/analysis/chapters.js';
 import { PRACTICE_FEEDBACK_LIMITS } from '../../electron/ipc/interviewQaPractice.js';
-import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, lengthLimits } from '../../electron/practiceCall/analysis/reviewPrompt.js';
+import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits } from '../../electron/practiceCall/analysis/reviewPrompt.js';
 
 // Synthetic call: small talk, two questions, a typed answer, then the farewell.
 const transcript = [
@@ -405,6 +405,8 @@ export default [
       assert.equal(text.includes('return sorted(x)'), true, 'the last snapshot is the final text');
       assert.equal(text.includes('  pass'), false, 'earlier snapshots are not shown');
       assert.match(text, /Never claim anything about code that is not in the pad/u);
+      assert.match(text, /What the screen states \(input ranges, types, start state\) is a given/u);
+      assert.match(text, /Say when the interviewer ended or moved on from an exercise and which parts the candidate had not reached/u);
       const big = build({ ...record, screens: [{ atMs: 0, title: 'Big', content: 'x'.repeat(7000) }], pad: { snapshots: [{ atMs: 1, text: 'y'.repeat(13000) }] } });
       assert.equal(big.includes('x'.repeat(6001)), false);
       assert.equal(big.includes('x'.repeat(6000)), true);
@@ -532,7 +534,7 @@ export default [
         const prompt = buildReviewPrompt({ callRecord: record, plan: pool, brief, metrics });
         const section = prompt.slice(prompt.indexOf('--- PICKED QUESTIONS'), prompt.indexOf('--- THE UNPREPARED QUESTION'));
         assert.ok(section.indexOf('card 1: Pool question 1?') < section.indexOf('card 7:') && section.indexOf('card 7:') < section.indexOf('card 0') && section.indexOf('card 0') < section.indexOf('card 17:'), 'plan order, number 0 where the plan put it');
-        assert.match(section, /card 1: Pool question 1\?[\s\S]*engine: asked yes, answered yes[\s\S]*probes for this card: Scope at the district/u);
+        assert.match(section, /card 1: Pool question 1\?[\s\S]*engine: asked yes, answered yes[\s\S]*possible probes the planner wrote \(the transcript shows which were actually asked; an unasked one is not a question the candidate faced\): Scope at the district/u);
         assert.match(section, /card 7: Pool question 7\?[\s\S]*engine: asked no, answered no/u);
         assert.match(section, /card 17: Pool question 17\?[\s\S]*points: Point 17/u, 'plan numbers are 1-based pool indexes');
         assert.doesNotMatch(prompt, /Pool question 2\?/u, 'unpicked cards are not in the prompt');
@@ -542,6 +544,9 @@ export default [
         assert.match(prompt, /Follow-ups and every other interviewer line .* go into moments/u);
         assert.match(prompt, /may appear only in the optional extension of that entry, never in improve and never as a gap/u);
         assert.match(prompt, /Quote the hedge \("perhaps", "maybe"/u);
+        assert.match(prompt, /Priorities, improve, communication and delivery notes rest only on what the transcript shows[\s\S]*cut short, moved on from or ended, is never a priority, a gap or an improvement/u);
+        assert.match(prompt, /difference in pace between answers is never a reason to praise or fault how dense/u);
+        assert.match(prompt, /In that planned entry's improve, say in one sentence what the role needs, that this is a gap/u);
         assert.match(prompt, /length: 09:41 active\. The call was also paused for 79:26/u);
         assert.match(prompt, /paused time is excluded/u);
         assert.doesNotMatch(prompt, /length: 89:08/u);
@@ -627,6 +632,95 @@ export default [
       assert.match(prompt, /the interviewer's reason: probe/u);
       assert.match(prompt, /not a cut-in/u);
       assert.match(prompt, /Never print transcript turn numbers/u);
+    },
+  },
+  {
+    name: 'practice call analysis: every clock time the review sees is on the active clock, and a call without pauses is unchanged',
+    async run() {
+      const turns = [
+        { speaker: 'interviewer', text: 'First question?', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', text: 'An answer.', startMs: 25000, endMs: 30000, interrupted: true, cutOffBy: 'interviewer', cutInReason: 'probe' },
+        { speaker: 'interviewer', speakerId: 'A', text: 'Go on.', startMs: 31000, endMs: 33000 },
+      ];
+      const paused = { ...callRecord, transcript: turns, durationMs: 40000, pausedMs: 10000, pauseSpans: [{ startMs: 10000, endMs: 20000 }],
+        toneSamples: [{ atMs: 25000, arousal: 0.4, dominance: 0.5, valence: 0.6 }],
+        screens: [{ atMs: 12000, endMs: 28000, title: 'Sum pairs', content: 'Given a list.' }],
+        panel: [{ id: 'A', name: 'Dana' }, { id: 'B', name: 'John', joins: 'late', joinedAtMs: 26000 }] };
+      const text = buildReviewPrompt({ callRecord: paused, plan, brief, metrics: { interviewerCutIns: [{ turnIndex: 1, atMs: 30000, reason: 'probe' }], answers: [{ index: 0, startMs: 25000, endMs: 30000, durationMs: 5000 }] } });
+      assert.match(text, /\[1\] candidate 00:15-00:20:/u, 'a turn after the pause shows active time');
+      assert.match(text, /\[2\] Dana 00:21-00:23:/u);
+      assert.match(text, /shown at 00:10 \(during or after transcript turn \[0\]\), until 00:18/u, 'a time inside the pause is its start');
+      assert.match(text, /^00:15 arousal 0\.4/mu);
+      assert.match(text, /joined late at 00:16/u);
+      assert.match(text, /"at": "00:20"/u, 'the cut-in time is on the same clock');
+      assert.doesNotMatch(text, /"atMs": 30000/u);
+      assert.match(text, /"start": "00:15"/u, 'an answer span in the metrics is on the same clock');
+      assert.doesNotMatch(text, /"startMs": 25000/u);
+      assert.match(text, /Every clock time in this prompt is on that active clock/u);
+      assert.doesNotMatch(text, /include the pauses/u);
+      const plain = buildReviewPrompt({ callRecord: { ...paused, pausedMs: 0, pauseSpans: [] }, plan, brief, metrics: {} });
+      assert.match(plain, /\[1\] candidate 00:25-00:30:/u);
+      assert.doesNotMatch(plain, /active clock/u);
+    },
+  },
+  {
+    name: 'practice call analysis: a voiced line with no channel is not live speech, so a call of voiced lines runs no transcription',
+    async run() {
+      const dir = await tempDir();
+      try {
+        const calls = { scribe: 0 };
+        const record = { ...callRecord, transcript: [
+          { speaker: 'interviewer', text: 'Question?', startMs: 0, endMs: 2000 },
+          { speaker: 'candidate', text: 'Answer given by voice.', voiced: true, generated: true, startMs: 3000, endMs: 6000 },
+        ] };
+        assert.deepEqual(candidateAnswerKinds(record.transcript), { spoken: 1, live: 0, typed: 0, typedOnly: false });
+        await analyzeCall({ callDir: dir, callRecord: record, plan, brief, deps: {
+          transcribe: () => { calls.scribe += 1; return { words: [] }; },
+          metrics: () => ({ typedOnly: false }),
+          callText: () => review,
+          now: () => '2026-11-08T10:05:00.000Z',
+        } });
+        assert.equal(calls.scribe, 0);
+        assert.equal(candidateAnswerKinds([...record.transcript, { speaker: 'candidate', text: 'Live words.', startMs: 7000, endMs: 8000 }]).live, 1, 'a microphone line still counts');
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'practice call analysis: a closing turn that answers the candidate\'s question and says goodbye is split at the lead\'s farewell, a plain farewell is all Closing',
+    run() {
+      const seg = (speakerId, text) => ({ speakerId, text });
+      const base = [
+        { speaker: 'interviewer', text: 'First?', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', text: 'Answer.', startMs: 5000, endMs: 20000 },
+        { speaker: 'interviewer', text: 'Any questions?', startMs: 20000, endMs: 24000 },
+        { speaker: 'candidate', text: 'One question.', startMs: 24000, endMs: 30000 },
+      ];
+      const reviewChapters = [{ questionTurnIndex: 0, title: 'First' }, { questionTurnIndex: 2, title: 'Candidate question' }];
+      const merged = [...base, { speaker: 'interviewer', text: 'Glad. Over to you. Here is the answer. Thanks. Take care. Good meeting you.', startMs: 31000, endMs: 60000,
+        segments: [seg('A', 'Glad.'), seg('B', 'Here is the answer.'), seg('A', 'Thanks. Take care.'), seg('B', 'Good meeting you.')] }];
+      const titles = turns => buildChapters({ transcript: turns, reviewChapters, durationMs: 60000 }).map(chapter => [chapter.title, chapter.startMs, chapter.endMs]);
+      // Turn 31000-60000 (29000 ms). Characters before the lead's farewell (index 2): 'Glad.' + 'Here is the answer.' = 24 of 59 (+ 'Thanks. Take care.' 18 + 'Good meeting you.' 17).
+      const total = merged.at(-1).segments.reduce((sum, item) => sum + item.text.length, 0);
+      const estimated = Math.round(31000 + (24 / total) * 29000);
+      assert.deepEqual(titles(merged), [['First', 0, 20000], ['Candidate question', 20000, estimated], ['Closing', estimated, 60000]], 'the answer stays in the previous chapter, Closing starts at the lead\'s farewell');
+      const timed = [...base, { ...merged.at(-1), segments: merged.at(-1).segments.map((item, index) => (index === 2 ? { ...item, startMs: 50000 } : item)) }];
+      assert.deepEqual(titles(timed).slice(-2), [['Candidate question', 20000, 50000], ['Closing', 50000, 60000]], 'a recorded segment start is used over the estimate');
+      const early = [...base, { ...merged.at(-1), segments: merged.at(-1).segments.map((item, index) => (index === 2 ? { ...item, startMs: 5 } : item)) }];
+      assert.equal(titles(early).at(-1)[1], 31000, 'a recorded time outside the turn is clamped to it');
+      const replyThenBye = [...base, { speaker: 'interviewer', text: 'Here is the answer. Thanks. Take care.', startMs: 31000, endMs: 41000, segments: [seg('A', 'Here is the answer.'), seg('B', 'Thanks. Take care.')] }];
+      assert.equal(titles(replyThenBye).at(-1)[0], 'Closing', 'a lead who speaks only first leaves nothing to tell apart: the whole turn is Closing');
+      const replyHandOverBye = [...base, { speaker: 'interviewer', text: 'x', startMs: 31000, endMs: 41000, segments: [seg('A', 'Over to you.'), seg('B', 'The answer is long.'), seg('A', 'Take care.')] }];
+      const lastTwo = titles(replyHandOverBye).slice(-2);
+      assert.equal(lastTwo[1][0], 'Closing');
+      assert.ok(lastTwo[1][1] > 31000 && lastTwo[1][1] < 41000, 'a three-part turn is split too');
+      const farewell = [...base, { speaker: 'interviewer', text: 'Thanks, take care.', startMs: 31000, endMs: 36000 }];
+      assert.deepEqual(titles(farewell).at(-1), ['Closing', 31000, 60000], 'a pure farewell turn keeps Closing');
+      const handOver = [...base, { speaker: 'interviewer', text: 'Thanks. Good meeting you.', startMs: 31000, endMs: 36000, segments: [seg('A', 'Thanks.'), seg('B', 'Good meeting you.')] }];
+      assert.deepEqual(titles(handOver).at(-1), ['Closing', 31000, 60000], 'lead plus a colleague\'s goodbye is all Closing');
+      const noVoices = [...base, { speaker: 'interviewer', text: 'x', startMs: 31000, endMs: 41000, segments: [{ text: 'Over to you.' }, { text: 'Take care.' }] }];
+      assert.equal(titles(noVoices).at(-1)[1], 31000, 'segments without speaker ids are not split (no lead to find)');
+      const afterAcknowledgement = [...base.slice(0, 3), { speaker: 'candidate', text: 'Nothing.', acknowledgement: true, startMs: 24000, endMs: 25000 }, merged.at(-1)];
+      assert.equal(titles(afterAcknowledgement).at(-1)[1], 31000, 'no candidate question before it: the turn is not split');
     },
   },
   {

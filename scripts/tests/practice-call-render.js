@@ -353,6 +353,45 @@ export const presentingTests = [
     },
   },
   {
+    name: 'practice call render: the wand sends the first key of a typing run at once, not a second later',
+    async run() {
+      const { JSDOM } = await import('jsdom');
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true });
+      const saved = {};
+      const realChannel = globalThis.MessageChannel;
+      const channels = [];
+      globalThis.MessageChannel = class { constructor() { const channel = new realChannel(); channels.push(channel); return channel; } };
+      const names = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'KeyboardEvent', 'MouseEvent'];
+      for (const name of names) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true, writable: true }); }
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+      let bundle = null;
+      try {
+        bundle = await loadServerBundle();
+        const { React, createRoot, CodingPad } = bundle.module;
+        const sent = [];
+        const typerRef = { current: null };
+        const root = createRoot(dom.window.document.getElementById('root'));
+        await React.act(async () => root.render(React.createElement(CodingPad, { onChange: text => sent.push(text), typerRef })));
+        let stop = false;
+        let run = null;
+        await React.act(async () => { run = typerRef.current.typeTo('abcdefghijklmnopqrstuvwxyz'.repeat(3), { stopped: () => stop }); });
+        // The debounce is 400 ms and the periodic send 1000 ms; keys come about 100 ms apart.
+        await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+        assert(sent.length === 1 && sent[0].length >= 1 && sent[0].length <= 5, `the first keys went out before the debounce or the periodic send: ${JSON.stringify(sent)}`);
+        stop = true;
+        await React.act(async () => { await run; });
+        await React.act(async () => root.unmount());
+      } finally {
+        for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
+        delete globalThis.IS_REACT_ACT_ENVIRONMENT;
+        globalThis.MessageChannel = realChannel;
+        for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+        dom.window.close();
+        if (bundle) await bundle.dispose();
+      }
+    },
+  },
+  {
     name: 'practice call render: a pad with no required language has a language dropdown that starts on Python and sends the pick; a required one is a label',
     async run() {
       const { JSDOM } = await import('jsdom');

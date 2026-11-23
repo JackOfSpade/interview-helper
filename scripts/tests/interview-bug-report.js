@@ -369,6 +369,10 @@ const tests = [
         'screen in-call',
       ]) assert.ok(section.includes(needle), `the practice call section shows ${needle}`);
       assert.ok(section.includes('start {"callId":"call-1","args":{"nodeId":"n","canonicalJobUrl":"https://jobs.hidden.test/1"},"steering":"SECRET STEERING"}'));
+      // A paused call gives its active length and the recorded one; a call that shows an unprepared question says so.
+      const paused = await buildBugReportMarkdown({ payload: {}, sources: sources({ practiceCalls: () => ({ calls: [{ callId: 'p', record: { durationMs: 446_737, pausedMs: 55_264, reason: 'candidate', pickedQuestions: 3, askedQuestions: 2, answeredQuestions: 1, unpreparedQuestion: { text: 'SECRET', askedBy: 'B' } }, transcript: [] }] }) }) });
+      assert.ok(paused.includes('- Record: length 391s active (447s recorded) · paused 55s · ended candidate'), 'a paused call gives active and recorded length');
+      assert.ok(paused.includes('answered 1 (plus an unprepared question asked by B, not counted)') && !paused.includes('SECRET'), 'the unprepared question is named, its text is not');
       // No call at all, or no practice call service, still writes the section.
       const empty = await buildBugReportMarkdown({ payload: {}, sources: sources({ practiceCalls: () => ({ calls: [] }) }) });
       assert.match(empty, /## Practice calls[\s\S]*- No practice call has a debug log\.[\s\S]*### Call window events \(0\)/u);

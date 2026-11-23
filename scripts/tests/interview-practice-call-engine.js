@@ -7142,3 +7142,147 @@ test('watcher: without a watcher the timed looks run exactly as before', async (
   assert(mainCalls(rig)[1].message.includes(STILL));
   assert.equal(rig.of('watch').length, 0);
 });
+
+// ---- the typing halt survives the keys typed while the candidate gave way ---------------------------------------------
+async function haltPadAndFloor(rig) {
+  await greet(rig);
+  await openPad(rig);
+  rig.engine.setPadText('-- portable version:\n-- SELECT');
+  await speak(rig, 'I will add that as a comment', 'c1');
+  await rig.clock.advance(600);
+  rig.sessions.main.answer('Why row number and not rank?');
+  rig.streams.at(-1).audio(1000);
+  await flush();
+  await rig.clock.advance(700);
+  const id = `utt${rig.streams.length}`;
+  rig.h.playback(id, 'started'); // the pad changed under 2.5 s ago: the candidate stops typing to listen
+  return id;
+}
+async function endFloorAndAnswer(rig, id, said) {
+  rig.h.playback(id, 'finished', 1500);
+  await flush();
+  await rig.clock.advance(PAD_IDLE * 2);
+  await speak(rig, said, 'c2');
+  await rig.clock.advance(1800);
+  return spokenTurns(rig).at(-1);
+}
+
+test('pad halted: keys typed while the candidate gives way (the end of the word) do not clear the note', async () => {
+  const rig = padRig();
+  const id = await haltPadAndFloor(rig);
+  await rig.clock.advance(300);
+  rig.engine.setPadText('-- portable version:\n-- SELECT db_'); // the word is finished after the floor event
+  await rig.clock.advance(400);
+  rig.engine.setPadText('-- portable version:\n-- SELECT db_name');
+  const turn = await endFloorAndAnswer(rig, id, 'rank would keep ties, so two rows could come back for one database');
+  assert.equal(turn.padHalted, true, JSON.stringify(turn));
+  assert.equal(turn.padTyping, undefined);
+});
+
+test('pad halted: an edit after the grace window, and a pad that is back at it, clear the note', async () => {
+  const rig = padRig();
+  const id = await haltPadAndFloor(rig);
+  await rig.clock.advance(5000);
+  rig.engine.setPadText('-- portable version:\n-- SELECT db_name'); // well after the yield: they went back to it
+  const turn = await endFloorAndAnswer(rig, id, 'rank would keep ties, so two rows could come back for one database');
+  assert.equal(turn.padHalted, undefined, JSON.stringify(turn));
+});
+
+test('pad edit: the first change of a burst of typing is logged once, not every key', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await openPad(rig);
+  const before = rig.of('pad-edit').length;
+  for (const text of ['d', 'de', 'def', 'def t']) { rig.engine.setPadText(text); await rig.clock.advance(100); }
+  assert.equal(rig.of('pad-edit').length, before + 1, 'one event for the burst');
+  assert.equal(rig.of('pad-edit').at(-1).chars, 1);
+  await rig.clock.advance(DEFAULT_CALL_THRESHOLDS.padTypingMs);
+  rig.engine.setPadText('def total');
+  assert.equal(rig.of('pad-edit').length, before + 2, 'a new burst after a pause');
+});
+
+// ---- a sentence-end cut-in whose judged snapshot already ended a sentence ---------------------------------------------
+const FINISHED = 'So the first thing we did was move every job onto one queue.';
+
+test('watcher: a sentence-end cut-in whose judged text already ended a sentence is dropped when new speech has begun, and the watcher is asked again', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 50 } });
+  await greet(rig);
+  await watchedAnswer(rig, FINISHED);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe:sentence-end');
+  rig.h.transcript(`${FINISHED} Then we split the workers`, 'a', 0, false, rig.clock.now()); // the next sentence has begun
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  assert(!rig.opsOf('play').some(item => item.id === id), 'never spoken');
+  assert(!rig.of('cut-in').some(event => event.until === 'sentence-end'), 'no hold for the end of a different sentence');
+  assert(rig.of('discarded').some(event => event.reason === 'stale-cut-in'));
+  assert.deepEqual(rig.of('cut-in').map(event => [event.state, event.dropped]), [['stale', 'sentence-over']]);
+  assert.equal(watchCalls(rig).length, 2, 'asked again at once');
+});
+
+test('watcher: a sentence-end cut-in whose judged text already ended a sentence is not held for a sentence end when speech has not resumed', async () => {
+  const rig = watchRig({ thresholds: { cutInStaleWords: 50 } });
+  await greet(rig);
+  await watchedAnswer(rig, FINISHED);
+  await rig.clock.advance(3100);
+  await watchSays(rig, 'cut:A:probe:sentence-end');
+  rig.h.vad(false); // the pause after the sentence
+  await flush();
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  const id = rig.streams.at(-1).utteranceId;
+  assert(rig.opsOf('play').some(item => item.id === id), 'comes in at once, in the pause');
+  assert(!rig.of('cut-in').some(event => event.until === 'sentence-end'), 'no sentence hold');
+  assert(rig.of('cut-in').some(event => event.state === 'committed'));
+});
+
+// ---- a bare reaction is not the question the watcher is shown ---------------------------------------------------------
+async function reactionAfterPlanQuestion(rig, opener, main) {
+  await greet(rig);
+  await askedReply(rig, '<asked n="4"/>Tell me about a scheduler you built.');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'finished', 1000);
+  await flush();
+  await speak(rig, 'let me pull it up for you', 'r');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer(opener);
+  await flush();
+  if (main === '<listen/>') { rig.streams.at(-1).audio(400); await flush(); await rig.clock.advance(700); } // the reaction is already playing when the main reply comes
+  rig.sessions.main.answer(main);
+  await flush();
+  if (main !== '<listen/>') { rig.streams.at(-1).audio(1000); await flush(); await rig.clock.advance(700); }
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'finished', 1500);
+  await flush();
+  await watchedAnswer(rig, 'We began with the queue and then moved every job onto it');
+  await rig.clock.advance(3100);
+  return watchSent(rig);
+}
+
+test('watcher: a reaction that is all the interviewer said keeps the question before it, with its plan number', async () => {
+  const rig = watchRig({ createParser: askedParser, autoOpener: false });
+  const sent = await reactionAfterPlanQuestion(rig, 'Right, go ahead.', '<listen/>');
+  assert(rig.engine.state().transcript.some(entry => entry.speaker === 'interviewer' && entry.text === 'Right, go ahead.'), 'the reaction was spoken');
+  assert.equal(sent.questionText, 'Right. Tell me about a scheduler you built.', 'the plan question (with the reaction that went before it), not "Right, go ahead."');
+  assert.equal(sent.questionNumber, 4);
+  assert.equal(sent.askedBy, 'A');
+});
+
+test('watcher: a short real follow-up after a reaction still replaces the question', async () => {
+  const rig = watchRig({ createParser: askedParser, autoOpener: false });
+  const sent = await reactionAfterPlanQuestion(rig, 'Right.', 'And an empty sequence, len zero?');
+  assert.equal(sent.questionText, 'And an empty sequence, len zero?');
+  assert.equal(sent.questionNumber, null);
+});
+
+test('watcher: a short follow-up that is not a question, or a reaction that asks one, still replaces the question', async () => {
+  const bare = watchRig({ createParser: askedParser, autoOpener: false });
+  const sent = await reactionAfterPlanQuestion(bare, 'Right.', 'Go through the empty case');
+  assert.equal(sent.questionText, 'Go through the empty case');
+  const asking = watchRig({ createParser: askedParser, autoOpener: false });
+  const other = await reactionAfterPlanQuestion(asking, 'Sorry, which one?', '<listen/>');
+  assert.equal(other.questionText, 'Sorry, which one?');
+});

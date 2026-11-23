@@ -541,6 +541,28 @@ export default [
     },
   },
   {
+    name: 'practice call audio: pace leaves out the delivery gap between two generated lines but keeps the same gap in a live answer',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Question.', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', generated: true, voiced: true, text: 'one two three', startMs: 6000, endMs: 9000 },
+        { speaker: 'candidate', generated: true, voiced: true, text: 'four five six', startMs: 12000, endMs: 15000 },
+      ];
+      const prosody = { 1: [{ startMs: 6000, endMs: 9000, speechMs: 2500, pauses: [] }], 2: [{ startMs: 12000, endMs: 15000, speechMs: 2500, pauses: [] }] };
+      const [aid] = callMetrics({ transcript, candidateProsodyByTurn: prosody }).answers;
+      assert.equal(aid.durationMs, 9000);
+      assert.equal(aid.activeMs, 6000, 'the 3 s between the two generated lines is not the candidate\'s time');
+      assert.equal(aid.wordsPerMinute, 60, '6 words over 6 s');
+      assert.equal(aid.fastest20sWindowWpm, 60);
+      const live = transcript.map(entry => ({ ...entry, generated: undefined, voiced: undefined }));
+      const [own] = callMetrics({ transcript: live, candidateProsodyByTurn: prosody }).answers;
+      assert.equal(own.wordsPerMinute, 40, 'the same gap in a live answer stays on the wall clock');
+      // A pause through the gap is taken off once, not twice.
+      const [paused] = callMetrics({ transcript, candidateProsodyByTurn: prosody, pauseSpans: [{ startMs: 9000, endMs: 12000 }] }).answers;
+      assert.equal(paused.activeMs, 6000);
+    },
+  },
+  {
     name: 'practice call audio: only the file modules touch fs and every module has its contract export',
     run() {
       const source = name => fs.readFileSync(new URL(`../../electron/practiceCall/audio/${name}`, import.meta.url), 'utf8');
