@@ -267,7 +267,13 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
   });
 
   // Both sides on wall-clock spans: overlapping speech on one side counts once and paused time counts for neither.
-  const candidateTalkMs = mergedSpanMs(entries.filter(entry => entry?.speaker === 'candidate' && !isTypedLine(entry) && !entry.acknowledgement), pauseSpans);
+  // An entry made only of the aid's lines talks only in its lines: the typing between them is not talk.
+  const talkSpans = entries.filter(entry => entry?.speaker === 'candidate' && !isTypedLine(entry) && !entry.acknowledgement)
+    .flatMap(entry => {
+      const spans = entry.generated === true && Array.isArray(entry.lineSpans) ? entry.lineSpans.filter(span => finite(span?.startMs) && finite(span?.endMs) && span.endMs > span.startMs) : [];
+      return spans.length ? spans.map(span => ({ startMs: span.startMs, endMs: span.endMs })) : [entry];
+    });
+  const candidateTalkMs = mergedSpanMs(talkSpans, pauseSpans);
   const interviewerTalkMs = mergedSpanMs(entries.filter(entry => entry?.speaker === 'interviewer' && entry.channel !== 'chat'), pauseSpans);
   const totalTalkMs = candidateTalkMs + interviewerTalkMs;
 

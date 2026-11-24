@@ -121,6 +121,18 @@ function formatPlan(plan) {
   return entries.map((card, index) => formatCard(card, `${index + 1}. ${questionOf(card) || '(question)'}`)).join('\n');
 }
 
+/**
+ * A technical topic's pool text is an instruction to the planner, so the review and the candidate see the topic and, when
+ * the plan prepared one, the exercise it became.
+ */
+function shownQuestion(question, callRecord, number) {
+  const topic = /^\[Technical topic, not a fixed question\]\s*(.+?)\.?\s+If you pick this, make up your own/u.exec(question)?.[1];
+  if (!topic) return question;
+  const problem = (callRecord?.setup?.plan?.problems ?? []).find(item => item?.question === number);
+  const titles = (problem?.parts ?? []).map(part => line(part?.title)).filter(Boolean).join(' / ');
+  return titles ? `${topic}: ${titles}` : topic;
+}
+
 const numbers = value => (Array.isArray(value) ? value.filter(Number.isInteger) : []);
 
 /**
@@ -148,7 +160,7 @@ export function pickedCards(callRecord, plan) {
       continue;
     }
     const card = pool[number - 1];
-    const question = questionOf(card);
+    const question = shownQuestion(questionOf(card), callRecord, number);
     if (!question) continue;
     cards.push({ number, question, probes, card, unprepared: false, asked: askedList ? askedList.includes(number) : null, answered: answeredList.includes(number) });
   }
@@ -162,7 +174,7 @@ const PROBES_LABEL = 'possible probes the planner wrote (the transcript shows wh
 function formatPicked(cards) {
   return cards.map(entry => {
     if (entry.unprepared) {
-      return [`card 0 (the unprepared question, no prepared answer): ${entry.question}`, ...(entry.probes.length ? [`   ${PROBES_LABEL}: ${entry.probes.join(' | ')}`] : [])].join('\n');
+      return [`card 0 (a question from outside the prepared answers, so there is nothing to compare it with): ${entry.question}`, ...(entry.probes.length ? [`   ${PROBES_LABEL}: ${entry.probes.join(' | ')}`] : [])].join('\n');
     }
     const status = `   engine: asked ${yesNo(entry.asked)}, answered ${entry.asked === false ? 'no' : yesNo(entry.answered)}`;
     return formatCard(entry.card, `card ${entry.number}: ${entry.question}`, [status, ...(entry.probes.length ? [`   ${PROBES_LABEL}: ${entry.probes.join(' | ')}`] : [])]);
@@ -269,8 +281,15 @@ function metricsOnClock(metrics, onClock, transcript = []) {
 // split one stretch of typing into points.
 const TYPING_GAP_MS = 10000;
 
-/** The stretches the candidate was typing in the pad, from when its text changed, on the active clock. */
-export function typingSpans(snapshots, onClock = clock) {
+const spanText = (span, onClock) => (span.endMs - span.startMs < 1000 ? onClock(span.startMs) : `${onClock(span.startMs)}-${onClock(span.endMs)}`);
+
+/**
+ * The stretches the candidate was typing in the pad, on the active clock: as the call recorded them (`typing`), else
+ * from when the snapshots' text changed (a record from before it did).
+ */
+export function typingSpans(snapshots, onClock = clock, typing = null) {
+  const recorded = (Array.isArray(typing) ? typing : []).filter(span => Number.isFinite(span?.startMs) && Number.isFinite(span?.endMs));
+  if (recorded.length) return recorded.map(span => spanText(span, onClock));
   const times = [];
   let last = '';
   for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
@@ -286,7 +305,7 @@ export function typingSpans(snapshots, onClock = clock) {
     if (tail && at - tail.endMs <= TYPING_GAP_MS) tail.endMs = at;
     else spans.push({ startMs: at, endMs: at });
   }
-  return spans.map(span => (span.endMs - span.startMs < 1000 ? onClock(span.startMs) : `${onClock(span.startMs)}-${onClock(span.endMs)}`));
+  return spans.map(span => spanText(span, onClock));
 }
 
 function formatMetrics(metrics) {
@@ -310,7 +329,7 @@ const RULES = [
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
-  '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title.',
+  '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title. When the candidate is asking the interviewers questions, each of their questions is a chapter too, under the interviewer turn right before it (the one that invited it, even when that turn begins with the answer to an earlier question).',
   '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, a quote (a few consecutive words copied from that turn where the moment happens, so the replay can jump there), and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
   '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the candidate was still speaking when the interviewer came in. Why they came in is a separate question, and the turn says it when recorded: an interviewer can cut in to probe a detail, to move on once they have enough, or because an answer really ran long, and a persona that interrupts readily does so on short answers too. Judge each cut by its recorded reason and by how long the answer had run, and call an answer long only when the reason or its length shows that. A turn that says the interviewer came in after the candidate had essentially finished is not a cut-in. When the reason is not recorded, say so rather than guessing at length. Mention cut-ins in delivery when they happened, and count them from the metrics (interviewerCutInCount), never from memory.',
@@ -327,7 +346,7 @@ const SCOPE_RULES = [
 ].join('\n');
 
 const PICKED_RULE = [
-  '- Planned questions: this call picked only the cards listed under PICKED QUESTIONS, and the card number is a card\'s identity. The planned list has exactly one entry per listed card, in the listed order, with the question copied exactly as written there. Take "asked" from the engine line of that card, never from a similar-sounding interviewer line; when it was asked, askedAs is the interviewer\'s own line that asked that card\'s question and the score and notes judge the answer to it. Follow-ups and every other interviewer line (small talk, a different topic, the closing) go into moments, never into another card\'s entry. Pool cards that were not picked are not part of this call: do not list or judge them. The unprepared question, when listed, is its own entry at the position listed.',
+  '- Planned questions: this call picked only the cards listed under PICKED QUESTIONS, and the card number is a card\'s identity. The planned list has exactly one entry per listed card, in the listed order, with the question copied exactly as written there. Take "asked" from the engine line of that card, never from a similar-sounding interviewer line; when it was asked, askedAs is the interviewer\'s own line that asked that card\'s question and the score and notes judge the answer to it. Follow-ups and every other interviewer line (small talk, a different topic, the closing) go into moments, never into another card\'s entry. Pool cards that were not picked are not part of this call: do not list or judge them. The question from outside the prepared answers (card 0), when listed, is its own entry at the position listed.',
 ].join('\n');
 
 // Only on a call that has such a turn: a line that ended on a statement rather than a question.
@@ -386,11 +405,11 @@ function unpreparedText(callRecord) {
 }
 
 const UNPREPARED_NOTE = (text) => [
-  `One question on this call was not one the candidate had prepared: "${text}"`,
-  'There is no prepared answer for it. Judge it only if the transcript shows the interviewer actually reached it: then judge the candidate\'s answer on its own, as a test of adaptability (structure, relevance, composure) and never fault it for departing from prepared material. If the transcript never shows it being asked, say nothing about it and give it no score.',
+  `One question on this call was not among the prepared answers: "${text}"`,
+  'There is no prepared answer for it. Judge it only if the transcript shows the interviewer actually reached it: then judge the candidate\'s answer on its own, on its structure, relevance and composure, and never fault it for departing from prepared material. Never say or imply that the candidate was unprepared or that the question was unprepared: that only describes the answer bank. If the transcript never shows it being asked, say nothing about it and give it no score.',
 ].join('\n');
 
-const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written. Before marking an answer down for misreading a screen, check that screen as shown (its text and the picture or diagram above it): when the screen contradicted itself or was wrong, for example an earlier traffic list or a diagram of starting positions left on screen beside an update, an answer that followed one of its versions is not a misreading, so do not count it against the candidate; say the screen was unclear, and credit a candidate who noticed the contradiction or asked which was current. What the screen states (input ranges, types, start state) is a given: restating it is not the candidate\'s assumption, and advice to defend against a case the screen excludes is not made. Say when the interviewer ended or moved on from an exercise and which parts the candidate had not reached; do not count them as missed or as a priority.';
+const SCREEN_PAD_RULE = '- Shared screen and coding pad: when the data below shows screens the interviewer shared or code the candidate wrote, judge the written code for correctness, edge cases and how the candidate talked through it, and say whether they addressed each part shown. Never claim anything about code that is not in the pad text below; if the pad is empty or missing, say no code was written. Before marking an answer down for misreading a screen, check that screen as shown (its text and the picture or diagram above it): when the screen contradicted itself or was wrong, for example an earlier traffic list or a diagram of starting positions left on screen beside an update, an answer that followed one of its versions is not a misreading, so do not count it against the candidate; say the screen was unclear, and credit a candidate who noticed the contradiction or asked which was current. What the screen states (input ranges, types, start state) is a given: restating it is not the candidate\'s assumption, and advice to defend against a case the screen excludes is not made. When an interviewer asked whether the candidate would change something, or the candidate said a fix aloud, the spoken answer is the answer: code left unedited is never a priority, an improve line or a criticism in the summary unless the interviewer asked for the edit and gave them the chance to make it (it may be mentioned as an extension). Say when the interviewer ended or moved on from an exercise and which parts the candidate had not reached; do not count them as missed or as a priority.';
 
 /** Active length: the call's length minus the time it was paused (the candidate typing). */
 function lengthLine(callRecord) {
@@ -424,9 +443,9 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     `started: ${startedText(callRecord.startedAt) || '(unknown)'}`,
     role ? `role: ${role}` : '',
     lengthLine(callRecord),
-    candidateEnded ? 'how the call ended: the candidate ended the call early, before the interviewer had wrapped up or said goodbye' : '',
+    candidateEnded ? 'how the call ended: the candidate hung up before the interviewer did. Read the end of the transcript to see what that was: when the interviewer had already thanked them or taken their leave, the call was complete and is never described as ended early; otherwise the candidate ended the call early' : '',
     technicalEnd ? `how the call ended: a technical failure cut the call short (${reason}); the candidate did not end it and must not be faulted for it` : '',
-    candidateEnded || technicalEnd ? `review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the closing questions of the candidate as a gap. Say once in the overall summary that the call ended early${technicalEnd ? ' because of a technical problem' : ''} and the review covers the call up to that point` : '',
+    candidateEnded || technicalEnd ? `review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the closing questions of the candidate as a gap. ${candidateEnded ? 'When it did end early, say' : 'Say'} once in the overall summary that the call ended early${technicalEnd ? ' because of a technical problem' : ''} and the review covers the call up to that point` : '',
     callRecord.reason === 'interviewer' ? 'how the call ended: the interviewer wrapped up and ended the call' : '',
   ].filter(Boolean).join('\n');
   // Which voice spoke is given once, on the transcript turn and its answer.
@@ -447,13 +466,13 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     ...(picked
       ? ['--- PICKED QUESTIONS (the planned questions of this call; the interviewers did not see the prepared answers) ---', formatPicked(picked)]
       : ['--- PLAN (prepared answers the candidate could draw on; the interviewers did not see them) ---', formatPlan(plan)]),
-    ...(unprepared ? ['--- THE UNPREPARED QUESTION ---', UNPREPARED_NOTE(unprepared)] : []),
+    ...(unprepared ? ['--- THE QUESTION FROM OUTSIDE THE PREPARED ANSWERS ---', UNPREPARED_NOTE(unprepared)] : []),
     '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers, at),
     ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at, transcript))]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
     ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP)),
       ...(starters.length ? ['The pad opened with this code already in it. It was given with the exercise: the candidate did not write it, and is neither credited nor faulted for it.', ...starters.map(text => fenced(cut(text, REVIEW_PAD_CAP)))] : []),
-      `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at).join(', ') || '(no typing times were recorded)'}`] : []),
+      `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at, callRecord.pad?.typing).join(', ') || '(no typing times were recorded)'}`] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),
       '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples, at),

@@ -85,9 +85,37 @@ function closingStartOf(turn, total) {
 function closingIndex(transcript, questionIndices) {
   const lastQuestion = questionIndices.length ? Math.max(...questionIndices) : -1;
   for (let index = transcript.length - 1; index > lastQuestion; index -= 1) {
-    if (isInterviewer(transcript[index])) return index;
+    if (isInterviewer(transcript[index])) return closingExchangeStart(transcript, index, lastQuestion);
   }
   return -1;
+}
+
+const asks = turn => label(typeof turn?.sentText === 'string' && turn.sentText.trim() ? turn.sentText : turn?.text).includes('?');
+// A candidate line longer than this, in words or in time, is an answer, not part of a goodbye.
+const GOODBYE_MAX_WORDS = 40;
+const GOODBYE_MAX_MS = 12000;
+
+/**
+ * The close can be several turns (the thanks, the candidate's goodbye, the goodbye back), so Closing starts at the first
+ * of them: the turn is taken back over an earlier interviewer turn while nobody asked anything in it or since, what the
+ * candidate said since is short, and the candidate turn before it asked nothing (else it is an answer to them).
+ */
+function closingExchangeStart(transcript, last, lastQuestion) {
+  if (lastQuestion < 0) return last; // no question to bound it
+  let start = last;
+  for (let index = last - 1; index > lastQuestion; index -= 1) {
+    const turn = transcript[index];
+    if (turn?.acknowledgement) continue;
+    if (asks(turn)) break;
+    if (!isInterviewer(turn)) {
+      if (label(turn?.text).split(/\s+/u).length > GOODBYE_MAX_WORDS || (ms(turn?.endMs) ?? 0) - (ms(turn?.startMs) ?? 0) > GOODBYE_MAX_MS) break;
+      continue;
+    }
+    const before = transcript.slice(0, index).findLast(item => item?.speaker === 'candidate' && !item.acknowledgement);
+    if (before && asks(before)) break;
+    start = index;
+  }
+  return start;
 }
 
 /**
@@ -98,11 +126,26 @@ function answersCandidate(transcript, index, questionIndices) {
   const lastQuestion = questionIndices.length ? Math.max(...questionIndices) : -1;
   const before = transcript[index - 1];
   if (!(index - 1 > lastQuestion && before?.speaker === 'candidate' && !before.acknowledgement)) return false;
-  return label(typeof before.sentText === 'string' && before.sentText.trim() ? before.sentText : before.text).includes('?');
+  return asks(before);
 }
 
 // An opening shorter than this, with nothing said by the candidate, is only the connection and is not its own chapter.
 const OPENING_MIN_MS = 3000;
+
+const candidateTurn = turn => turn?.speaker === 'candidate' && !turn.acknowledgement;
+
+/**
+ * Where an anchored chapter starts: at its interviewer turn, except a turn that first answers what the candidate asked
+ * and then leaves them room to ask again. That answer belongs to the chapter before, so this one starts at the
+ * candidate's next question.
+ */
+function anchorStartOf(turns, index) {
+  const start = ms(turns[index].startMs) ?? 0;
+  const before = turns.slice(0, index).findLast(turn => !turn?.acknowledgement);
+  const next = turns.slice(index + 1).find(turn => !turn?.acknowledgement);
+  if (!candidateTurn(before) || !asks(before) || !candidateTurn(next) || !asks(next)) return start;
+  return ms(next.startMs) ?? start;
+}
 
 function chapterFor(chapters, atMs) {
   const containing = chapters.find(chapter => chapter.startMs <= atMs && atMs < chapter.endMs);
@@ -121,7 +164,7 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
     if (index === null || !Number.isInteger(index) || index < 0 || index >= turns.length) continue;
     if (!isInterviewer(turns[index]) || seenQuestions.has(index)) continue;
     seenQuestions.add(index);
-    anchors.push({ index, startMs: ms(turns[index].startMs) ?? 0, title: label(entry?.title) || 'Interviewer question' });
+    anchors.push({ index, startMs: anchorStartOf(turns, index), title: label(entry?.title) || 'Interviewer question' });
   }
   anchors.sort((left, right) => left.startMs - right.startMs);
   const closing = closingIndex(turns, anchors.map(anchor => anchor.index));

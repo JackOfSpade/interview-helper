@@ -536,15 +536,15 @@ test('realistic non-nesting volatile and final ranges leave each sentence once, 
   assert.equal(entry.text, 'A bit nervous in the good way, because I have been looking forward to this. Thanks for having me.');
 });
 
-test('the opener message lists the last four spoken reactions with their speaker; none before the first', async () => {
+test('the opener message lists the last four spoken reactions, with no speaker label to copy; none before the first', async () => {
   const rig = makeRig();
   await greet(rig);
   const reactions = ['Right.', 'Mm-hm, okay.', 'Gotcha, fine.', 'Sure, yes.', 'No worries.'];
   for (const reaction of reactions) await answerTurn(rig, 'Go on.', reaction);
   const messages = rig.sessions.opener.calls.map(call => call.message);
   assert(!messages[0].includes('recent reactions'), messages[0]);
-  assert(messages[1].includes("[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right.']"), messages[1]);
-  assert(messages[5 - 1].includes("Interviewer: 'Right.' Interviewer: 'Mm-hm, okay.' Interviewer: 'Gotcha, fine.' Interviewer: 'Sure, yes.'"), messages[4]);
+  assert(messages[1].includes("[Recent reactions on this call, do not repeat any of them or how they open: 'Right.']"), messages[1]);
+  assert(messages[5 - 1].includes("'Right.' 'Mm-hm, okay.' 'Gotcha, fine.' 'Sure, yes.'"), messages[4]);
   assert.equal(rig.of('opener').at(-1).outcome, 'spoken');
   assert(!rig.sessions.main.calls.at(-1).message.includes('recent reactions'), 'only the opener message carries the list');
 });
@@ -2269,7 +2269,7 @@ test('F14: the opener restarts at most once, an empty heard text leaves no entry
   whole.h.vad(false);
   await whole.clock.advance(600);
   assert.match(whole.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] \[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right, got it\.'\] Candidate: 'wait what do you mean'$/);
+    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] \[Recent reactions on this call, do not repeat any of them or how they open: 'Right, got it\.'\] Candidate: 'wait what do you mean'$/);
 });
 
 test('G5: the cancel fallback timer resolves a stop when the helper never reports cancelled', async () => {
@@ -2431,7 +2431,7 @@ test('G6: resuming one millisecond before commit returns to listening and the ne
   rig.h.vad(false);
   await rig.clock.advance(600);
   assert.match(rig.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] \[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right\.'\] Candidate: 'I built a scheduler and tested it'$/);
+    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] \[Recent reactions on this call, do not repeat any of them or how they open: 'Right\.'\] Candidate: 'I built a scheduler and tested it'$/);
 });
 
 const lengthOf = list => list.reduce((sum, text) => sum + text.length, 0);
@@ -4027,6 +4027,13 @@ test('panel: the acknowledgement is spoken in the floor holder\'s voice and the 
   assert(!rig.sessions.opener.calls.at(-1).message.includes('[You last said:'));
 });
 
+test('panel: a reaction written as a transcript line loses the name in front of it, and nothing else with a colon does (call-mwuj4kjg)', async () => {
+  const rig = panelRig();
+  await greet(rig);
+  for (const written of ['John: Ah, right.', '[warmly] PRIYA : Sure, okay.', 'Interviewer: Mm-hm.', 'Fair point: noted.']) await answerTurn(rig, 'Go on.', written);
+  assert.deepEqual(rig.of('opener').map(event => event.text), ['Ah, right.', '[warmly] Sure, okay.', 'Mm-hm.', 'Fair point: noted.']);
+});
+
 test('a reaction is not dropped for a word said minutes ago or in the one before: only an opening or a whole sentence repeated counts', async () => {
   const rig = makeRig();
   await greet(rig);
@@ -5510,6 +5517,18 @@ test('statement: a quiet stretch after a line that asked nothing brings one unco
   assert.equal(rig.engine.state().transcript.filter(item => item.speaker === 'interviewer').at(-1).statement, undefined);
   await checkInAt(rig, 20, 'first check');
   assert(rig.sessions.main.calls.at(-1).message.includes('check 1'), rig.sessions.main.calls.at(-1).message);
+});
+
+test('statement: a close left open for the candidate ends on a bare end-call when they stay quiet, with nothing more said (call-mwuj4kjg)', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'Thanks for your time, the team will be in touch.<wait s="5" statement/>');
+  const spoken = rig.engine.state().transcript.length;
+  assert.equal(await checkInAt(rig, 5, 'carry-on'), 5);
+  rig.sessions.main.answer('<end-call/>');
+  await flush();
+  assert.equal(rig.of('ended').length, 1);
+  assert.equal(rig.engine.state().transcript.length, spoken, 'no second farewell');
 });
 
 test('statement: only one carry-on in a row; a second statement into the quiet is followed by a real check-in', async () => {

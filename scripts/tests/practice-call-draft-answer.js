@@ -281,6 +281,16 @@ test('both prompts share the spoken-not-notes rule and the realism options, with
   }
 });
 
+test('questions to the interviewers and the goodbye are separate turns, and a work line and its code fit together (call-mwuj4kjg)', () => {
+  const reply = draftAnswerPrompt(CONTEXT);
+  assert(reply.includes('A turn that asks them something ends on the question') && reply.includes('Those come in a later turn of their own'));
+  assert(reply.includes('ask one at a time') && reply.includes('How many you ask in all is yours to judge'));
+  const work = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'ruby', text: '' } });
+  assert(work.includes('at most about ninety characters') && !work.includes('about 50 words') && !work.includes('a hundred and ten characters'), 'no piece that needs a line longer than the line limit');
+  assert(work.includes('waitForReply is false and the step carries the smallest fix in place'), 'a fix agreed to can be made');
+  assert(work.includes('name a specific method or behaviour only when you are sure'));
+});
+
 test('work: the prompt keeps words and typing in step: the line is about its own code, with the real pace, and the pad is only added to', () => {
   const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
   assert(prompt.includes('A step\'s line is about the code that same step types') && prompt.includes('an earlier step already typed') && prompt.includes('a later piece'));

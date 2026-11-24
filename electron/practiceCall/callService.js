@@ -290,14 +290,19 @@ function spokenQuestion(said) {
   const asking = text.split(/(?<=[.!?])\s+/u).filter(sentence => sentence.includes('?'));
   return asking.length ? asking.join(' ') : text;
 }
+// Pad changes this close together are one stretch of typing: a thinking beat between keys (6 to 9 s in call-mwttebvu) does not split it.
+const PAD_TYPING_GAP_MS = 10000;
 // The length the question history keeps of a note (NOTE_CHARS in questionHistory.js).
 const NOTE_LIMIT = 300;
-/** What a prepared problem is, for the notes: its part titles, then the start of the first part. */
+/** What a prepared problem is, for the notes: its part titles, then the planner's one line on the task, else the start of the first part (a kept interview from before the planner wrote one), which is often only the data. */
 function problemNote(problem, { withContent = true } = {}) {
   const parts = Array.isArray(problem?.parts) ? problem.parts : [];
   const titles = parts.map(part => String(part?.title ?? '').trim()).filter(Boolean).join(' / ');
   const first = String(parts[0]?.content ?? '').replace(/\*\*(?=\S)(.+?\S|\S)\*\*(?=\s|[.,:;!?)]|$)/gu, '$1').replace(/\s+/gu, ' ').trim();
-  if (!(withContent && titles && first)) return titles;
+  if (!withContent) return titles;
+  const task = typeof problem?.task === 'string' ? problem.task.trim() : '';
+  if (titles && task) return `${titles}: ${task}`;
+  if (!(titles && first)) return titles;
   const note = `${titles}: ${first}`;
   if (note.length <= NOTE_LIMIT) return note;
   // The history cuts a long note at its limit; end it at a sentence end instead when one falls past half of it.
@@ -685,6 +690,15 @@ export function createPracticeCallService(deps = {}) {
   function closeScreenEntry(self, atMs) {
     const open = self?.screens?.at(-1);
     if (open && open.endMs === undefined) open.endMs = Math.max(open.atMs, Math.round(Number.isFinite(atMs) ? atMs : callMs(self)));
+  }
+  /** The candidate changed the pad just now: one stretch of typing per run of changes, each at most PAD_TYPING_GAP_MS after the last. */
+  function noteTyping(self) {
+    if (!self?.padRecord) return;
+    const atMs = callMs(self);
+    const spans = (self.padRecord.typing ||= []);
+    const tail = spans.at(-1);
+    if (tail && atMs - tail.endMs <= PAD_TYPING_GAP_MS) tail.endMs = atMs;
+    else spans.push({ startMs: atMs, endMs: atMs });
   }
   /** One pad snapshot each time the text reached the interviewer, only when it changed since the last. */
   function snapshotPad(self, text, atMs) {
@@ -2862,7 +2876,7 @@ export function createPracticeCallService(deps = {}) {
           .map(span => (Number.isFinite(span.startMs) && !(span.endMs > span.startMs) && Number.isFinite(endOnTimelineMs) && endOnTimelineMs > span.startMs
             ? { ...span, endMs: endOnTimelineMs, whole: false } : span)))),
         screens: onCallClock((self.screens || []).map(entry => ({ ...entry }))),
-        pad: { lang: self.padRecord?.lang || '', ...(self.padRecord?.chosen && !self.padRecord?.lang ? { chosen: self.padRecord.chosen } : {}), snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))) },
+        pad: { lang: self.padRecord?.lang || '', ...(self.padRecord?.chosen && !self.padRecord?.lang ? { chosen: self.padRecord.chosen } : {}), snapshots: onCallClock((self.padRecord?.snapshots || []).map(entry => ({ ...entry }))), ...(self.padRecord?.typing?.length ? { typing: onCallClock(self.padRecord.typing.map(entry => ({ ...entry }))) } : {}) },
         timings: { ...self.timings, answers: onCallClock(self.timings.answers), setupLeadMs: leadMs, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
         toneSamples: onCallClock(self.toneSamples.slice().sort((left, right) => (left.atMs ?? 0) - (right.atMs ?? 0))), candidateProsody: onCallClock(candidateProsody), voiceBaseline, ...(voicedBaseline ? { voicedBaseline } : {}), recordingLeadMs: leadMs - trimmedMs, thresholds: { ...DEFAULT_CALL_THRESHOLDS, ...(deps.thresholds || {}) }, reason,
         ...(self.missedCall ? { returnedCall: self.missedCall.how } : {}),
@@ -3486,6 +3500,7 @@ export function createPracticeCallService(deps = {}) {
       // One that was never opened in this call takes nothing.
       if (!call || call.finished || !call.inCall || call.interviewerEnded || state.interviewerLeft || (!state.pad.open && !call.padOpened)) return snapshot();
       const value = typeof text === 'string' ? text.slice(0, PAD_MAX) : '';
+      if (value !== state.pad.text) noteTyping(call);
       state.pad.text = value;
       try { call.engine?.setPadText?.(value); } catch { /* engine already ended */ }
       return snapshot();
@@ -3519,6 +3534,8 @@ export function createPracticeCallService(deps = {}) {
       const abort = new AbortController();
       self.draftAbort = abort;
       const started = clock.now();
+      // The reply is on its way, as if they were typing it: no silence check or carry-on comes in over it.
+      try { self.engine?.typing?.(true); } catch { /* engine already ended */ }
       dbg('user', { action: 'draft-answer' });
       try {
         // The career text and the listing are read once per call, on the first suggestion.
@@ -3581,6 +3598,7 @@ export function createPracticeCallService(deps = {}) {
       } finally {
         self.drafting = false;
         if (self.draftAbort === abort) self.draftAbort = null;
+        if (call === self && !self.finished) { try { self.engine?.typing?.(!!state.typing); } catch { /* engine already ended */ } }
       }
     },
     getState: () => snapshot(),

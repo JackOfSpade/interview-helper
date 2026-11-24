@@ -170,14 +170,35 @@ export function checkReview(raw, transcript, picked = null) {
   return { review: { feedback, chapters, moments }, trimmed };
 }
 
+/**
+ * Word times for an answer said in the AI voice, which is not transcribed word by word: its sent words are spread over
+ * its recorded lines, each at the same rate. Empty when the record has no lines.
+ */
+function linedWords(turn) {
+  const spans = list(turn?.lineSpans).filter(span => clockMs(span?.startMs) !== null && clockMs(span?.endMs) !== null && span.endMs > span.startMs);
+  const words = typeof turn?.sentText === 'string' ? turn.sentText.split(/\s+/u).filter(Boolean) : [];
+  if (turn?.voiced !== true || !spans.length || !words.length) return [];
+  const size = words.reduce((sum, word) => sum + word.length + 1, 0);
+  const total = spans.reduce((sum, span) => sum + span.endMs - span.startMs, 0);
+  let before = 0;
+  return words.map(text => {
+    let left = (before / size) * total;
+    before += text.length + 1;
+    const span = spans.find(item => { const length = item.endMs - item.startMs; if (left < length) return true; left -= length; return false; }) ?? spans.at(-1);
+    return { text, startMs: Math.round(Math.min(span.endMs, span.startMs + left)) };
+  });
+}
+
 const momentWords = text => String(text ?? '').toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
 /**
  * When a flagged moment's quote was said: the start of the stretch of the turn's timed words that shares most words with
  * it, when that is at least half of the quote (the recogniser and the sent words differ a little). Null otherwise.
  */
-export function momentAtMs(moment, wordsByTurn = {}) {
+export function momentAtMs(moment, wordsByTurn = {}, transcript = []) {
   const quote = momentWords(moment?.quote);
-  const words = list(wordsByTurn?.[moment?.turnIndex]).flatMap(word => {
+  const turn = transcript?.[moment?.turnIndex];
+  const given = list(wordsByTurn?.[moment?.turnIndex]);
+  const words = (given.length ? given : linedWords(turn)).flatMap(word => {
     const at = clockMs(word?.startMs) ?? clockMs(word?.start);
     return at === null ? [] : momentWords(word.text ?? word.word).map(text => ({ at, text }));
   });
@@ -401,7 +422,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan: givenPlan, b
   // timeline, which began earlier; the chapters live on the recording's timeline.
   const timelineMs = Math.max(durationMs + (clockMs(callRecord.recordingLeadMs) ?? 0), transcript.reduce((max, turn) => Math.max(max, clockMs(turn?.endMs) ?? 0), 0));
   const chapters = buildChapters({
-    transcript, reviewChapters: checked.chapters, moments: checked.moments.map(moment => ({ ...moment, atMs: momentAtMs(moment, wordsByTurn) })), metrics,
+    transcript, reviewChapters: checked.chapters, moments: checked.moments.map(moment => ({ ...moment, atMs: momentAtMs(moment, wordsByTurn, transcript) })), metrics,
     candidateProsodyByTurn: prosodyByEntry(transcript, callRecord.candidateProsody), durationMs: timelineMs,
   });
   const analysis = compose({ status: 'ready', chapters, fillers: fillerTotals({ feedback: checked.feedback, moments: checked.moments, transcript, durationMs }) });

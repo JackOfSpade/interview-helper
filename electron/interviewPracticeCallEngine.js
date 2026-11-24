@@ -1654,6 +1654,21 @@ export function createPracticeCallEngine({
     return (head !== '' && recent.some(item => opening(item.text) === head)) || mine.some(sentence => said.has(sentence));
   }
 
+  /**
+   * A reaction written as a transcript line ("Oliver Bennett: Ah, right."), without the label: the opener model is shown
+   * what was said under people's names and copied that shape, and the name was spoken (call-mwuj4kjg). Only a name of
+   * someone on this call (whole, first or last) or "Interviewer" is taken off.
+   */
+  function withoutSpeakerLabel(line) {
+    const found = /^(\s*(?:\[[^\]]*\]\s*)?)([\p{L}][\p{L}\p{M}.'\u2019 -]{0,60}?)\s*:\s*/u.exec(line);
+    if (!found) return line;
+    const names = (speakers ?? []).flatMap(member => {
+      const whole = wordKey(member.name ?? '');
+      return [whole, whole.split(' ')[0], whole.split(' ').at(-1)];
+    });
+    return ['interviewer', ...names].includes(wordKey(found[2])) ? found[1] + line.slice(found[0].length) : line;
+  }
+
   async function runOpener(reply) {
     for (let tries = 0; ; tries += 1) {
       if (current !== reply || reply.openerSettled) return;
@@ -1665,7 +1680,7 @@ export function createPracticeCallEngine({
         if (current !== reply || reply.openerSettled) return;
         if (reply.spec.openerFirstDeltaMs === null) reply.spec.openerFirstDeltaMs = now() - reply.spec.at;
         const parser = createReplyStreamParser();
-        const head = parser.push(String(result?.text ?? ''));
+        const head = parser.push(withoutSpeakerLabel(String(result?.text ?? '')));
         const tail = parser.end();
         const control = controlFor(reply, tail.control ?? result?.control);
         if (control === 'listen') {

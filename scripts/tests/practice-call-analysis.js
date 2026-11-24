@@ -5,7 +5,7 @@ import path from 'node:path';
 import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, momentAtMs, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
 import { buildChapters } from '../../electron/practiceCall/analysis/chapters.js';
 import { PRACTICE_FEEDBACK_LIMITS } from '../../electron/ipc/interviewQaPractice.js';
-import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits } from '../../electron/practiceCall/analysis/reviewPrompt.js';
+import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits, pickedCards, typingSpans } from '../../electron/practiceCall/analysis/reviewPrompt.js';
 
 // Synthetic call: small talk, two questions, a typed answer, then the farewell.
 const transcript = [
@@ -478,12 +478,12 @@ export default [
     name: 'practice call analysis: the unprepared question is named with its own judging rule, and an absent field leaves the prompt unchanged',
     async run() {
       const plain = buildReviewPrompt({ callRecord, plan, brief, metrics });
-      assert.doesNotMatch(plain, /not one the candidate had prepared/u);
+      assert.doesNotMatch(plain, /not among the prepared answers/u);
       const asked = 'Tell me about a time a launch went wrong.';
       const named = buildReviewPrompt({ callRecord: { ...callRecord, unpreparedQuestion: { text: asked, askedBy: 'A' } }, plan, brief, metrics });
       assert.ok(named.includes(asked));
       assert.match(named, /There is no prepared answer for it/u);
-      assert.match(named, /adaptability \(structure, relevance, composure\)/u);
+      assert.match(named, /on its structure, relevance and composure/u);
       assert.match(named, /never fault it for departing from prepared material/u);
       const viaPlan = buildReviewPrompt({ callRecord: { ...callRecord, setup: { plan: { questions: [{ number: 1 }, { number: 0, text: asked }] } } }, plan, brief, metrics });
       assert.ok(viaPlan.includes(asked));
@@ -845,6 +845,52 @@ export default [
       assert.equal('retry' in ok.analysis, false, 'a ready analysis carries no retry context');
     } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
   } },
+  {
+    name: 'practice call analysis: a technical topic shows its exercise, typing spans are the recorded ones, and a hang-up in the goodbyes is not called early (call-mwuj4kjg)',
+    run() {
+      const topic = '[Technical topic, not a fixed question] Ruby. If you pick this, make up your own question or hands-on exercise on this topic, different from one you would have asked on an earlier call.';
+      const record = { pickedQuestions: [1], askedQuestions: [1], answeredQuestions: [1], setup: { plan: { questions: [{ number: 1, probes: [] }], problems: [{ question: 1, parts: [{ title: 'Net revenue by currency' }] }] } } };
+      assert.equal(pickedCards(record, [{ question: topic }])[0].question, 'Ruby: Net revenue by currency');
+      assert.equal(pickedCards({ ...record, setup: { plan: { questions: [{ number: 1 }] } } }, [{ question: topic }])[0].question, 'Ruby');
+      assert.deepEqual(typingSpans([{ atMs: 1000, text: 'a' }, { atMs: 20000, text: 'ab' }], undefined, [{ startMs: 1000, endMs: 34000 }]).length, 1);
+      assert.equal(typingSpans([{ atMs: 1000, text: 'a' }, { atMs: 20000, text: 'ab' }]).length, 2, 'an older record infers them');
+      assert.match(buildReviewPrompt({ callRecord: { reason: 'candidate', transcript: [] }, plan: [], brief: {}, metrics: {} }), /had already thanked them or taken their leave, the call was complete/u);
+    },
+  },
+  {
+    name: 'practice call analysis: a chapter for the candidate\'s next question starts at that question, and a moment in an AI-voice answer is placed in its line (call-mwuj4kjg)',
+    run() {
+      const turns = [
+        { speaker: 'interviewer', text: 'Any questions?', startMs: 0, endMs: 2000 }, { speaker: 'candidate', text: 'How do you review code?', startMs: 3000, endMs: 6000 },
+        { speaker: 'interviewer', text: 'Together. Anything else?', startMs: 7000, endMs: 40000 }, { speaker: 'candidate', text: 'What is on-call like?', startMs: 45000, endMs: 50000 },
+        { speaker: 'interviewer', text: 'Quiet. Thanks, bye.', startMs: 51000, endMs: 60000 },
+      ];
+      const chapters = buildChapters({ transcript: turns, reviewChapters: [{ questionTurnIndex: 0, title: 'Review' }, { questionTurnIndex: 2, title: 'On call' }], durationMs: 60000 });
+      assert.deepEqual(chapters.slice(0, 2).map(item => [item.title, item.startMs, item.endMs]), [['Review', 0, 45000], ['On call', 45000, 51000]]);
+      const transcript = [{ speaker: 'candidate', voiced: true, sentText: 'one two three four five six', lineSpans: [{ startMs: 1000, endMs: 4000 }, { startMs: 30000, endMs: 33000 }] }];
+      const at = momentAtMs({ turnIndex: 0, quote: 'five six' }, {}, transcript);
+      assert(at >= 30000 && at <= 33000, String(at));
+      assert.equal(momentAtMs({ turnIndex: 0, quote: 'five six' }, {}, [{ speaker: 'candidate', sentText: 'five six' }]), null);
+    },
+  },
+  {
+    name: 'practice call analysis: a close that takes several turns is one Closing chapter from its first turn (call-mwuj4kjg)',
+    run() {
+      const turn = (speaker, text, startMs, endMs) => ({ speaker, text, startMs, endMs });
+      const base = [
+        turn('interviewer', 'First?', 0, 5000), turn('candidate', 'Answer.', 5000, 20000),
+        turn('interviewer', 'Any questions?', 20000, 24000), turn('candidate', 'What is the team like?', 24000, 30000),
+        turn('interviewer', 'It is small. We pair a lot.', 31000, 40000), turn('candidate', 'That is all I wanted to ask, thanks.', 41000, 44000),
+      ];
+      const closing = turns => buildChapters({ transcript: turns, reviewChapters: [{ questionTurnIndex: 0, title: 'First' }, { questionTurnIndex: 2, title: 'Candidate question' }], durationMs: 60000 }).at(-1);
+      const thanks = turn('interviewer', 'Thanks for coming in. The team will be in touch.', 45000, 49000);
+      const bye = [turn('candidate', 'Thank you both, goodbye.', 50000, 52000), turn('interviewer', 'Bye now.', 53000, 54000)];
+      assert.deepEqual([closing([...base, thanks, ...bye]).title, closing([...base, thanks, ...bye]).startMs], ['Closing', 45000], 'from the thanks, not from the last goodbye; the answer before it is not closing');
+      assert.equal(closing([...base, thanks, bye[1]]).startMs, 45000, 'a candidate who said nothing back');
+      assert.equal(closing([...base, thanks]).startMs, 45000, 'a close in one turn is as before');
+      assert.equal(closing([...base, turn('interviewer', 'Anything else?', 45000, 46000), ...bye]).startMs, 53000, 'a turn that asks something is not the close');
+    },
+  },
   {
     name: 'practice call analysis: a farewell after a candidate turn that asked nothing is all Closing, and a connection-second opening is folded (call-mwttebvu)',
     run() {
