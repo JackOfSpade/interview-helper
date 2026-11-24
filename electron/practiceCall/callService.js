@@ -499,7 +499,7 @@ export function draftTimingOf(self, engineState) {
 
 function freshState() {
   return {
-    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, microphoneFailed: false, microphoneNeedsRejoin: false, microphoneReconnecting: false, level: 0, speaking: null, candidateSpeaking: false,
+    phase: 'precheck', callId: null, persona: null, meetingTitle: '', floor: null, candidateVoicing: false, elapsedMs: 0, muted: false, mutedHint: null, microphoneUnavailable: false, microphoneFailed: false, microphoneNeedsRejoin: false, microphoneReconnecting: false, level: 0, speaking: null, candidateSpeaking: false,
     typing: false, paused: false, chat: [], captions: [], modelDownload: null, usageWarning: null, setup: null, error: null, notice: null, analysisStage: null,
     interviewerLeft: false, connectionLost: false, feedbackRequested: true, feedbackChoice: null, missed: null, participants: [], speakingId: null, overSpeakingId: null,
     screen: null, sharing: null, pad: { open: false, lang: '', text: '', choice: '', options: [] },
@@ -575,7 +575,7 @@ export function createPracticeCallService(deps = {}) {
     dbg('phase', { from: state.phase, phase, elapsedMs: state.elapsedMs });
     state.phase = phase;
     if (phase !== 'precheck') state.setup = null;
-    if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.candidateSpeaking = false; state.speakingId = null; clearOver(); }
+    if (phase === 'ended' || phase === 'analyzing' || phase === 'replay' || phase === 'error') { state.speaking = null; state.candidateSpeaking = false; state.candidateVoicing = false; state.speakingId = null; clearOver(); }
     publish();
   };
   /** Names the setup step now running (and the planner's attempt) for the window's progress list. */
@@ -2396,10 +2396,13 @@ export function createPracticeCallService(deps = {}) {
       return;
     }
     // A line heard to its end: its messages are 'heard' (the wand working an exercise types its next piece after it).
+    // The candidate's AI voice is being heard: the window's wand does nothing until the line is over.
+    if (event.type === 'candidate-voice' && ['started', 'finished', 'cut'].includes(event.state)) state.candidateVoicing = event.state === 'started';
     if (event.type === 'candidate-voice' && event.state === 'finished' && Array.isArray(event.chatIds) && event.chatIds.length) {
       const ids = new Set(event.chatIds);
       state.chat = state.chat.map(entry => (entry.from === 'candidate' && ids.has(entry.id) && entry.voice && entry.voice !== 'failed' ? { ...entry, voice: 'heard' } : entry));
     }
+    if (event.type === 'candidate-voice' && event.state === 'finished') publish(); // the wand is back at once
     // A candidate-voice line is made (ready), started playing, or was given up on: its messages no longer wait on the voice.
     if ((event.type === 'candidate-voice' && (event.state === 'started' || event.state === 'ready')) || (event.type === 'error' && event.code === 'candidate-voice-failed')) {
       settleVoice(event.chatIds, event.type === 'error' ? 'failed' : event.state === 'ready' ? 'ready' : 'playing');

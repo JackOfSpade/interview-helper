@@ -955,6 +955,62 @@ test('injected: a long line gets the live-speech looks, and a cut-in makes the c
   assert.deepEqual(cut.messages, [{ chatId: 'm1', heard: 'So the first thing we' }], 'the chat is cut where the inject position reached');
 });
 
+/** A watcherless live cut-in is ready to play while the wand's next line is being made, as in call-mwunu4jr. */
+async function cutInBeforeNextLine(next) {
+  const { rig, voice } = await injectRig({ thresholds: LIVE_LOOK, random: () => 0 });
+  rig.engine.typed(LONG, { chatId: 'm1', generated: true });
+  await flush();
+  await injectLine(rig, voice.lines[0]);
+  micHears(rig, 'So the first thing we did was move');
+  await rig.clock.advance(1000);
+  rig.sessions.main.answer('Sorry to jump in, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  rig.h.inject(voice.lines[0].utteranceId, 'finished', 3600);
+  await flush();
+  rig.engine.typed('That is my change, happy to dig into any part.', { chatId: 'm2', ...next });
+  await flush();
+  const reply = rig.streams.at(-1).utteranceId;
+  assert(rig.opsOf('play').some(item => item.id === reply));
+  rig.h.playback(reply, 'started');
+  await flush();
+  return { rig, voice, reply, line: voice.lines[1] };
+}
+
+test('injected: a wand line not begun when an interviewer takes the floor is left unsaid', async () => {
+  const { rig, voice, reply, line } = await cutInBeforeNextLine({ generated: true });
+  await rig.clock.advance(310);
+  const cut = rig.of('candidate-voice').findLast(item => item.state === 'cut');
+  assert.deepEqual(cut?.messages, [{ chatId: 'm2', heard: '' }]);
+  line.audioCb(Buffer.alloc(4800)); // its voice arrives late
+  assert.equal(injectOps(rig, line.utteranceId).length, 0, 'nothing of it goes out');
+  rig.h.vad(false);
+  rig.h.playback(reply, 'finished', 2000);
+  await flush();
+  assert.equal(voice.lines.length, 2, 'and it is not said later');
+  assert.equal(rig.opsOf('cancel').filter(item => item.id === reply).length, 0, 'the interviewer is heard out');
+});
+
+test('injected: a line begun within the reaction time of an interviewer taking the floor still gives way', async () => {
+  const { rig, line } = await cutInBeforeNextLine({ generated: true });
+  await rig.clock.advance(200);
+  await injectLine(rig, line);
+  await rig.clock.advance(600);
+  assert.equal(injectCancels(rig, line.utteranceId).length, 1);
+});
+
+test('injected: a typed line not begun when an interviewer takes the floor waits until they have finished', async () => {
+  const { rig, voice, reply, line } = await cutInBeforeNextLine({});
+  await rig.clock.advance(310);
+  assert.equal(injectOps(rig, line.utteranceId).length, 0);
+  assert(!rig.of('candidate-voice').some(item => item.state === 'cut'));
+  rig.h.vad(false);
+  rig.h.playback(reply, 'finished', 2000);
+  await flush();
+  assert.equal(voice.lines.length, 3);
+  assert.equal(voice.lines[2].text, line.text);
+});
+
 test('injected: the reaction time is drawn from the thresholds with deps.random', async () => {
   const run = async random => {
     const { rig, voice } = await injectRig({ thresholds: { ...LIVE_LOOK, candidateYieldMinMs: 400, candidateYieldMaxMs: 1000 }, random });

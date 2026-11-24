@@ -139,8 +139,8 @@ export default function InCall({ state, api }) {
   // ended, so the words are always about the piece being typed, just typed or about to be. When an
   // interviewer starts speaking it gives way exactly as a spoken answer does: a voice line is cut by the engine, and
   // typing stops after the same reaction time (the service's `floor`, from the engine), at the end of the word being
-  // typed. Whatever is in the pad stays; the wand pressed again answers and carries on from there. Pressing it while it
-  // works ends this run and starts a fresh one from where things stand.
+  // typed. Whatever is in the pad stays; the wand pressed again answers and carries on from there. Pressing it while a
+  // line is being said does nothing; while it types silently, it ends this run and starts a fresh one from there.
   const typerRef = useRef(null);
   const workRef = useRef(null);
   const [working, setWorking] = useState(false);
@@ -392,7 +392,7 @@ export default function InCall({ state, api }) {
   const connectionLost = interviewerLeft && !!state?.connectionLost;
   const wandBusy = suggesting || voiceWait !== null || working;
   // The spinner shows only while something is being made (the answer, or a line's voice); while the wand types or
-  // waits for a line to finish it is the wand, lit, and pressing it starts afresh from where things stand.
+  // waits for a line to finish it is the wand, lit (suggestReply says what a press does then).
   const spinning = suggesting || voiceWait !== null;
   // The wand's line is ready (its voice is made), was given up on, or nobody is left to hear it: the spinner stops.
   const waitingId = voiceWait?.id ?? null;
@@ -410,7 +410,9 @@ export default function InCall({ state, api }) {
     if (!canSuggest || spinning || interviewerLeft) return;
     // Muted: nothing is written or spoken; the call answers with "You're muted" and the wand is pressed again after unmuting.
     if (muted) { try { await api.draftAnswer(); } catch { /* bridge gone */ } return; }
-    // Pressed while it works: this run ends where it is (the pad keeps what was typed) and a fresh one starts from there.
+    // Their AI voice is speaking: an accidental press does nothing, and the line (and the run it belongs to) goes on.
+    if (liveRef.current?.candidateVoicing) { logEvent('wand', 'pressed while the line is being said: ignored'); return; }
+    // Pressed while it types silently: this run ends where it is (the pad keeps what was typed) and a fresh one starts from there.
     const previous = workRef.current;
     if (previous) { previous.stop = true; await previous.done; }
     if (!mountedRef.current) return;

@@ -1573,7 +1573,8 @@ export default [
           let pushState = null;
           let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
           let floor = null;
-          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor, paused: false, pad: { open: true, lang: 'python', text: '' } });
+          let voicing = false;
+          const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor, candidateVoicing: voicing, paused: false, pad: { open: true, lang: 'python', text: '' } });
           window.practiceCallAPI = {
             getState: async () => current(),
             onState: listener => { pushState = listener; return () => {}; },
@@ -1633,6 +1634,17 @@ export default [
             assert(gaveWayAt.length < long.length, 'stopped part-way through the piece');
             assert(/(?:word|[\s.,;:()[\]{}#])$/u.test(gaveWayAt), `stopped at the end of a word, never inside one: ${JSON.stringify(gaveWayAt.slice(-12))}`);
             strict.equal(sent.length, 4, 'and says nothing more');
+            // Pressed while its line is being said: nothing happens, and the line and its run go on.
+            let ignored = 0;
+            window.practiceCallAPI.draftAnswer = async () => { ignored += 1; return { text: 'Never.' }; };
+            voicing = true;
+            await act(() => pushState?.(current()));
+            await act(() => wand().click());
+            await settle(50);
+            strict.equal(ignored, 0, 'no draft while the AI voice is speaking');
+            strict.equal(sent.length, 4);
+            voicing = false;
+            await act(() => pushState?.(current()));
             // Pressed again while it works: that run ends and a fresh draft starts from the pad as it stands.
             let drafts = 0;
             window.practiceCallAPI.draftAnswer = async () => { drafts += 1; return { steps: [{ say: `Another go ${drafts}.`, code: `${gaveWayAt}${'z'.repeat(150)}\n` }] }; };

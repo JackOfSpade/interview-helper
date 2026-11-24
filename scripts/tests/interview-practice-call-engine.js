@@ -6640,6 +6640,61 @@ test('live cut-in: a long spoken answer gets a look from cutInFirstMs, then one 
   assert(!rig.engine.state().transcript.some(entry => entry.speaker === 'candidate'));
 });
 
+test('live cut-in: words that go on past the protected window, in one recognised sentence, become the new answer', async () => {
+  // call-mwunu4jr: the sentence began inside the window, so the new answer had no words and the call went quiet.
+  const rig = makeRig({ autoOpener: true, thresholds: LIVE });
+  await greet(rig);
+  await liveAnswer(rig);
+  rig.h.transcript('So the first thing we did was move every job onto one queue.', 'a', rig.clock.now() - 3000, true, rig.clock.now());
+  const id = await cutInNow(rig);
+  rig.h.playback(id, 'started');
+  await flush();
+  await rig.clock.advance(1500);
+  const began = rig.clock.now();
+  rig.h.transcript('That is my', 'b', began, false, began + 400);
+  await rig.clock.advance(1100); // the window closes while they go on
+  rig.h.transcript('That is my change and I am happy to dig into any part', 'b', began, false, rig.clock.now() + 300);
+  await rig.clock.advance(3000);
+  assert.equal(rig.opsOf('cancel').filter(item => item.id === id).length, 1, 'the candidate kept the floor');
+  rig.h.playback(id, 'cancelled', 1500);
+  rig.h.vad(false);
+  rig.h.transcript('That is my change, and I am happy to dig into any part.', 'b', began, true, rig.clock.now());
+  await rig.clock.advance(2000);
+  const last = mainCalls(rig).at(-1).message;
+  assert(last.includes('change, and I am happy to dig into any part.'), last);
+  const cutEntry = rig.engine.state().transcript.find(entry => entry.cutOffBy === 'interviewer');
+  assert(cutEntry.text.endsWith('That is my'), cutEntry.text);
+  assert(!last.includes('That is my change'), 'the words in the cut-off entry are not said twice');
+});
+
+test('live cut-in: a sentence cut into twice keeps the words said after the second window', async () => {
+  const rig = makeRig({ autoOpener: true, thresholds: { ...LIVE, interruptWords: 100, interruptMs: 60000 } });
+  await greet(rig);
+  const began = rig.clock.now();
+  const say = (text, final = false) => rig.h.transcript(text, 'a', began, final, rig.clock.now() + (final ? 0 : 300));
+  rig.h.vad(true);
+  say('one two');
+  await rig.clock.advance(3000);
+  const first = await cutInNow(rig);
+  rig.h.playback(first, 'started');
+  await rig.clock.advance(1000);
+  rig.h.playback(first, 'finished', 1000); // over inside its window, the candidate still talking
+  await flush();
+  await rig.clock.advance(500);
+  say('one two three four');
+  await rig.clock.advance(3000);
+  assert(mainCalls(rig).at(-1).message.includes("'three four'"), mainCalls(rig).at(-1).message);
+  const second = await cutInNow(rig);
+  rig.h.playback(second, 'started');
+  await rig.clock.advance(1000);
+  rig.h.playback(second, 'finished', 1000);
+  await flush();
+  await rig.clock.advance(500);
+  say('one two three four five six');
+  await rig.clock.advance(3000);
+  assert(mainCalls(rig).at(-1).message.includes("'five six'"), mainCalls(rig).at(-1).message);
+});
+
 test('live cut-in: no look without words, while a reply is being made, or when the answer is short', async () => {
   const quiet = makeRig({ autoOpener: true, thresholds: LIVE });
   await greet(quiet);

@@ -149,6 +149,7 @@ const SCREEN_CONTENT_CAP = 6000;
 const PAD_TEXT_CAP = 20000;
 const FINISH_SLACK_MS = 3000;
 const OVERLAP_LOOKBACK_MS = 250;
+const SPLIT_TAIL = '/tail'; // the id of the second part of a segment storeSegment split
 // A recognised segment belongs to an injected line when its middle falls inside the line's playback, give or take these.
 const INJECTED_MATCH_EARLY_MS = 300;
 const INJECTED_MATCH_LATE_MS = 800;
@@ -327,6 +328,7 @@ export function createPracticeCallEngine({
   let offset = null; // clock ms minus helper ms (max seen in the first OFFSET_WINDOW_MS of events, then frozen)
   let offsetSince = null;
   let turnStartMs = -Infinity;
+  let speechSplit = null; // where a new answer begins inside a sentence the recogniser is still hearing (splitSpeech)
   let pendingTyped = []; // sent messages not yet committed: { text, generated } (generated: written by Suggest a reply)
   let padText = ''; // the candidate's current pad text (capped)
   let padSent = ''; // the pad text the main session last received (set when a reply is delivered)
@@ -2819,6 +2821,8 @@ export function createPracticeCallEngine({
   function armSilence() {
     disarm('silence');
     if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting || named.spec || named.commit) return;
+    // A typed line held back for an interviewer who was then stopped is said now.
+    if (injectQueue.length) { startInject(); return; }
     // A quiet look that something held off when it was due (typing, a reply in flight) is due again now.
     if (listenedText !== null && !quietRelookUsed && named.quietRelook === null) armQuietRelook();
     if (maybeSendPadProgress()) return;
@@ -3186,7 +3190,7 @@ export function createPracticeCallEngine({
     if (!liveCut || liveCut.reply !== reply) return null;
     unschedule(liveCut.timer);
     liveCut = null;
-    if (speaking && !paused) { candidateSpoke = true; clearLiveAnswer(); armLiveLook(); return 'speaking'; }
+    if (speaking && !paused) { splitSpeech(turnStartMs); candidateSpoke = true; clearLiveAnswer(); armLiveLook(); return 'speaking'; }
     if (!paused && tokens(candidateText()).length) { candidateSpoke = true; return 'ended'; }
     return null;
   }
@@ -3225,8 +3229,51 @@ export function createPracticeCallEngine({
     unschedule(cut.timer);
     if (!speaking || paused) return;
     const atMs = offset === null ? helperTimelineMs() : now() - offset;
+    splitSpeech(atMs);
     if (current === cut.reply && cut.reply.committed) { if (!overlap) overlapStart(atMs); return; }
     if (!current && !said) { candidateSpoke = true; disarm('silence'); armLiveLook(); }
+  }
+
+  /**
+   * The candidate talks on past a cut-in's window, in a sentence the recogniser began inside it. The words heard up to
+   * here are in the cut-off entry; those still to come belong to the new answer, which begins at atMs. Kept as one
+   * segment they started before that answer and were lost to it: nothing answered them (call-mwunu4jr).
+   */
+  function splitSpeech(atMs) {
+    speechSplit = null;
+    if (!Number.isFinite(atMs)) return;
+    let open = null;
+    let openId = null;
+    let settledMs = -Infinity;
+    for (const [id, item] of segments) {
+      if (!(item.startMs < atMs) || String(id).endsWith(SPLIT_TAIL)) continue; // a sentence split before counts once, by its start
+      if (item.final) settledMs = Math.max(settledMs, Number.isFinite(item.endMs) ? item.endMs : item.startMs);
+      else if (!open || item.startMs > open.startMs) { open = item; openId = id; }
+    }
+    speechSplit = { atMs, words: open ? tokens(`${open.text} ${segments.get(`${openId}${SPLIT_TAIL}`)?.text ?? ''}`).length : 0, fromMs: (open ? open.startMs : settledMs) - OVERLAP_LOOKBACK_MS };
+  }
+
+  /** Keep a recognised segment, as two when the words of it past the split belong to the new answer. */
+  function storeSegment(event) {
+    const item = { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final };
+    const split = speechSplit;
+    const tailId = `${event.segmentId}${SPLIT_TAIL}`;
+    segments.delete(tailId);
+    if (split && item.startMs < split.atMs && item.startMs >= split.fromMs) {
+      if (item.endMs > split.atMs + OVERLAP_LOOKBACK_MS) {
+        const words = tokens(item.text);
+        if (words.length > split.words) {
+          segments.set(event.segmentId, { ...item, text: words.slice(0, split.words).join(' '), endMs: split.atMs });
+          segments.set(tailId, { ...item, text: words.slice(split.words).join(' '), startMs: split.atMs });
+          return;
+        }
+      } else if (item.final) {
+        // The sentence before the split settled on its own: what it took of the heard words is no part of the next.
+        split.words = Math.max(0, split.words - tokens(item.text).length);
+        split.fromMs = item.endMs - OVERLAP_LOOKBACK_MS;
+      }
+    }
+    segments.set(event.segmentId, item);
   }
 
   // ---- helper events --------------------------------------------------------
@@ -3289,7 +3336,7 @@ export function createPracticeCallEngine({
   function onTranscript(event) {
     if (paused) return; // dropped: no caption, no stored words, so nothing from the pause reaches a turn
     dropSupersededVolatile(event);
-    segments.set(event.segmentId, { text: String(event.text ?? ''), startMs: event.startMs, endMs: event.endMs, final: !!event.final });
+    storeSegment(event);
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
     if (String(event.text ?? '').trim()) { silencePrompts = 0; silenceLastCall = false; carriedOn = false; silenceTotalMs = 0; nextGapMs = null; checkInAt = null; } // the candidate actually said something
     if (liveCutProtects(current)) syncLiveCut();
@@ -3785,9 +3832,11 @@ export function createPracticeCallEngine({
   function injectFailed(utterance) {
     if (injecting !== utterance) return;
     injecting = null;
+    const yielding = utterance.yieldTimer !== null;
     dropInject(utterance);
     if (utterance.sent) attempt(() => audio.injectCancel(utterance.utteranceId, 0));
     injectLost(utterance.texts, utterance.tries);
+    if (yielding) yieldInjected(); // the second try gives way to the interviewer as the first would have
   }
 
   /** As candidateVoiceLost: the interviewer only ever hears the candidate, so a line the voice could not say is never passed on as text. */
@@ -3832,8 +3881,9 @@ export function createPracticeCallEngine({
       utterance.positionAt = now();
       unschedule(utterance.startTimer);
       utterance.startTimer = null;
-      // A line that begins while an interviewer is already speaking is talking over them on purpose.
-      utterance.overInterviewer = !!(current && current.playbackStarted);
+      // A line sent while an interviewer is already speaking is talking over them on purpose. One sent before they began
+      // is giving way to them already (yieldInjected): it is stopped like any line (call-mwunu4jr).
+      utterance.overInterviewer = !!(current && current.playbackStarted) && !utterance.yieldTimer;
       armInjectWatch(utterance);
       emit({ type: 'candidate-voice', state: 'started', injected: true, chatIds: chatIdsOf(utterance.texts) });
       return;
@@ -3856,10 +3906,11 @@ export function createPracticeCallEngine({
 
   function yieldInjected(delay = yieldDelayMs()) {
     const utterance = injecting;
-    if (!utterance || !utterance.started || utterance.ending || utterance.overInterviewer || utterance.yieldTimer || utterance.boundaryTimer) return;
+    if (!utterance || utterance.holding || utterance.ending || utterance.overInterviewer || utterance.yieldTimer || utterance.boundaryTimer) return;
     utterance.yieldTimer = schedule(delay, () => {
       utterance.yieldTimer = null;
       if (injecting !== utterance || utterance.ending) return;
+      if (!utterance.started) return holdBackInjected(utterance);
       utterance.boundaryTimer = afterWordBoundary(utterance, () => {
         utterance.boundaryTimer = null;
         if (injecting !== utterance) return;
@@ -3867,6 +3918,24 @@ export function createPracticeCallEngine({
         stopInjected(utterance);
       });
     });
+  }
+
+  /**
+   * A line not begun when an interviewer took the floor is not started over them. A wand line is left unsaid, since it
+   * was written before they spoke (the wand is pressed again to answer); words the candidate typed wait until the
+   * interviewer has finished (finishReply). When nobody is speaking any more the line simply goes on.
+   */
+  function holdBackInjected(utterance) {
+    if (!current?.playbackStarted) return;
+    if (utterance.texts.every(entry => entry.generated)) {
+      utterance.yielded = true;
+      stopInjected(utterance);
+      return;
+    }
+    injecting = null;
+    dropInject(utterance);
+    if (utterance.sent) attempt(() => audio.injectCancel(utterance.utteranceId, 0));
+    injectQueue = [...utterance.texts, ...injectQueue];
   }
 
   /** Stop the line now with a short fade; the helper reports where it stopped (or the estimate stands). */
