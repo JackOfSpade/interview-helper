@@ -24,7 +24,7 @@ const WORD_END = /[\s.,;:()[\]{}]/u;
 // instead (a role hired for several), as the AI that prepared it wrote them: with none required and onChooseLanguage
 // given, the header has a dropdown of exactly those, `choice` is the candidate's pick, and picking another calls
 // onChooseLanguage(name). With none required and none offered the header names no language: any is fine.
-export default function CodingPad({ lang = '', choice = '', options, onChooseLanguage, initialText = '', value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
+export default function CodingPad({ lang = '', choice = '', options, onChooseLanguage, initialText = '', seed = null, value = '', readOnly = false, disabled = false, onChange, onTyping, typerRef, className = '' }) {
   const [own, setOwn] = useState(() => String(initialText || '').slice(0, PAD_TEXT_MAX));
   const text = readOnly ? String(value || '') : own;
   const textRef = useRef(own);
@@ -79,6 +79,16 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
     sendTimerRef.current = setTimeout(flush, PAD_SEND_DEBOUNCE_MS);
     beat();
   };
+  // The exercise's starter code arriving while the pad is up: it takes the pad over, and nothing unsent from before goes out.
+  const seedIdRef = useRef(seed?.id ?? null);
+  useEffect(() => {
+    if (readOnly || !seed || seed.id === seedIdRef.current) return;
+    seedIdRef.current = seed.id;
+    clearTimeout(sendTimerRef.current);
+    dirtyRef.current = false;
+    textRef.current = String(seed.text || '').slice(0, PAD_TEXT_MAX);
+    setOwn(textRef.current);
+  }, [seed, readOnly]);
   const editRef = useRef(edit);
   const flushRef = useRef(flush);
   useEffect(() => { editRef.current = edit; flushRef.current = flush; });

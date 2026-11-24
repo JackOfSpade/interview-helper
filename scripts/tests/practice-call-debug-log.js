@@ -51,7 +51,7 @@ test('a log with no folder or no appendFile does nothing', async () => {
   }
 });
 
-test('strings are capped, audio and secrets are dropped, and paths outside the call folder are hidden', () => {
+test('strings are capped, audio and secrets are dropped, and links and paths are kept', () => {
   const long = 'x'.repeat(5000);
   const clean = sanitizeForDebug({
     text: long, key: 'sk-1', apiKey: 'sk-2', authorization: 'Bearer z', pcm: Buffer.alloc(10), nested: { audio: [1, 2], keep: 1 },
@@ -61,8 +61,9 @@ test('strings are capped, audio and secrets are dropped, and paths outside the c
   for (const name of ['key', 'apiKey', 'authorization', 'pcm']) assert.equal(name in clean, false, name);
   assert.deepEqual(clean.nested, { keep: 1 });
   assert.equal(clean.inside, 'call.json');
-  assert.equal(clean.outside, '[path]');
-  assert.equal(clean.said, 'see [path] now');
+  assert.equal(clean.outside, '/Users/someone/secret.txt');
+  assert.equal(clean.said, 'see /Users/someone/x.txt now');
+  assert.equal(sanitizeForDebug('https://www.example.test/careers', DIR), 'https://www.example.test/careers');
   assert.equal(clean.tag, '<listen/> and </chat>');
   assert.equal(sanitizeForDebug(new Uint8Array(4)), '[binary 4 bytes]');
   assert.equal(sanitizeForDebug({ firstTokenMs: 5 }).firstTokenMs, 5, 'timing fields that mention tokens stay');

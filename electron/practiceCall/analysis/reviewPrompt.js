@@ -39,6 +39,7 @@ export const REVIEW_SCHEMA = Object.freeze({
         properties: {
           turnIndex: { type: 'integer', minimum: 0, description: 'Index of the transcript turn where the moment happened.' },
           label: { type: 'string', maxLength: REVIEW_LIMITS.momentLabel },
+          quote: { type: 'string', maxLength: REVIEW_LIMITS.momentLabel, description: 'A few consecutive words of that turn, copied from it, at the point the moment happened.' },
           kind: { type: 'string', enum: REVIEW_MOMENT_KINDS },
         },
       },
@@ -85,6 +86,15 @@ export function candidateAnswerKinds(transcript) {
   const spoken = own.length - typed;
   const live = own.filter(turn => turn.channel !== 'chat' && turn.voiced !== true).length;
   return { spoken, live, typed, typedOnly: spoken === 0 && typed > 0 };
+}
+
+/** Whose voice spoke these candidate turns: 'AI voice', 'own voice' or both; null when none was spoken. */
+export function answerVoice(turns) {
+  const spoken = (Array.isArray(turns) ? turns : []).filter(turn => turn?.speaker === 'candidate' && !turn.acknowledgement && (turn.channel !== 'chat' || turn.voiced === true));
+  if (!spoken.length) return null;
+  const ai = spoken.some(turn => turn.voiced === true);
+  const own = spoken.some(turn => turn.voiced !== true);
+  return ai && own ? 'AI voice and own voice' : ai ? 'AI voice' : 'own voice';
 }
 
 /** Prepared cards may be `question`/`headline`/`bullets`/`example` or a single `answer`. */
@@ -194,6 +204,8 @@ function interviewerText(member, onClock = clock) {
 const sentOf = turn => (turn?.speaker === 'candidate' && typeof turn.sentText === 'string' ? line(turn.sentText) : '');
 
 function formatTranscript(transcript, wordsByTurn, interviewers = [], onClock = clock) {
+  // Only a call that used the AI voice names the voices.
+  const twoVoices = transcript.some(turn => turn?.speaker === 'candidate' && turn.voiced === true);
   const names = new Map(interviewers.map(member => [member.id, line(member.name)]).filter(([, name]) => name));
   return transcript.map((turn, index) => {
     const named = turn.speaker !== 'candidate' ? names.get(turn.speakerId) : '';
@@ -206,7 +218,9 @@ function formatTranscript(transcript, wordsByTurn, interviewers = [], onClock = 
     const statement = turn.statement === true && turn.speaker !== 'candidate' ? ' (asked nothing; left room for a reaction)' : '';
     // A voiced chat line was spoken on the call: it carries no (chat) mark, so it reads as the speech it was.
     const channelMark = turn.channel && turn.channel !== 'audio' && !(turn.voiced === true && turn.speaker === 'candidate') ? ` (${turn.channel})` : '';
-    const head = `[${index}] ${who}${overlap}${statement} ${onClock(turn.startMs)}-${onClock(turn.endMs)}${channelMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
+    const voice = twoVoices ? answerVoice([turn]) : null;
+    const voiceMark = voice ? ` (${voice})` : '';
+    const head = `[${index}] ${who}${overlap}${statement} ${onClock(turn.startMs)}-${onClock(turn.endMs)}${channelMark}${voiceMark}:${segments.length ? '' : ` ${line(sentOf(turn) || turn.text)}`}`;
     const extras = segments.map(segment => `    ${names.get(segment.speakerId) || 'interviewer'}: ${line(segment.text)}`);
     // The recogniser's text can carry mis-hearings; for a line the AI voice spoke the known words lead and the recogniser's version follows.
     if (sentOf(turn) && line(turn.text) && line(turn.text) !== line(sentOf(turn))) extras.push(`    recogniser heard it as: ${line(turn.text)}`);
@@ -233,11 +247,12 @@ function formatToneTimeline(samples, onClock = clock) {
 const METRIC_TIMES = Object.freeze({ atMs: 'at', startMs: 'start', endMs: 'end', interviewerEndMs: 'interviewerEnd' });
 function metricsOnClock(metrics, onClock, transcript = []) {
   if (!metrics || typeof metrics !== 'object') return metrics;
-  // An answer made only of voiced lines is marked, so its voice-bound numbers are not read as the candidate's.
-  const voicedAnswer = entry => Array.isArray(entry?.turnIndexes) && entry.turnIndexes.length > 0 && entry.turnIndexes.every(index => transcript[index]?.voiced === true);
-  const timed = items => (Array.isArray(items) ? items.map(entry => {
+  // Whose voice each answer was in, so the review can say so. Both are judged alike (the owner's call, 2026-11-23).
+  const voiceOf = entry => answerVoice((Array.isArray(entry?.turnIndexes) ? entry.turnIndexes : []).map(index => transcript[index]).filter(Boolean));
+  const timed = (items, key) => (Array.isArray(items) ? items.map(entry => {
     if (!entry || typeof entry !== 'object') return entry;
-    const copy = voicedAnswer(entry) ? { voicedAnswer: true } : {};
+    const voice = key === 'answers' ? voiceOf(entry) : null;
+    const copy = voice ? { voice } : {};
     for (const [key, value] of Object.entries(entry)) {
       if (METRIC_TIMES[key] && Number.isFinite(value)) copy[METRIC_TIMES[key]] = onClock(value);
       else copy[key] = value;
@@ -245,7 +260,7 @@ function metricsOnClock(metrics, onClock, transcript = []) {
     return copy;
   }) : items);
   const copy = { ...metrics };
-  for (const key of ['answers', 'typedAnswers', 'interviewerCutIns', 'candidateInterruptions']) if (key in copy) copy[key] = timed(copy[key]);
+  for (const key of ['answers', 'typedAnswers', 'interviewerCutIns', 'candidateInterruptions']) if (key in copy) copy[key] = timed(copy[key], key);
   return copy;
 }
 
@@ -262,7 +277,7 @@ export function typingSpans(snapshots, onClock = clock) {
     const at = Number(snapshot?.atMs);
     if (!Number.isFinite(at)) continue;
     const text = String(snapshot?.text ?? '');
-    if (text !== last) times.push(at);
+    if (text !== last && snapshot.starter !== true) times.push(at);
     last = text;
   }
   const spans = [];
@@ -296,7 +311,7 @@ const RULES = [
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
   '- Chapters: one chapter per interviewer question turn, in the order they were asked. Use the turn index shown in brackets, and give each a short, specific title.',
-  '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, and kind "filler" only for a counted filler moment.',
+  '- Moments: flag only moments worth replaying, with the turn index where they happened, a short label, a quote (a few consecutive words copied from that turn where the moment happens, so the replay can jump there), and kind "filler" only for a counted filler moment.',
   '- Delivery: fill the delivery section from the measured numbers and the observed behaviour; it is a summary of pace, pauses, fillers, confidence, interruptions and any typed answers.',
   '- Interviewer cut-ins: a turn marked as cut off by the interviewer means the candidate was still speaking when the interviewer came in. Why they came in is a separate question, and the turn says it when recorded: an interviewer can cut in to probe a detail, to move on once they have enough, or because an answer really ran long, and a persona that interrupts readily does so on short answers too. Judge each cut by its recorded reason and by how long the answer had run, and call an answer long only when the reason or its length shows that. A turn that says the interviewer came in after the candidate had essentially finished is not a cut-in. When the reason is not recorded, say so rather than guessing at length. Mention cut-ins in delivery when they happened, and count them from the metrics (interviewerCutInCount), never from memory.',
   '- Never print transcript turn numbers (the bracketed indices) in any feedback text: refer to the question, or to a time as mm:ss. The indices are only for the chapter and moment index fields.',
@@ -322,7 +337,7 @@ const PANEL_RULE = '- Panel: more than one interviewer was on this call. Praise 
 // How the candidate talked while writing is only known from when the pad changed; without those spans it is not commented on.
 const PAD_TALK_RULE = '- Talking while typing: how the candidate talked while writing is judged only from the typing spans listed with the pad, set against the times of their speech in the transcript. When no typing spans are listed, say nothing about whether they narrated while typing. Never advise narrating while typing, or talking only after finishing, from the final pad text alone.';
 const HEDGED_POINT_RULE = '- A point you can only state conditionally ("if the pad was quiet", "if they had...") is never a priority and not worth a line: leave it out, or state it only when the data settles it.';
-const VOICED_RULE = '- Voiced answers: an answer marked voicedAnswer in the metrics was spoken in a generated voice. Its pace, pauses, pitch, loudness and tone belong to that voice, not to the candidate: never coach them and never make them a priority (do not say to slow down or speed up, or that the answer sounded flat or less confident). Judge such an answer for its content.';
+const VOICED_RULE = '- Two voices: each answer in the metrics and each spoken candidate turn says whose voice it was in: "AI voice" (the candidate had it spoken by a generated voice), "own voice" (their own, on the microphone), or both. Judge both the same way and to the same standard, for content and for delivery alike: pace, pauses, fillers, pitch, loudness and tone, in scores, notes and priorities. The voice is never a reason to score higher or lower, to leave a measurement out or to excuse it, and a difference between the two voices is not itself praise or fault. Identify it: in delivery.summary say which answers were in which voice, and whenever you cite a delivery measurement for one answer, say which voice it was. A gap or wait the metrics leave out stays left out.';
 
 const TYPED_ONLY_NOTE = [
   'The candidate answered only by typing in the chat; every candidate turn below is typed text, and no spoken answer was recorded. This is how the call went, not a technical failure.',
@@ -414,18 +429,19 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     candidateEnded || technicalEnd ? `review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the closing questions of the candidate as a gap. Say once in the overall summary that the call ended early${technicalEnd ? ' because of a technical problem' : ''} and the review covers the call up to that point` : '',
     callRecord.reason === 'interviewer' ? 'how the call ended: the interviewer wrapped up and ended the call' : '',
   ].filter(Boolean).join('\n');
-  // Where the voice came from is not the review's business: the marker never reaches the prompt.
+  // Which voice spoke is given once, on the transcript turn and its answer.
   const measuredProsody = Object.fromEntries(Object.entries(prosodyByEntry(transcript, callRecord.candidateProsody))
     .map(([index, turns]) => [index, turns.map(turn => { const copy = { ...turn }; delete copy.voiced; return copy; })]));
   const screens = Array.isArray(callRecord.screens)
     ? callRecord.screens.filter(screen => screen && typeof screen === 'object' && line(screen.content)) : [];
   const snapshots = Array.isArray(callRecord.pad?.snapshots) ? callRecord.pad.snapshots : [];
   const padText = String(snapshots.at(-1)?.text ?? '').trim();
+  const starters = snapshots.filter(snapshot => snapshot?.starter === true).map(snapshot => String(snapshot.text ?? '')).filter(text => text.trim());
   const hasPad = Boolean(padText);
   const unprepared = unpreparedText(callRecord);
   const picked = pickedCards(callRecord, plan);
   const sections = [
-    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', transcript.some(turn => turn?.statement === true && turn.speaker !== 'candidate') ? STATEMENT_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : '', hasPad ? PAD_TALK_RULE : '', HEDGED_POINT_RULE, transcript.some(turn => turn?.voiced === true) ? VOICED_RULE : ''].filter(Boolean).join('\n'),
+    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', transcript.some(turn => turn?.statement === true && turn.speaker !== 'candidate') ? STATEMENT_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : '', hasPad ? PAD_TALK_RULE : '', HEDGED_POINT_RULE, transcript.some(turn => turn?.speaker === 'candidate' && turn.voiced === true) ? VOICED_RULE : ''].filter(Boolean).join('\n'),
     '--- CALL ---', header,
     ...(typedOnly ? ['--- HOW THE CANDIDATE ANSWERED ---', TYPED_ONLY_NOTE] : []),
     ...(picked
@@ -436,6 +452,7 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at, transcript))]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
     ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP)),
+      ...(starters.length ? ['The pad opened with this code already in it. It was given with the exercise: the candidate did not write it, and is neither credited nor faulted for it.', ...starters.map(text => fenced(cut(text, REVIEW_PAD_CAP)))] : []),
       `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at).join(', ') || '(no typing times were recorded)'}`] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),

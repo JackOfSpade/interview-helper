@@ -163,10 +163,37 @@ export function checkReview(raw, transcript, picked = null) {
     if (!REVIEW_MOMENT_KINDS.includes(entry.kind)) { problems.push(`moments: kind must be one of ${REVIEW_MOMENT_KINDS.join(', ')}`); continue; }
     const label = typeof entry.label === 'string' ? entry.label.trim() : '';
     if (!label) { problems.push(`moments: turn ${index} needs a label`); continue; }
-    moments.push({ turnIndex: index, label, kind: entry.kind });
+    const quote = typeof entry.quote === 'string' ? entry.quote.trim() : '';
+    moments.push({ turnIndex: index, label, kind: entry.kind, ...(quote ? { quote } : {}) });
   }
   if (problems.length) return { error: problems.join('; '), trimmed };
   return { review: { feedback, chapters, moments }, trimmed };
+}
+
+const momentWords = text => String(text ?? '').toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
+/**
+ * When a flagged moment's quote was said: the start of the stretch of the turn's timed words that shares most words with
+ * it, when that is at least half of the quote (the recogniser and the sent words differ a little). Null otherwise.
+ */
+export function momentAtMs(moment, wordsByTurn = {}) {
+  const quote = momentWords(moment?.quote);
+  const words = list(wordsByTurn?.[moment?.turnIndex]).flatMap(word => {
+    const at = clockMs(word?.startMs) ?? clockMs(word?.start);
+    return at === null ? [] : momentWords(word.text ?? word.word).map(text => ({ at, text }));
+  });
+  let best = null;
+  let bestScore = 0;
+  for (let from = 0; quote.length && from < words.length; from += 1) {
+    // Counted in order, so the window starts where the quote does.
+    let next = 0;
+    let score = words[from].text === quote[0] ? 0.5 : 0;
+    for (const word of words.slice(from, from + quote.length + 2)) {
+      const hit = quote.indexOf(word.text, next);
+      if (hit >= 0 && hit - next <= 2) { score += 1; next = hit + 1; }
+    }
+    if (score > bestScore) { best = words[from].at; bestScore = score; }
+  }
+  return bestScore >= quote.length / 2 ? best : null;
 }
 
 /** Filler totals: the review's counted total, with filler moments split per answer. */
@@ -268,7 +295,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan: givenPlan, b
   event('begin', {
     transcriptEntries: transcript.length, durationMs, planCards: list(plan).length,
     hasBrief: !!brief, toneSamples: list(callRecord.toneSamples).length, prosodySamples: list(callRecord.candidateProsody).length,
-    clients: { transcribe: !!deps.transcribe, metrics: !!deps.metrics, callText: !!deps.callText }, audioAvailable: deps.audioAvailable !== false,
+    clients: { transcribe: !!clients.transcribe, metrics: !!clients.metrics, callText: !!clients.callText }, audioAvailable: deps.audioAvailable !== false,
   });
 
   let words = [];
@@ -374,7 +401,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan: givenPlan, b
   // timeline, which began earlier; the chapters live on the recording's timeline.
   const timelineMs = Math.max(durationMs + (clockMs(callRecord.recordingLeadMs) ?? 0), transcript.reduce((max, turn) => Math.max(max, clockMs(turn?.endMs) ?? 0), 0));
   const chapters = buildChapters({
-    transcript, reviewChapters: checked.chapters, moments: checked.moments, metrics,
+    transcript, reviewChapters: checked.chapters, moments: checked.moments.map(moment => ({ ...moment, atMs: momentAtMs(moment, wordsByTurn) })), metrics,
     candidateProsodyByTurn: prosodyByEntry(transcript, callRecord.candidateProsody), durationMs: timelineMs,
   });
   const analysis = compose({ status: 'ready', chapters, fillers: fillerTotals({ feedback: checked.feedback, moments: checked.moments, transcript, durationMs }) });

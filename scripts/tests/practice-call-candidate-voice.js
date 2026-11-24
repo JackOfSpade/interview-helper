@@ -1187,6 +1187,30 @@ test('injected: a sentence-end cut-in on the voice line waits for the sentence t
   assert(rig.of('cut-in').some(event => event.state === 'committed'));
 });
 
+test('injected: the watcher is given a line still being spoken once, however many sentences the recogniser split it into', async () => {
+  // As in call-mwu3jble: three sentences heard so far reached the watcher as the line three times over.
+  const candidateVoice = fakeCandidateVoice();
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: () => ({ decision: 'listen', who: null, reason: null }),
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500 } });
+  await greet(rig);
+  const text = 'These four loads are given. Register one points at the list. So I load each value, and then compare the two of them at the end.';
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  await injectLine(rig, line);
+  micHears(rig, 'These 4 loads are given.', 's1');
+  await rig.clock.advance(900);
+  micSettles(rig, 'These 4 loads are given.', 's1');
+  micHears(rig, 'Register one points at the list.', 's2');
+  await rig.clock.advance(900);
+  micSettles(rig, 'Register one points at the list.', 's2');
+  micHears(rig, 'So I load', 's3');
+  rig.h.inject(line.utteranceId, 'position', 2000);
+  await rig.clock.advance(1300);
+  const watch = JSON.parse(rig.sessions.watcher.calls.at(-1).message);
+  assert.equal(watch.answerText.match(/These four loads/gu)?.length, 1, watch.answerText);
+});
+
 test('injected: a now cut-in on the voice line comes in at the next breath, exactly as on live speech', async () => {
   // As in call-mwqscir3-3yraup: the voice line's clause gaps read as breaths, so the cut landed mid-clause.
   const candidateVoice = fakeCandidateVoice();

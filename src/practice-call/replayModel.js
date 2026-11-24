@@ -508,6 +508,16 @@ export function overviewOf(feedback, { prioritiesMax = 3, sentences = 2 } = {}) 
   };
 }
 
+// Whose voice the candidate's spoken turns in a chapter were in, for a call that used the AI voice; null otherwise.
+export function chapterVoice(transcript, startMs, endMs) {
+  const spoken = (Array.isArray(transcript) ? transcript : []).filter(turn => isCandidate(turn) && !turn.acknowledgement && !isTypedTurn(turn));
+  if (!spoken.some(turn => turn.voiced === true)) return null;
+  const here = spoken.filter(turn => { const at = startOf(turn); return at !== null && at >= startMs && at < endMs; });
+  if (!here.length) return null;
+  const ai = here.some(turn => turn.voiced === true);
+  return ai && here.some(turn => turn.voiced !== true) ? 'AI voice and your voice' : ai ? 'AI voice' : 'Your voice';
+}
+
 // Everything the replay screen needs about the call's parts, on both clocks.
 export function buildReplayModel(replay) {
   const durationMs = Math.max(0, asNumber(replay?.durationMs));
@@ -531,6 +541,7 @@ export function buildReplayModel(replay) {
       endMs: range.endMs,
       questionEndMs,
       hasAnswer: answerMs !== null,
+      voice: chapterVoice(transcript, range.startMs, range.endMs),
       activeStartMs,
       activeEndMs,
       activeQuestionEndMs: activeTimeMs(pauseSpans, questionEndMs),

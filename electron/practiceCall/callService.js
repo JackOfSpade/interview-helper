@@ -369,7 +369,7 @@ export function generatedRunFor(sent, line) {
  * Stamp the candidate's recognised speech that is really an AI-voice line. The voice goes out through the microphone
  * path, so the recogniser records it like live speech with no flag; the helper's inject events say when each line
  * played. A candidate entry mostly inside a generated line's span is that line: `voiced` and `generated` are set
- * (never over a value already there), so the metrics and the review never judge it as the candidate's own delivery.
+ * (never over a value already there), so the metrics and the review know which voice spoke (both are judged alike).
  * A line recognised as a single entry also carries `sentText`, the known words (the whole line, or for a cut line the
  * part that was heard), which are counted and shown to the review instead of the recogniser's text.
  * Seen 2026-11-22: the recogniser joined the seven lines of a worked exercise (with the typing between them) into one
@@ -425,6 +425,8 @@ export function stampInjectedLines(transcript, spans) {
   });
 }
 
+// How many library voices of each gender the planner chooses the candidate's voice among.
+const CANDIDATE_VOICE_OFFERS = 3;
 const CUT_CLAMP_MARGIN_MS = 500;
 const NUMBER_WORDS = Object.freeze({ zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12' });
 const wordsOfText = text => String(text ?? '').toLowerCase().replace(/'/g, '').replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/u).filter(Boolean).map(word => NUMBER_WORDS[word] ?? word);
@@ -746,6 +748,25 @@ export function createPracticeCallService(deps = {}) {
     // The record keeps the pick of the exercise the pad is on now: none once that exercise offers no language.
     if (self?.padRecord && !state.pad.lang) self.padRecord.chosen = choice;
   }
+  /**
+   * The exercise's starter code goes in the pad the first time its pad is up (the pad and the screen may come in either
+   * order). What an earlier exercise left is recorded first. The seed's id tells the window to take the text over.
+   */
+  function seedPad(self, atMs) {
+    const problem = state.pad.open && self?.padProblemRef ? (self.settledPlan?.problems || []).find(item => item?.ref === self.padProblemRef) : null;
+    const starter = typeof problem?.starter === 'string' ? problem.starter.slice(0, PAD_MAX) : '';
+    if (!starter.trim()) return;
+    const seeded = (self.seededPads ||= new Set());
+    if (seeded.has(problem.ref)) return;
+    seeded.add(problem.ref);
+    if (self.padRecord?.snapshots.length) snapshotPad(self, undefined, atMs);
+    state.pad = { ...state.pad, text: starter, seed: { id: seeded.size, text: starter } };
+    try { self.engine?.seedPadText?.(starter); } catch { /* engine already ended */ }
+    if (!self.padRecord) return;
+    snapshotPad(self, starter, atMs);
+    const mark = self.padRecord.snapshots.at(-1);
+    if (mark?.text === starter) mark.starter = true;
+  }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
   function applyPadEvent(self, rawEvent) {
     const event = rawEvent?.open ? { ...rawEvent, lang: padLabel(self, rawEvent.lang) } : rawEvent;
@@ -753,7 +774,7 @@ export function createPracticeCallService(deps = {}) {
     if (event?.open && state.pad.open) self.padReopenedAt = clock.now();
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
     if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); }
-    else self.padProblemRef = null;
+    else { self.padProblemRef = null; state.pad = { ...state.pad, seed: null }; } // the next exercise starts without this one's given code
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
     // The record marks when the pad came up and went away, so the replay shows it from its opening (empty at first)
     // and takes it down again; before, it appeared at the first text that reached an interviewer and never closed.
@@ -761,13 +782,14 @@ export function createPracticeCallService(deps = {}) {
       const marks = self.padRecord.snapshots;
       const markAt = Math.round(Number.isFinite(event.atMs) ? event.atMs : callMs(self));
       const closed = marks.at(-1)?.closed === true;
-      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text }); }
+      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text }); self.padOpenMark = marks.at(-1); }
       else if (!event.open && marks.length && !closed) {
         // What was typed since the pad last reached an interviewer is recorded first, so the close holds the final text.
         snapshotPad(self, state.pad.text, markAt);
         marks.push({ atMs: markAt, text: self.padRecord.lastText, closed: true });
       }
     }
+    if (event.open) seedPad(self, event.atMs);
     emitEvent(event);
   }
   /** Drops a share that is still coming up. A pad open held back for it is released, so it is not lost. */
@@ -788,6 +810,7 @@ export function createPracticeCallService(deps = {}) {
     self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId, ...(visual ? { visual: { ...visual, ...(file ? { file } : {}) } } : {}) });
     state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId), ...(visual ? { visual } : {}) };
     syncPadOptions(self);
+    seedPad(self, atMs);
   }
   /** The screen a suggested reply should see: the one shown now, else the last one shown in this call. */
   function sharedScreenForDraft(self) {
@@ -1400,19 +1423,21 @@ export function createPracticeCallService(deps = {}) {
     return { voiceIds: [], names: [] };
   }
 
-  async function drawCandidateVoices({ pool, fetchImpl, key, random, builtIn = { voiceIds: [], names: [] }, pageCache = new Map(), taken, genders = ['female', 'male'] }) {
+  async function drawCandidateVoices({ pool, fetchImpl, key, random, builtIn = { voiceIds: [], names: [] }, pageCache = new Map(), options = null, taken, genders = ['female', 'male'], perGender = 1 }) {
     const found = {};
     const avoid = new Set(taken.filter(Boolean));
     for (const gender of genders) {
-      try {
+      for (let at = 0; at < perGender; at += 1) try {
         const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, gender, excludeVoiceIds: [...avoid, ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache });
         const voiceId = drawn?.voice?.voiceId;
         if (!voiceId) continue;
         avoid.add(voiceId);
-        found[gender] = { voiceId, name: String(drawn.voice.voiceName ?? ''), accent: String(drawn.voice.accent ?? ''), age: String(drawn.voice.age ?? '') };
+        const voice = { voiceId, name: String(drawn.voice.voiceName ?? ''), accent: String(drawn.voice.accent ?? ''), age: String(drawn.voice.age ?? '') };
+        found[gender] ??= voice;
+        options?.push({ key: `${gender === 'female' ? 'F' : 'M'}${at + 1}`, gender, voice, description: [voice.name, String(drawn.voice.description ?? '')].filter(Boolean).join('. ') });
       } catch (error) { warn(`[PracticeCall] candidate ${gender} voice unavailable: ${error?.message || error}`); }
     }
-    note(`candidate voices ${JSON.stringify(found)}`);
+    note(`candidate voices ${JSON.stringify(found)}${options ? ` offered ${JSON.stringify(options.map(item => [item.key, item.voice.name]))}` : ''}`);
     return Object.keys(found).length ? found : null;
   }
 
@@ -1514,7 +1539,7 @@ export function createPracticeCallService(deps = {}) {
     } catch { return []; }
   }
 
-  async function planInterview(self, { drawnVoices }) {
+  async function planInterview(self, { drawnVoices, candidateOptions = [] }) {
     self.planAbort = new AbortController();
     state.notice = { ...PLANNING_NOTICE };
     setSetupStep('plan');
@@ -1531,7 +1556,9 @@ export function createPracticeCallService(deps = {}) {
         pool: poolOf(self.plan),
         earlierOwnQuestions: self.earlierOwnQuestions || [],
         application: self.application,
-        voices: drawnVoices.map(voiceView), steering: self.steering,
+        voices: drawnVoices.map(voiceView),
+        ...(candidateOptions.length ? { candidateVoices: candidateOptions.map(item => ({ key: item.key, gender: item.gender, age: item.voice.age, accent: item.voice.accent, description: item.description })) } : {}),
+        steering: self.steering,
         ...(self.candidateName ? { candidateName: self.candidateName } : {}),
         recentNames: await recentInterviewerNames(),
         signal: self.planAbort.signal, logger: deps.logger,
@@ -1998,8 +2025,9 @@ export function createPracticeCallService(deps = {}) {
         : [];
       if (call !== self || self.finished) return snapshot();
       // The candidate's own voices: one female and one male, drawn the same way and never one an interviewer may use.
+      const candidateOptions = [];
       self.candidateVoiceIds = deps.candidateVoices === true && pool?.library && typeof pool.library.drawVoice === 'function'
-        ? await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, taken: [recentVoiceId, leadBase.voiceId, ...extras.map(item => item.persona.voiceId)] })
+        ? await drawCandidateVoices({ pool, fetchImpl, key, random, builtIn, pageCache, perGender: CANDIDATE_VOICE_OFFERS, options: candidateOptions, taken: [recentVoiceId, leadBase.voiceId, ...extras.map(item => item.persona.voiceId)] })
         : null;
       if (call !== self || self.finished) return snapshot();
       drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
@@ -2011,8 +2039,14 @@ export function createPracticeCallService(deps = {}) {
       note(`voices drawn ${JSON.stringify(drawnVoices.map(voiceView))}`);
       self.promptBrief = promptBrief(self.brief);
       // The plan decides the length of the call, the cast, the questions and the problems before any interviewer session exists.
-      planned = await planInterview(self, { drawnVoices });
+      planned = await planInterview(self, { drawnVoices, candidateOptions });
       if (!planned) return snapshot();
+      // The planner's pick among those offered; without one the first drawn stays.
+      for (const [gender, picked] of Object.entries(planned.plan.candidateVoice ?? {})) {
+        const choice = candidateOptions.find(item => item.key === picked && item.gender === gender);
+        if (choice && self.candidateVoiceIds) self.candidateVoiceIds = { ...self.candidateVoiceIds, [gender]: choice.voice };
+      }
+      if (self.candidateVoiceIds) note(`candidate voices chosen ${JSON.stringify(Object.fromEntries(Object.entries(self.candidateVoiceIds).map(([gender, voice]) => [gender, voice.name])))}`);
       targetMinutes = deps.targetMinutes ?? targetMinutesOf(planned.plan);
       mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
     }
@@ -2430,6 +2464,10 @@ export function createPracticeCallService(deps = {}) {
         if (!self.pendingPad && !state.screen && state.pad.open && clock.now() - (self.padOpenedAt ?? 0) < SAME_REPLY_MS) {
           self.pendingPad = { type: 'pad', open: true, lang: state.pad.lang };
           state.pad = { ...state.pad, open: false };
+          // Its record mark goes with it: the pad is marked when it really comes up, with the share (the replay showed
+          // an empty pad for the 5 s before the problem it belonged to).
+          const marks = self.padRecord?.snapshots;
+          if (marks?.length && marks.at(-1) === self.padOpenMark) { marks.pop(); self.padRecord.lastText = marks.at(-1)?.text ?? ''; }
         }
         state.sharing = { speakerId, presenterName: presenterNameOf(self, speakerId), title: null };
         self.shareTimer = clock.setTimeout(() => {

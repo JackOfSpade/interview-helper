@@ -47,6 +47,7 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   maxResumePauseMs: 1200,
   maxPausedMs: 2500,
   voiceNoteTimeoutMs: 150,
+  openerGraceMs: 400, // once the acknowledgement has begun to arrive, the deadline is put off by this much, once
   openerDeadlineMs: 1500, // from the start of the turn: an acknowledgement not known by then is aborted and none is spoken
   // Joining the acknowledgement and the reply. The reply's first sentence is flushed to the voice (spoken without
   // waiting for more text, which the service otherwise does until it has about 8 words) only when the acknowledgement
@@ -513,13 +514,16 @@ export function createPracticeCallEngine({
   function heardCandidateText(fromMs = turnStartMs) {
     const used = new Set();
     const out = [];
+    // Read once: each call builds a new object, and `used` tells lines apart by identity (call-mwu3jble: the watcher was
+    // given the line being spoken once per recognised sentence of it, up to four times over).
+    const playing = playingLine();
     for (const item of [...segments.values()].filter(entry => entry.startMs >= fromMs).sort((a, b) => a.startMs - b.startMs)) {
       const said = item.text.trim();
       if (!said) continue;
       const mid = Number.isFinite(item.endMs) ? (item.startMs + item.endMs) / 2 : item.startMs;
       let line = injectedHeard.find(entry => mid >= entry.startMs - INJECTED_MATCH_EARLY_MS && mid <= entry.endMs + INJECTED_MATCH_LATE_MS);
       // A line still being spoken is not in injectedHeard yet: its sent words, as far as it has been heard.
-      if (!line) { const playing = playingLine(); if (playing && mid >= playing.startMs - INJECTED_MATCH_EARLY_MS) line = playing; }
+      if (!line && playing && mid >= playing.startMs - INJECTED_MATCH_EARLY_MS) line = playing;
       if (!line) { out.push(said); continue; }
       if (!used.has(line)) { used.add(line); out.push(line.text); }
     }
@@ -888,12 +892,19 @@ export function createPracticeCallEngine({
     // The main message waits for the acknowledgement's words (so the reply never repeats it) and, on a spoken
     // turn, for the ear's note; both are awaited at once.
     if (reply.messages.opener !== undefined) {
-      reply.openerTimer = schedule(th.openerDeadlineMs, () => {
+      const openerDue = () => {
         reply.openerTimer = null;
         if (current !== reply || reply.openerSettled) return;
+        // Already being written (call-mwu3jble: aborted 74 ms after its first words, then 4.6 s of silence): one short wait.
+        if (!reply.openerGraced && reply.spec.openerFirstDeltaMs !== null && th.openerGraceMs > 0) {
+          reply.openerGraced = true;
+          reply.openerTimer = schedule(th.openerGraceMs, openerDue);
+          return;
+        }
         attempt(() => reply.ctl.opener.abort());
         finishOpener(reply, 'timeout');
-      });
+      };
+      reply.openerTimer = schedule(th.openerDeadlineMs, openerDue);
       runOpener(reply);
     }
     if (!reply.noteSettled) { if (voicedNote) awaitVoicedNote(reply, voicedNote); else requestVoiceNote(reply); }
@@ -3078,7 +3089,7 @@ export function createPracticeCallEngine({
     const text = candidateText();
     const reply = beginTurn({
       text, channel: 'voice', immediate: true, cutInCheck: true, liveLook: true, candidates: [], watched: true,
-      mostRecent: lastSentenceOf(text), cutInBy: { id, ...(name ? { name } : {}), reason: decision.reason ?? undefined, when: decision.when === 'sentence-end' ? 'sentence-end' : 'now' },
+      mostRecent: lastSentenceOf(asHeard(text)), cutInBy: { id, ...(name ? { name } : {}), reason: decision.reason ?? undefined, when: decision.when === 'sentence-end' ? 'sentence-end' : 'now' },
     });
     // What the watcher judged: when that already ended a sentence, the moment it meant for "sentence-end" has passed.
     if (current === reply && judgedText !== undefined) { reply.judgedWords = tokens(judgedText).length; reply.judgedEndsSentence = endsSentence(judgedText); }
@@ -3882,6 +3893,21 @@ export function createPracticeCallEngine({
     return true;
   }
 
+  /** The exercise's own code, put in the pad when it opens: the interviewer knows it from the plan, so it is not the candidate's work. */
+  function seedPadText(value) {
+    const next = String(value ?? '').slice(0, PAD_TEXT_CAP);
+    padText = next;
+    padSent = next;
+    padDirty = false;
+    padDirtySince = null;
+    padEditedAt = null;
+    padHaltText = null;
+    padAtAsk = next.length;
+    watch.padSeen = next;
+    // A reply in flight that carried the pad as it was before must not bring that text back when it is delivered.
+    if (current) { current.padSnapshot = next; current.padCarried = false; }
+  }
+
   function setPadText(value) {
     const next = String(value ?? '').slice(0, PAD_TEXT_CAP);
     if (next === padText) return;
@@ -4097,6 +4123,7 @@ export function createPracticeCallEngine({
     setPaused,
     setMuted,
     setPadText,
+    seedPadText,
     /** A late colleague arrived: the model hears about it with the next message, never on its own. */
     participantJoined(id) {
       const member = speakers?.find(item => item.id === id);

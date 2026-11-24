@@ -204,7 +204,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     voiceGateMs: 1200,
     smartTurnHoldBelow: 0.5, smartTurnTimeoutMs: 300, holdSpeculateMs: 1500, holdCommitMs: 2500,
     smartTurnSureAbove: 0.85, unsureCommitMs: 1800, quietRelookMs: 3000, quietRelookMinGapMs: 1000, listenCheckInMs: 10000,
-    floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerDeadlineMs: 1500,
+    floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerGraceMs: 400, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900, handoverQuietMinMs: 1200, handoverQuietMaxMs: 1800,
     cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInStaleMs: 5000, cutInStaleHardWords: 30, watchVetoBackoffMs: 10000, watchVetoWords: 40, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
     candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
@@ -1694,6 +1694,29 @@ test('the opener deadline: an acknowledgement not known 1500 ms into the turn is
   const [report] = rig.of('opener');
   assert.deepEqual([report.outcome, report.spoken, report.text, report.words], ['timeout', false, '', 0]);
   assert.equal(report.ms, 1500);
+});
+
+test('the opener deadline: an acknowledgement already being written gets one short grace, and no more', async () => {
+  for (const arrives of [true, false]) {
+    const rig = makeRig({ thresholds: { voiceGateMs: 600 } });
+    await greet(rig);
+    await speculate(rig);
+    await rig.clock.advance(1400);
+    rig.sessions.opener.calls[0].options?.onDelta?.('Right');
+    rig.sessions.opener.calls[0].onDelta?.('Right');
+    await rig.clock.advance(300);
+    assert(!rig.sessions.opener.calls[0].signal.aborted, 'past the deadline, but its words have begun');
+    if (arrives) {
+      rig.sessions.opener.answer('Right.');
+      await flush();
+      assert.equal(rig.of('opener')[0].outcome, 'spoken');
+    } else {
+      await rig.clock.advance(201);
+      assert(rig.sessions.opener.calls[0].signal.aborted);
+      assert.equal(rig.of('opener')[0].outcome, 'timeout');
+      assert.equal(rig.of('opener')[0].ms, 1900);
+    }
+  }
 });
 
 test('timing events carry the helper-timeline measurements including last word to first sound', async () => {
@@ -3401,6 +3424,30 @@ test('screen title and content are capped', async () => {
   const shown = rig.engine.state().screen;
   assert.equal(shown.title.length, 120);
   assert.equal(shown.content.length, 6000);
+});
+
+test('an exercise\'s given code in the pad is not the candidate\'s work, also when a reply that carried the old pad is in flight', async () => {
+  const rig = makeRig({ createParser: screenParser });
+  await greet(rig);
+  rig.engine.setPadText('x = PADCODE_OLD');
+  await speak(rig, 'I built a scheduler', 'a');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('Right.');
+  await flush();
+  rig.engine.seedPadText('GIVEN_CODE');
+  rig.sessions.main.answer('Okay.');
+  rig.streams[1].audio(1000);
+  await flush();
+  await rig.clock.advance(700);
+  rig.h.playback('utt2', 'started');
+  rig.h.playback('utt2', 'finished', 1500);
+  await flush();
+  assert.equal(rig.of('pad-sent').length, 0, 'the old pad does not come back');
+  await speak(rig, 'and then', 'b');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('Mm.');
+  await flush();
+  assert(!/GIVEN_CODE|PADCODE_OLD/u.test(rig.sessions.main.calls[2].message), rig.sessions.main.calls[2].message);
 });
 
 test('pad text rides with the next turn only when it changed since the main session last received it', async () => {

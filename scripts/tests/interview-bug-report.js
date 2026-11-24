@@ -39,7 +39,7 @@ const sources = (overrides = {}) => ({
   }),
   claudePauses: () => '\n## Claude Usage Pauses (CLAUDEPAUSE)\n- Current: not limited\n',
   activeTasks: () => [{ taskCount: 2, oldestAgeMs: 61_000, channels: ['build-interview-brief'], nodeId: 'one' }],
-  handoffs: () => ({ aggregate: { issued: 4, accepted: 3, rejected: 0 } }),
+  aiSteps: () => [{ at: '2026-11-24T02:24:30.000Z', task: 'interview', stage: 'qa-write', attempt: 1, provider: 'claude', model: 'claude-x', durationMs: 5000, outcome: 'rejected', code: 'invalid' }],
   dataFolder: () => [{ name: 'career-text', kind: 'folder', children: 2, changedAt: 5 }, { name: 'interview-helper-sessions.json', kind: 'file', bytes: 2048, changedAt: 6 }],
   logs: () => [
     { ts: Date.now() + 2, level: 'error', message: '[build-interview-brief] failed: boom at /Users/someone/secret/file.js token=abc123' },
@@ -95,6 +95,13 @@ const tests = [
     },
   },
   {
+    name: 'bug report: a call line keeps the spacing of the code in it',
+    run() {
+      const line = JSON.stringify({ t: 1000, event: 'engine', data: { type: 'pad-sent', text: 'MAXS32  CSECT\n        USING *,15' } });
+      assert.ok(callTimeline(`${line}\n`).lines.join('\n').includes('MAXS32  CSECT\\n        USING *,15'), JSON.stringify(callTimeline(`${line}\n`)));
+    },
+  },
+  {
     name: 'bug report: the report has every section and none of the private text',
     async run() {
       const markdown = await buildBugReportMarkdown({ payload: payload(), sources: sources(), now: 1_000_000 });
@@ -112,7 +119,7 @@ const tests = [
       assert.match(markdown, /interview-answer · running \/ writing · model claude-opus \(high\) · round 2 · rejected 1 · tool turns 3 · started 90s ago · in this phase 5s · last failure CLAUDE_TIMEOUT \(attempt 1\)/u);
       assert.match(markdown, /Reading https:\/\/example\.test\/page\?session=abc$/mu, 'a step keeps its whole link');
       assert.match(markdown, /2 task\(s\) · oldest 61s · build-interview-brief/u);
-      assert.match(markdown, /issued 4 · accepted 3/u);
+      assert.match(markdown, /interview\/qa-write · claude claude-x · attempt 2 · 5s · rejected \(invalid\)/u);
       assert.match(markdown, /interview-helper-sessions\.json · file · 2,048 bytes/u);
       assert.match(markdown, /- alert: Preparation failed/u);
       assert.match(markdown, / {4}\[t\] click "Prepare"/u);

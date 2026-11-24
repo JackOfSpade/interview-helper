@@ -42,9 +42,9 @@ export function maskSecrets(value) {
     .replace(/\beyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+\b/gu, '<redacted-jwt>');
 }
 
-/** One line with secrets masked; line breaks become a visible mark. */
+/** One line with secrets masked; line breaks become a visible mark. Spacing inside it is kept: it is part of any code shown. */
 function reportLine(value) {
-  return maskSecrets(value).replace(/\r?\n/gu, ' ⏎ ').replace(/[ \t]+/gu, ' ').trim();
+  return maskSecrets(value).replace(/\r?\n/gu, ' ⏎ ').trim();
 }
 
 // Indented code cannot be closed by its content, so log text stays literal.
@@ -190,14 +190,12 @@ function activeTasksSection({ tasks }) {
   ].join('\n');
 }
 
-function handoffSection({ handoffs }) {
-  const aggregate = handoffs?.aggregate && typeof handoffs.aggregate === 'object' ? handoffs.aggregate : null;
-  if (!aggregate) return '## AI steps since the app started\n- Not recorded.';
-  const numbers = Object.entries(aggregate).filter(([, value]) => Number.isFinite(value) && value !== 0);
-  return [
-    '## AI steps since the app started',
-    numbers.length ? `- ${numbers.map(([key, value]) => `${key} ${value}`).join(' · ')}` : '- None issued.',
-  ].join('\n');
+function aiStepsSection(steps) {
+  const heading = '## AI steps since the app started\n> Answered one-off AI calls, oldest first. The live interviewer sessions of a practice call are in its own log.';
+  if (!Array.isArray(steps)) return `${heading}\n- Not recorded.`;
+  return [heading, ...(steps.length
+    ? steps.map(step => `- ${reportLine(`${step.at} ${step.task}/${step.stage} · ${step.provider}${step.model ? ` ${step.model}` : ''} · attempt ${count(step.attempt) + 1} · ${seconds(step.durationMs)} · ${step.outcome}${step.code ? ` (${step.code})` : ''}`)}`)
+    : ['- None answered.'])].join('\n');
 }
 
 function dataFolderSection({ entries }) {
@@ -373,7 +371,7 @@ export async function buildBugReportMarkdown({ payload, sources = {}, now = Date
     await section('Claude worker', async () => claudeSection({ status: await read('claudeStatus'), activity: await read('claudeActivity'), now })),
     await section('Claude usage pauses', async () => String((await read('claudePauses')) || '').trim() || '## Claude usage pauses\n- Not recorded.'),
     await section('Requests still running in the app', async () => activeTasksSection({ tasks: await read('activeTasks') })),
-    await section('AI steps since the app started', async () => handoffSection({ handoffs: await read('handoffs') })),
+    await section('AI steps since the app started', async () => aiStepsSection(await read('aiSteps'))),
     await section('Data folder', async () => dataFolderSection({ entries: await read('dataFolder') })),
     await section('Practice calls', async () => {
       const practice = (await read('practiceCalls')) || {};

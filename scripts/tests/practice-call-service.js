@@ -2896,6 +2896,26 @@ test('the candidate\'s own voice is warmed during setup, so its first line is no
   assert(madeOnAnswer.some(id => beforeAnswer.includes(id)), `the candidate voice was warmed before the call: setup ${JSON.stringify(beforeAnswer)}, answer ${JSON.stringify(madeOnAnswer)}`);
 });
 
+test('the candidate\'s voice is the one the planner picked among those offered', async () => {
+  let offered;
+  const setup = panelHarness({ random: () => 0.1, deps: { candidateVoices: true, candidateVoiceGender: () => 'male', candidateVoice: () => ({ open() { throw new Error('not opened here'); } }) } });
+  const draw = setup.overrides.voiceLibrary.drawVoice;
+  let drawn = 0;
+  setup.overrides.voiceLibrary.drawVoice = async options => (options.gender
+    ? { voice: { voiceId: `cand-${options.gender}-${drawn += 1}`, voiceName: `Voice ${drawn}`, gender: options.gender, age: 'young', accent: 'canadian', description: `sounds like ${drawn}` } } : draw(options));
+  const planner = setup.overrides.planCall;
+  setup.overrides.planCall = async inputs => {
+    offered = inputs.candidateVoices;
+    const made = await planner(inputs);
+    return { ...made, plan: { ...made.plan, candidateVoice: { male: 'M2' } } };
+  };
+  await panelStart(setup);
+  assert.deepEqual(offered.map(item => item.key), ['F1', 'F2', 'F3', 'M1', 'M2', 'M3']);
+  assert.match(offered[4].description, /sounds like 5/u);
+  assert(setup.factoryOptions.some(item => item.voiceId === 'cand-male-5'), 'the picked male voice is the one warmed');
+  assert(!setup.factoryOptions.some(item => item.voiceId === 'cand-male-4'), 'the first drawn is not used');
+});
+
 test('a wand line sent during a pause is made and held when the voice can hold it, and stops waiting once ready', async () => {
   const typed = [];
   let holds = true;
@@ -4083,6 +4103,49 @@ test('screen-stop, the interviewer leaving and hang-up cancel a pending share', 
   assert.equal(hung.service.getState().screen, null);
 });
 
+test('an exercise on given code opens the pad with it, once, marked as given and told to the engine as not the candidate\'s work', async () => {
+  const seeded = [];
+  const clock = timerClock();
+  const box = padEngine([]);
+  const factory = options => ({ ...box.factory(options), seedPadText: value => seeded.push(value) });
+  const starter = 'MAX     CSECT\n* TODO: compare';
+  const planner = fakePlanner();
+  const live = await liveCall({ deps: { clock, trimStart: async () => {}, engineFactory: factory, planCall: async inputs => {
+    const made = await planner(inputs);
+    const number = made.plan.questions.find(question => question.number > 0).number;
+    return { ...made, plan: { ...made.plan, problems: [{ ref: 'p1', question: number, language: 'HLASM', parts: [{ title: 'Finish it', content: 'Finish the routine.' }], starter, solution: 'S', edgeCases: [], hints: [] }] } };
+  } } });
+  await live.service.start(ARGS);
+  await live.service.answer();
+  box.emit({ type: 'pad', open: true, lang: 'HLASM' });
+  box.emit({ type: 'screen', title: 'Finish it', content: 'Finish the routine.', speakerId: 'A', delayMs: 3000 });
+  clock.advance(3000);
+  assert.equal(live.service.getState().pad.text, starter);
+  assert.equal(live.service.getState().pad.seed.text, starter);
+  assert.deepEqual(seeded, [starter]);
+  live.service.updatePad(`${starter}\n CR 3,4`);
+  box.emit({ type: 'pad', open: false });
+  box.emit({ type: 'pad', open: true });
+  assert.equal(live.service.getState().pad.text, `${starter}\n CR 3,4`, 'opening it again keeps the work');
+  await live.service.hangUp();
+  const { pad } = await live.deps.store.readRecord('call-1');
+  assert.equal(pad.snapshots.find(item => item.starter)?.text, starter);
+  assert.equal(pad.snapshots.filter(item => item.starter).length, 1);
+});
+
+test('a pad taken back for a share coming up is recorded when it really appears (call-mwu3jble)', async () => {
+  const { service, deps, clock, box } = await delayedCall();
+  clock.advance(1000);
+  box.emit({ type: 'pad', open: true, lang: 'HLASM', atMs: 1000 });
+  box.emit({ type: 'screen', title: 'One', content: 'a', speakerId: 'A', delayMs: 5000, atMs: 1000 });
+  assert.equal(service.getState().pad.open, false);
+  clock.advance(5000);
+  assert.equal(service.getState().pad.open, true);
+  await service.hangUp();
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.pad.snapshots[0].atMs, record.screens[0].atMs, 'the pad and the problem come up together in the replay');
+});
+
 test('a pad open waits for a pending share and is immediate otherwise', async () => {
   const waits = await delayedCall();
   waits.box.emit({ type: 'screen', title: 'One', content: 'a', speakerId: 'A', delayMs: 3000 });
@@ -5211,7 +5274,7 @@ test('the call writes a debug log: phases, setup steps, engine events, session m
   const timing = named('engine').find(line => line.data.type === 'timing').data;
   assert.equal(timing.firstTokenMs, 410);
   assert(!('key' in timing) && !('pcm' in timing), 'secrets and audio are left out');
-  assert.equal(timing.path, '[path]');
+  assert.equal(timing.path, '/etc/passwd');
   assert.equal(named('engine').find(line => line.data.type === 'opener').data.outcome, 'spoken');
   assert(named('user').some(line => line.data.action === 'chat' && line.data.text === 'typed line'));
   assert(named('finish').some(line => line.data.reason === 'candidate'));

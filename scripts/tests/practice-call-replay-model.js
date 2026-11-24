@@ -107,6 +107,17 @@ export default [
     },
   },
   {
+    name: 'replay model: each part says whose voice answered, on a call that used the AI voice',
+    async run() {
+      const { buildReplayModel } = await model();
+      const turn = (startMs, extra) => ({ speaker: 'candidate', text: 'x', startMs, endMs: startMs + 1000, ...extra });
+      const replay = transcript => ({ durationMs: 50_000, chapters: [0, 10_000, 20_000, 30_000, 40_000].map(startMs => ({ title: 't', startMs })), transcript });
+      const mixed = buildReplayModel(replay([turn(1000, { voiced: true }), turn(11_000), turn(21_000, { voiced: true }), turn(25_000), turn(31_000, { channel: 'chat' })]));
+      assert(JSON.stringify(mixed.chapters.map(item => item.voice)) === JSON.stringify(['AI voice', 'Your voice', 'AI voice and your voice', null, null]), 'voices by part, none for a typed or empty part');
+      assert(buildReplayModel(replay([turn(1000)])).chapters.every(item => item.voice === null), 'a call in one\'s own voice needs no label');
+    },
+  },
+  {
     name: 'replay model: chapters cover the call; no chapters is one block; chapters inside a pause have no length',
     async run() {
       const { buildReplayModel, chapterAtActive } = await model();

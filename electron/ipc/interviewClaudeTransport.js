@@ -107,6 +107,15 @@ function stepLabel(task) {
 }
 
 
+// Every answered AI step of this process, newest last, for the bug report: names, times and outcomes only.
+const AI_STEPS_MAX = 2000;
+const aiSteps = [];
+function noteAiStep(step) {
+  aiSteps.push(step);
+  if (aiSteps.length > AI_STEPS_MAX) aiSteps.shift();
+}
+export const aiStepsSinceStart = () => aiSteps.map(step => ({ ...step }));
+
 export function createInterviewClaudeTransport({
   runStage = runClaudeStage,
   // Research runs through the SDK runner: the CLI runner has no MCP option.
@@ -248,6 +257,7 @@ export function createInterviewClaudeTransport({
         value = json ? firstJsonObject(reply?.text) : String(reply?.text ?? '');
         if (typeof responseValidator === 'function') responseValidator(value);
       } catch (error) { failure = error; }
+      noteAiStep({ at: new Date(now()).toISOString(), task, stage, attempt, provider, model: reply?.model ?? null, durationMs: Date.now() - started, outcome: failure ? 'rejected' : 'accepted', code: failure ? failure.code || 'invalid' : null });
       if (provider === 'claude') {
         // The exact text this attempt sent and how the app judged the reply,
         // kept so a future model can answer it again offline. Recording may

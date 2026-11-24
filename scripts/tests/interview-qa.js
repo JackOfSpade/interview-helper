@@ -7,7 +7,7 @@ import {
   loadInterviewQa, saveInterviewQaCard, clearInterviewQaCards,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
-import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
+import { aiStepsSinceStart, createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
 import { routedCall } from '../../electron/ipc/aiCallProviders.js';
 import { PARALLEL_RESEARCH_TOOLS, PARALLEL_EXHAUSTED_CODE, parallelBlocked, parallelExhaustedError, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
@@ -230,6 +230,7 @@ export default [
       runResearchStage: async args => { research.push(args); return { text: 'Research prose with https://x.test', model: 'claude-opus-5-5' }; },
       routeFor: () => null });
     const value = await transport.callText('PROMPT', { task: 'interview-answer-bank', responseSchema: { type: 'object' }, responseValidator: v => { if (!v.ok) throw new Error('not ok'); } });
+    assert.deepEqual(aiStepsSinceStart().slice(-3).map(step => [step.stage, step.attempt, step.outcome]), [['qa-write', 0, 'rejected'], ['qa-write', 1, 'rejected'], ['qa-write', 2, 'accepted']], 'every answered step is kept for the bug report');
     assert.deepEqual(value, { ok: true });
     assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['sonnet', 'medium', false, ''], ['sonnet', 'medium', true, ''], ['sonnet', 'medium', true, '']]);
     assert.equal(new Set(runs.map(run => run.sessionId)).size, 1, 'retries stay in one Claude session');

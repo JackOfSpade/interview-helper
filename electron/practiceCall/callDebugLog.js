@@ -46,7 +46,7 @@ export function sanitizeForDebug(value, dir = '', depth = 0) {
 function sanitizeString(text, dir) {
   let result = text.replace(PATH_IN_TEXT, (match, lead, file) => {
     if (dir && (file === dir || file.startsWith(`${dir}/`))) return `${lead}${path.relative(dir, file) || '.'}`;
-    return `${lead}[path]`;
+    return match; // links and other paths are kept whole: only secrets are masked in diagnostics
   });
   if (result.length > STRING_CAP) result = `${result.slice(0, STRING_CAP)}…[${result.length - STRING_CAP} more characters]`;
   return result;

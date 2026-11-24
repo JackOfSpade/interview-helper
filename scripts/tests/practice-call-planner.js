@@ -37,6 +37,25 @@ const check = raw => validatePlan(raw, ctx);
 
 const tests = [
   {
+    name: 'practice call planner: starter code keeps its layout, and the candidate voice is the planner\'s pick among those offered',
+    async run() {
+      const plan = goodPlan();
+      plan.problems[0].starter = '\n\n        USING *,15\r\n        L     3,0(,2)\n\n';
+      plan.candidateVoice = { female: 'F2', male: 'M9' };
+      const candidateVoices = [{ key: 'F1', gender: 'female', description: 'A' }, { key: 'F2', gender: 'female', description: 'Plain and even' }, { key: 'M1', gender: 'male', description: 'B' }];
+      const out = validatePlan(plan, { ...ctx, candidateVoices });
+      assert.deepEqual(out.problems, []);
+      assert.equal(out.plan.problems[0].starter, '        USING *,15\n        L     3,0(,2)', 'indentation stays, outer blank lines go');
+      assert.deepEqual(out.plan.candidateVoice, { female: 'F2' }, 'a key that was not offered is ignored, never planned again');
+      assert.equal(validatePlan(goodPlan(), ctx).plan.candidateVoice, undefined);
+      assert.equal('starter' in validatePlan(goodPlan(), ctx).plan.problems[0], false);
+      const prompt = buildPlanPrompt({ pool, voices, brief, application, candidateVoices });
+      assert.match(prompt, /THE VOICES OFFERED FOR THE CANDIDATE[^\n]*\n- F1: female/u);
+      assert.match(prompt, /Plain and even/u);
+      assert.doesNotMatch(buildPlanPrompt({ pool, voices, brief, application }), /VOICES OFFERED FOR THE CANDIDATE/u);
+    },
+  },
+  {
     name: 'practice call planner: the planner writes every person\'s name; names are plain, distinct and never the candidate\'s',
     async run() {
       // Owner's request, 2026-11-23: names had come from fixed lists of eight, so "Dev" turned up call after call.

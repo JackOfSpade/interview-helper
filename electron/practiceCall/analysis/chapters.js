@@ -150,7 +150,7 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
     ...list(metrics?.fillerMoments).map(entry => ({ atMs: ms(entry?.atMs), kind: 'filler', label: label(entry?.label) || 'Filler' })),
     ...list(moments).map(moment => {
       const turn = turns[number(moment?.turnIndex)] ?? null;
-      return { atMs: turn ? ms(turn.startMs) : null, kind: moment?.kind === 'filler' ? 'filler' : 'moment', label: label(moment?.label) || 'Flagged moment' };
+      return { atMs: turn ? ms(moment?.atMs) ?? ms(turn.startMs) : null, kind: moment?.kind === 'filler' ? 'filler' : 'moment', label: label(moment?.label) || 'Flagged moment' };
     }),
     // The candidate's own typed lines are the chapter's text already; only the interviewer's chat is a marker.
     ...turns.filter(turn => turn?.channel === 'chat' && isInterviewer(turn)).map(turn => ({

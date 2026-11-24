@@ -253,6 +253,7 @@ export function draftWorkPrompt(context = {}) {
     '- Reply with JSON only, matching the schema: {"waitForReply":true or false,"steps":[{"say":"...","code":"..." or null,"explain":"before" or "during" or "after","bridge":"..." or null}]}.',
     ...sources,
     `\n<coding-pad-now${lang ? ` lang="${lang}"` : ''}>\n${padText || '(empty)'}\n</coding-pad-now>\n`,
+    ...(context.pad?.seed?.text ? [`The exercise came with this code already in the pad. It was given to you, so you did not write it: you say so if you refer to it, go straight to what has to be changed or added, and keep the rest of it as it is.\n<given-code>\n${String(context.pad.seed.text).slice(0, WORK_PAD_MAX)}\n</given-code>`] : []),
     'Your steps:',
   ].join('\n');
 }

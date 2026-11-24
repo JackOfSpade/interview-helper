@@ -217,6 +217,7 @@ function PartChips({ chapter, part, onJump }) {
       {chip('question', label || 'Question', chapter.activeStartMs)}
       {chapter.hasAnswer && chip('answer', 'Your answer', chapter.activeQuestionEndMs)}
     </div>
+    {chapter.voice && <p data-part-voice="true" className="rounded-full bg-sky-500/20 px-3 py-1 text-sm text-sky-100">Answered in: {chapter.voice}</p>}
     {asker?.name && <p className="text-sm text-white/65">Asked by <span className="text-white/90">{asker.name}</span>{asker.role ? <span className="text-white/50"> · {asker.role}</span> : null}</p>}
   </div>;
 }

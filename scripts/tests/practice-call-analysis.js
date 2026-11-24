@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
+import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, momentAtMs, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
 import { buildChapters } from '../../electron/practiceCall/analysis/chapters.js';
 import { PRACTICE_FEEDBACK_LIMITS } from '../../electron/ipc/interviewQaPractice.js';
 import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits } from '../../electron/practiceCall/analysis/reviewPrompt.js';
@@ -606,8 +606,8 @@ export default [
       assert.match(prompt, /DETERMINISTIC METRICS/u);
       assert.match(prompt, /CANDIDATE PROSODY BY TURN/u);
       assert.doesNotMatch(prompt, /^\[\d+\] .*\(chat\)/mu, 'the voiced line is not marked as chat');
-      assert.match(prompt, /\[1\] candidate 00:04-00:12:/u, 'a generated line reads as the candidate speaking, unflagged');
-      assert.doesNotMatch(prompt, /AI-voiced|AI-drafted|synthetic voice/u, 'no special treatment for the AI voice');
+      assert.match(prompt, /\[1\] candidate 00:04-00:12 \(AI voice\):/u, 'a generated line reads as the candidate speaking, with its voice named');
+      assert.match(prompt, /Judge both the same way and to the same standard, for content and for delivery alike/u, 'no special treatment for the AI voice');
       assert.match(prompt, /this answer was cut off by the interviewer.*the reason is not recorded/u);
       assert.doesNotMatch(prompt, /"voiced"|voiced: true|"generated"/iu);
       assert.doesNotMatch(prompt, /while the candidate typed/u);
@@ -627,7 +627,7 @@ export default [
         { speaker: 'candidate', text: 'All done here', channel: 'chat', voiced: true, generated: true, interrupted: true, cutOffBy: 'interviewer', cutInReason: 'enough', cutWhileSpeaking: false, startMs: 14000, endMs: 20000 },
       ];
       const prompt = buildReviewPrompt({ callRecord: { ...callRecord, transcript: turns }, plan, brief, metrics: {} });
-      assert.match(prompt, /\[1\] candidate 00:04-00:12: I was wrong about the tail/u);
+      assert.match(prompt, /\[1\] candidate 00:04-00:12 \(AI voice\): I was wrong about the tail/u);
       assert.match(prompt, /recogniser heard it as: I was wrong about the tale/u);
       assert.match(prompt, /the interviewer's reason: probe/u);
       assert.match(prompt, /not a cut-in/u);
@@ -879,6 +879,21 @@ export default [
     },
   },
   {
+    name: 'practice call analysis: a flagged moment lands where its quoted words were said, else at the start of its turn',
+    run() {
+      const spoken = 'so I start here and then I only load fifteen at the very end because it is the base register';
+      const words = spoken.split(' ').map((text, at) => ({ text, startMs: 10000 + at * 400 }));
+      const at = quote => momentAtMs({ turnIndex: 1, quote }, { 1: words });
+      assert.equal(at('I only load 15 at the very end'), 10000 + 6 * 400, 'a misheard number does not matter');
+      assert.equal(at('So I start here'), 10000);
+      assert.equal(at('nothing like this was said'), null);
+      assert.equal(at(undefined), null);
+      const transcript = [{ speaker: 'interviewer', text: 'Go.', startMs: 0, endMs: 5000 }, { speaker: 'candidate', text: spoken, startMs: 10000, endMs: 20000 }];
+      const marks = buildChapters({ transcript, reviewChapters: [{ questionTurnIndex: 0, title: 'Q' }], moments: [{ turnIndex: 1, label: 'A', kind: 'moment', atMs: 12800 }, { turnIndex: 1, label: 'B', kind: 'moment', atMs: null }], durationMs: 20000 }).flatMap(chapter => chapter.markers);
+      assert.deepEqual(marks.map(mark => [mark.label, mark.atMs]), [['B', 10000], ['A', 12800]]);
+    },
+  },
+  {
     name: 'practice call analysis: the review is given the pad typing spans and rules on typing, panels, voiced answers and conditional points (call-mwttebvu)',
     run() {
       const record = {
@@ -893,11 +908,18 @@ export default [
       assert.match(text, /judged only from the typing spans listed with the pad[\s\S]*say nothing about whether they narrated/u);
       assert.match(text, /can only state conditionally[\s\S]*is never a priority/u);
       assert.match(text, /only when a candidate line shows it, and then you name what they said/u);
-      assert.match(text, /"voicedAnswer": true,\n\s+"index": 0/u, 'only the answer made of voiced lines is marked');
-      assert.equal((text.match(/voicedAnswer/gu) ?? []).length, 2, 'the rule and one marked answer');
-      assert.match(text, /never coach them and never make them a priority/u);
+      assert.match(text, /"voice": "AI voice",\n\s+"index": 0/u, 'the answer made of voiced lines is named as such');
+      assert.match(text, /"voice": "own voice",\n\s+"index": 1/u, 'and the microphone answer as the candidate\'s own');
+      assert.match(text, /^\[1\] candidate .* \(AI voice\):/mu);
+      assert.match(text, /^\[3\] candidate .* \(own voice\):/mu);
+      assert.match(text, /The voice is never a reason to score higher or lower/u);
+      assert.doesNotMatch(text, /never coach them and never make them a priority/u, 'the AI voice is judged on delivery too');
+      const given = buildReviewPrompt({ callRecord: { ...callRecord, pad: { snapshots: [{ atMs: 1000, text: '' }, { atMs: 1000, text: 'GIVEN', starter: true }, { atMs: 9000, text: 'GIVEN\nMINE' }] } }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      assert.match(given, /opened with this code already in it[^\n]*neither credited nor faulted/u);
+      assert.match(given, /stretches of changes\): 00:09\n/u, 'the given code is not typing');
       const quiet = buildReviewPrompt({ callRecord: { ...callRecord, pad: { snapshots: [{ atMs: 1, text: 'x' }] } }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
-      assert.equal(quiet.includes('Voiced answers:'), false, 'no voiced line, no voiced rule');
+      assert.equal(quiet.includes('Two voices:'), false, 'no voiced line, no voice rule');
+      assert.doesNotMatch(quiet, /^\[\d+\] candidate .*own voice/mu, 'nor any voice mark');
       const none = buildReviewPrompt({ callRecord: { ...callRecord, pad: { snapshots: [{ atMs: 1, text: '' }] } }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
       assert.equal(none.includes('typing in the pad'), false, 'no pad text, no typing line');
     },

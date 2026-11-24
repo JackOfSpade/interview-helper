@@ -15,11 +15,11 @@ import { createPracticeCallController, createReplayHandler } from '../practiceCa
 import { createPracticeAudioHelper, practiceAudioHelperPath } from '../interviewPracticeAudio.js';
 import { createMicrophoneAccess } from '../practiceCall/microphoneAccess.js';
 import { getInterviewPracticeRegistry } from '../ipc/interviewPracticeRegistry.js';
-import { createInterviewClaudeTransport } from '../ipc/interviewClaudeTransport.js';
+import { aiStepsSinceStart, createInterviewClaudeTransport } from '../ipc/interviewClaudeTransport.js';
 import { claudeUsageLimit, recheckClaudeUsageAfterWake } from '../ipc/claudePause.js';
 import { claudePauseDiagnosticsMarkdown, recordClaudePauseEvent } from '../ipc/claudePauseDiagnostics.js';
 import { registerNetworkHandlers } from '../ipc/network.js';
-import { flushNonApiAiPersistence, getNonApiAiHandoffLifecycleSnapshot, registerNonApiAiHandlers } from '../ipc/nonApiAi.js';
+import { flushNonApiAiPersistence, registerNonApiAiHandlers } from '../ipc/nonApiAi.js';
 import { claudeTaskWorkerActivity, claudeTaskWorkerStatus, registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from '../ipc/claudeTaskWorker.js';
 import { isRendererSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import { createInterviewSessionStore, decodeInterviewStateFile, encodeInterviewStateFile, saveWindowStateNow } from './sessionStore.js';
@@ -431,7 +431,7 @@ if (!app.requestSingleInstanceLock()) {
           claudeActivity: () => claudeTaskWorkerActivity(),
           claudePauses: () => claudePauseDiagnosticsMarkdown({ current: claudeUsageLimit() }),
           activeTasks: () => snapshotActiveNodeTasks(),
-          handoffs: () => getNonApiAiHandoffLifecycleSnapshot(),
+          aiSteps: () => aiStepsSinceStart(),
           dataFolder: () => listDataFolder(roots.data),
           // Every call of this run (else the newest) with its whole debug log and transcript, and the call window's events.
           practiceCalls: async () => {
