@@ -446,7 +446,7 @@ export default [
       assert.equal(text.includes('Over to John. John, go ahead.'), false, 'the joined text is replaced by the segments');
       assert.match(text, /\[3\] interviewer 00:09-00:10: No speaker recorded\./u, 'a turn with no speaker keeps the bare word');
       assert.equal(text.split('- Panel:').length, 2, 'the panel rule is added once');
-      assert.match(text, /only when the transcript shows it/u);
+      assert.match(text, /only when a candidate line shows it/u);
       // A record that repeats the lead inside the panel is read the same way.
       const withLead = build({ ...record, panel: [{ id: 'A', name: 'Dana', role: 'Engineering manager', joins: 'start' }, ...record.panel] });
       assert.match(withLead, /Dana, Engineering manager; John/u);
@@ -693,7 +693,7 @@ export default [
         { speaker: 'interviewer', text: 'First?', startMs: 0, endMs: 5000 },
         { speaker: 'candidate', text: 'Answer.', startMs: 5000, endMs: 20000 },
         { speaker: 'interviewer', text: 'Any questions?', startMs: 20000, endMs: 24000 },
-        { speaker: 'candidate', text: 'One question.', startMs: 24000, endMs: 30000 },
+        { speaker: 'candidate', text: 'One question: what is the team like?', startMs: 24000, endMs: 30000 },
       ];
       const reviewChapters = [{ questionTurnIndex: 0, title: 'First' }, { questionTurnIndex: 2, title: 'Candidate question' }];
       const merged = [...base, { speaker: 'interviewer', text: 'Glad. Over to you. Here is the answer. Thanks. Take care. Good meeting you.', startMs: 31000, endMs: 60000,
@@ -845,4 +845,61 @@ export default [
       assert.equal('retry' in ok.analysis, false, 'a ready analysis carries no retry context');
     } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
   } },
+  {
+    name: 'practice call analysis: a farewell after a candidate turn that asked nothing is all Closing, and a connection-second opening is folded (call-mwttebvu)',
+    run() {
+      const seg = (speakerId, text) => ({ speakerId, text });
+      const farewell = { speaker: 'interviewer', text: 'x', startMs: 31000, endMs: 41000, segments: [seg('A', 'Thanks for your time.'), seg('B', 'Good talking with you.'), seg('A', 'Have a good day.')] };
+      const base = candidate => [
+        { speaker: 'interviewer', text: 'First?', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', text: 'Answer.', startMs: 5000, endMs: 20000 },
+        { speaker: 'interviewer', text: 'Any questions?', startMs: 20000, endMs: 24000 },
+        { speaker: 'candidate', startMs: 24000, endMs: 30000, ...candidate },
+        farewell,
+      ];
+      const closingStart = turns => buildChapters({ transcript: turns, reviewChapters: [{ questionTurnIndex: 0, title: 'First' }, { questionTurnIndex: 2, title: 'Candidate question' }], durationMs: 60000 }).at(-1);
+      assert.deepEqual([closingStart(base({ text: 'No, I think that covers it.' })).title, closingStart(base({ text: 'No, I think that covers it.' })).startMs], ['Closing', 31000], 'nothing asked: the whole turn is Closing');
+      assert.equal(closingStart(base({ text: 'garbled', sentText: 'No, that covers it.' })).startMs, 31000, 'the sent text is what counts');
+      assert.ok(closingStart(base({ text: 'garbled', sentText: 'What is the team like?' })).startMs > 31000, 'a question sent is answered by the first part');
+      assert.ok(closingStart(base({ text: 'What is the team like?' })).startMs > 31000);
+      // An opening of a second with no candidate speech belongs to the first chapter.
+      const opening = [
+        { speaker: 'interviewer', text: 'Hi, Jack?', startMs: 1100, endMs: 3000 },
+        { speaker: 'candidate', text: 'Yes.', startMs: 3200, endMs: 4000 },
+        { speaker: 'interviewer', text: 'Tell me about yourself.', startMs: 4500, endMs: 6000 },
+        { speaker: 'candidate', text: 'I build things.', startMs: 7000, endMs: 20000 },
+        { speaker: 'interviewer', text: 'Thanks, bye.', startMs: 21000, endMs: 25000 },
+      ];
+      const titles = (turns, anchors) => buildChapters({ transcript: turns, reviewChapters: anchors, durationMs: 25000 }).map(chapter => [chapter.title, chapter.startMs, chapter.endMs]);
+      assert.deepEqual(titles(opening, [{ questionTurnIndex: 0, title: 'Greeting' }]).at(0), ['Greeting', 0, 21000], 'a 1.1 s opening is folded into the first chapter');
+      const spoken = [{ speaker: 'candidate', text: 'Hello?', startMs: 200, endMs: 900 }, ...opening];
+      assert.deepEqual(titles(spoken, [{ questionTurnIndex: 1, title: 'Greeting' }]).at(0), ['Opening', 0, 1100], 'candidate speech keeps the opening');
+      const long = opening.map(turn => ({ ...turn, startMs: turn.startMs + 5000, endMs: turn.endMs + 5000 }));
+      assert.equal(titles(long, [{ questionTurnIndex: 0, title: 'Greeting' }]).at(0)[0], 'Opening', 'a long opening stays');
+    },
+  },
+  {
+    name: 'practice call analysis: the review is given the pad typing spans and rules on typing, panels, voiced answers and conditional points (call-mwttebvu)',
+    run() {
+      const record = {
+        ...callRecord,
+        transcript: callRecord.transcript.map((turn, index) => (index === 1 ? { ...turn, voiced: true } : turn)),
+        panel: [{ id: 'A', name: 'Dana' }, { id: 'B', name: 'John', joins: 'late', joinedAtMs: 26000 }],
+        pad: { lang: 'python', snapshots: [{ atMs: 0, text: '' }, { atMs: 15000, text: 'a' }, { atMs: 17000, text: 'ab' }, { atMs: 19000, text: 'abc' }, { atMs: 19500, text: 'abc' }, { atMs: 30000, text: 'abcd' }] },
+        pauseSpans: [{ startMs: 5000, endMs: 10000 }],
+      };
+      const text = buildReviewPrompt({ callRecord: record, plan: { cards: [] }, metrics: { answers: [{ index: 0, turnIndexes: [1], wordsPerMinute: 236.1 }, { index: 1, turnIndexes: [3], wordsPerMinute: 120 }] }, wordsByTurn: {} });
+      assert.match(text, /When the candidate was typing in the pad \(active clock, stretches of changes\): 00:10-00:14, 00:25\n/u, 'spans are on the active clock, merged, the gap splits them');
+      assert.match(text, /judged only from the typing spans listed with the pad[\s\S]*say nothing about whether they narrated/u);
+      assert.match(text, /can only state conditionally[\s\S]*is never a priority/u);
+      assert.match(text, /only when a candidate line shows it, and then you name what they said/u);
+      assert.match(text, /"voicedAnswer": true,\n\s+"index": 0/u, 'only the answer made of voiced lines is marked');
+      assert.equal((text.match(/voicedAnswer/gu) ?? []).length, 2, 'the rule and one marked answer');
+      assert.match(text, /never coach them and never make them a priority/u);
+      const quiet = buildReviewPrompt({ callRecord: { ...callRecord, pad: { snapshots: [{ atMs: 1, text: 'x' }] } }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      assert.equal(quiet.includes('Voiced answers:'), false, 'no voiced line, no voiced rule');
+      const none = buildReviewPrompt({ callRecord: { ...callRecord, pad: { snapshots: [{ atMs: 1, text: '' }] } }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      assert.equal(none.includes('typing in the pad'), false, 'no pad text, no typing line');
+    },
+  },
 ];

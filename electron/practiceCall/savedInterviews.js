@@ -5,8 +5,10 @@ import path from 'node:path';
  * Interviews kept so the same one can be held again without planning it anew:
  * `<userData>/practice-interviews/<id>/interview.json` plus its `visuals/` files.
  *
- * What is kept is the setup a call was made from (the drawn voices, the plan, the colleagues'
- * join draws, the questions it picked and the pictures and diagrams on its screens). Measured on
+ * What is kept is the setup a call was made from (the drawn voices, the plan with its length, who joins late and
+ * the lead's temperament in the planner's own words, the colleagues' join draws as they came out so a retake
+ * replays them, the questions it picked and the pictures and diagrams on its screens). An interview kept
+ * before the planner chose the length, the late joins or the temperament lacks those fields and still loads. Measured on
  * the calls on disk (2026-11-21) the JSON is 4 to 25 KB; the visuals are what can make one big
  * (an SVG is a few KB, a photo up to 5 MB, at most 4 per interview). So a few are kept per job
  * and company, a few dozen in all, under a byte budget that only photo-heavy interviews reach;
@@ -32,6 +34,7 @@ export function summarizeSavedInterview(entry) {
   const plan = entry?.planned?.plan ?? {};
   const byKey = new Map((entry?.drawnVoices || []).map(voice => [voice.key, voice]));
   const lead = byKey.get(plan.lead?.voice);
+  const nameOf = person => String(person?.name ?? '').replace(/\s+/gu, ' ').trim();
   const questions = Array.isArray(plan.questions) ? plan.questions : [];
   return {
     id: entry.id,
@@ -41,11 +44,13 @@ export function summarizeSavedInterview(entry) {
     company: entry.company || '',
     role: entry.role || '',
     interviewKind: String(plan.interviewKind || ''),
-    lead: { name: lead?.name || '', role: String(plan.lead?.role || '') },
-    panel: (Array.isArray(plan.panel) ? plan.panel : []).map(member => ({ name: byKey.get(member.voice)?.name || '', role: String(member.role || '') })),
+    // The plan names each person; an interview kept from before it did has the names on its voices.
+    lead: { name: nameOf(plan.lead) || lead?.name || '', role: String(plan.lead?.role || '') },
+    panel: (Array.isArray(plan.panel) ? plan.panel : []).map(member => ({ name: nameOf(member) || byKey.get(member.voice)?.name || '', role: String(member.role || '') })),
     questionCount: questions.length,
     problemCount: Array.isArray(plan.problems) ? plan.problems.length : 0,
-    minutes: Math.round(questions.reduce((sum, question) => sum + (Number(question.minutes) || 0), 0)),
+    // The length the planner chose for the call; an interview kept from before it did has the question budgets' sum.
+    minutes: Number(plan.callMinutes) > 0 ? Math.round(Number(plan.callMinutes)) : Math.round(questions.reduce((sum, question) => sum + (Number(question.minutes) || 0), 0)),
     steering: entry.steering || '',
   };
 }

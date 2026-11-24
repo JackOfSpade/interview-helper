@@ -10,7 +10,7 @@ import { createCallDebugLog } from './callDebugLog.js';
 import { RECORDINGS_KEPT } from './callStore.js';
 import { createSavedInterviewStore, isSavedInterviewId } from './savedInterviews.js';
 import { DEFAULT_CALL_THRESHOLDS } from '../interviewPracticeCallEngine.js';
-import { padLanguageNames } from '../../src/practice-call/padLanguages.js';
+import { padLanguageNames, padLanguageKey } from '../../src/practice-call/padLanguages.js';
 
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list', listSaved: 'practice-call:list-saved', removeSaved: 'practice-call:remove-saved' });
@@ -18,13 +18,14 @@ const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', '
 const CLASSIFIER_INSTRUCTIONS = 'You classify one candidate utterance. Reply with exactly one word: acknowledgement if it only acknowledges, agrees or fills a pause, or interruption if it starts a new thought, question or correction. No punctuation, no explanation. Every later message is one utterance to classify. Reply only READY now.';
 const USAGE_LIMIT_MESSAGE = 'Claude usage is limited right now; analysis may wait until the limit resets.';
 const MODELS = Object.freeze(['smartTurn', 'tone']);
-// A panel call: up to four colleagues beside the lead. Most join late, like people who
-// are a few minutes behind a meeting; the delay is uniform inside this window.
+// A panel call: up to four colleagues beside the lead. Whether each joins late, like a person a few
+// minutes behind a meeting, and when, is the plan's own choice (the planner writes it per colleague).
 const SAME_REPLY_MS = 1500; // a pad opened this recently came from the same reply as the share that follows
 const MAX_COLLEAGUES = 4;
-const LATE_JOIN_CHANCE = 0.6;
-const LATE_JOIN_MIN_MS = 40000;
-const LATE_JOIN_MAX_MS = 210000;
+// Nobody arrives later than this share of the planned minutes, and a late arrival is at least this long into the call
+// (or half the latest allowed, on a very short plan).
+const LATE_JOIN_LATEST_SHARE = 0.25;
+const LATE_JOIN_MIN_MS = 30000;
 const COLLEAGUE_IDS = Object.freeze(['B', 'C', 'D', 'E']);
 // Shown while the planning step runs, before the call can ring.
 // The setup steps in the order they run; the window lists them and marks the one in progress.
@@ -46,12 +47,6 @@ const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting th
 const VOICE_DESCRIPTION_MAX = 300;
 // An interviewer who stays on after the call is over leaves 1.0 to 3.0 s later, in steps of 0.1 s, each on their own draw.
 const LEAVE_MIN_MS = 1000;
-// One spelling per language for comparing pad labels: lower case, spaces and dots dropped, common short names expanded.
-const LANGUAGE_ALIASES = Object.freeze({ js: 'javascript', ts: 'typescript', py: 'python', python3: 'python', cpp: 'c++', cplusplus: 'c++', golang: 'go', csharp: 'c#', cs: 'c#', rb: 'ruby', kt: 'kotlin', rs: 'rust', sh: 'bash', shell: 'bash', postgresql: 'sql', postgres: 'sql', mysql: 'sql', nodejs: 'javascript', node: 'javascript' });
-const languageKey = value => {
-  const key = String(value ?? '').toLowerCase().replace(/[\s.]+/gu, '');
-  return LANGUAGE_ALIASES[key] ?? key;
-};
 const LEAVE_STEP_MS = 100;
 const LEAVE_STEPS = 21;
 
@@ -193,17 +188,55 @@ async function warmUpVoice({ factory, clock }) {
 }
 /** What the planner is told about one drawn voice. */
 function voiceView(voice) {
-  return { key: voice.key, name: voice.name, gender: voice.gender, age: voice.age, accent: voice.accent, description: voice.description };
+  // A voice has no name of its own: the planner writes the person's.
+  return { key: voice.key, gender: voice.gender, age: voice.age, accent: voice.accent, description: voice.description, ...(voice.nameStart ? { nameStart: voice.nameStart } : {}) };
 }
+// Where the planner starts looking for a person's first name: a letter that differs from call to call and voice to
+// voice, so the same few names are not written every time. Taken from the call and voice ids, not from the call's
+// random draws, which other draws depend on.
+const NAME_START_LETTERS = 'ABCDEFGHIJKLMNOPRSTVWYZ';
+function nameStartOf(callId, voiceId) {
+  return NAME_START_LETTERS[Number.parseInt(sha256(`${callId}:${voiceId}`).slice(0, 8), 16) % NAME_START_LETTERS.length];
+}
+// How many of the newest calls' people the planner is told not to name anyone after.
+const RECENT_NAME_CALLS = 12;
 function teamFor(brief) {
   const role = brief?.role ?? {};
   const named = String(role.team ?? role.department ?? '').trim();
   return named;
 }
-/** Tough only when the request or the brief asks for it; otherwise null, and the interviewer picks one to fit its voice. */
+/**
+ * The range [low, high] of minutes the interviewer prompts are given for a call, from the length the planner chose:
+ * the high end is the planned length and the low end a sixth shorter (the range the app measured with, 25 to 30). A
+ * plan without a length (a stand-in, or one kept from before) is as long as its questions' budgets add up to.
+ * Null when there is nothing to go on, and the call then passes the prompts no range (see targetOption).
+ */
+function targetMinutesOf(plan) {
+  const high = Math.round(plannedMinutesOf(plan));
+  return high > 0 ? [Math.max(1, Math.round(high * 5 / 6)), high] : null;
+}
+/**
+ * How long the plan says the call is, in minutes: the length the planner chose when it is a positive number, else what
+ * its questions' budgets add up to (a stand-in or an older plan has no length). The interviewer, the watcher and the
+ * wrap-up read the chosen length, and the budgets may add up to anything from far less to 1.25 times it, so everything
+ * that needs "how long is this call" asks here and none of them adds the budgets up itself. 0 when there is nothing to go on.
+ */
+function plannedMinutesOf(plan) {
+  const chosen = Number(plan?.callMinutes);
+  if (chosen > 0) return chosen;
+  return (Array.isArray(plan?.questions) ? plan.questions : []).reduce((sum, question) => sum + (Number(question?.minutes) > 0 ? Number(question.minutes) : 0), 0);
+}
+/** The targetMinutes option for the prompt builders: the range when there is one, and nothing when there is not (a null would print as 0:00). */
+function targetOption(targetMinutes) {
+  return Array.isArray(targetMinutes) && targetMinutes.every(value => Number(value) > 0) ? { targetMinutes } : {};
+}
+/**
+ * The lead's temperament when the request or the brief gives one, as written (the live interviewer's prompt prints it
+ * as given); otherwise null, and the planner writes the lead's temperament itself.
+ */
 function temperamentFor({ request, brief } = {}) {
-  const asked = String(request?.temperament ?? brief?.practice?.temperament ?? brief?.temperament ?? '').trim().toLowerCase();
-  return asked === 'tough' ? 'tough' : null;
+  const asked = String(request?.temperament ?? brief?.practice?.temperament ?? brief?.temperament ?? '').trim();
+  return asked || null;
 }
 /**
  * The question pool as the planner and the interviewers see it: questions only, numbered from 1.
@@ -257,12 +290,21 @@ function spokenQuestion(said) {
   const asking = text.split(/(?<=[.!?])\s+/u).filter(sentence => sentence.includes('?'));
   return asking.length ? asking.join(' ') : text;
 }
+// The length the question history keeps of a note (NOTE_CHARS in questionHistory.js).
+const NOTE_LIMIT = 300;
 /** What a prepared problem is, for the notes: its part titles, then the start of the first part. */
 function problemNote(problem, { withContent = true } = {}) {
   const parts = Array.isArray(problem?.parts) ? problem.parts : [];
   const titles = parts.map(part => String(part?.title ?? '').trim()).filter(Boolean).join(' / ');
   const first = String(parts[0]?.content ?? '').replace(/\s+/gu, ' ').trim();
-  return withContent && titles && first ? `${titles}: ${first}` : titles;
+  if (!(withContent && titles && first)) return titles;
+  const note = `${titles}: ${first}`;
+  if (note.length <= NOTE_LIMIT) return note;
+  // The history cuts a long note at its limit; end it at a sentence end instead when one falls past half of it.
+  // A sentence end is a mark followed by a space and a capital, bracket or quote: not "e.g. numbers" or "3.14".
+  const ends = [...note.slice(0, NOTE_LIMIT + 2).matchAll(/[.!?](?=\s+[\p{Lu}("'`])/gu)].filter(match => match.index < NOTE_LIMIT);
+  const end = ends.length ? ends[ends.length - 1].index + 1 : 0;
+  return end > NOTE_LIMIT / 2 ? note.slice(0, end) : note;
 }
 
 /** The prepared brief flattened into the prompt module's brief shape. */
@@ -421,17 +463,24 @@ export function clampedEndOfCutSegment(event, spans) {
 }
 
 /**
- * What the call knows about its clock, for the suggestion prompts: active time so far, the planned length (the planned
- * questions' minutes, as the late-join draw reads them) and the minutes planned for the question most recently asked.
- * A fact the call does not have is left out. Seen 2026-11-23: a "last quick one" at 4:56 of five minutes got a 49 s answer
+ * What the call knows about its clock, for the suggestion prompts: active time so far, the planned length (plannedMinutesOf,
+ * as the late-join draw reads it) and the minutes planned for the question in progress. A fact the call does not have is
+ * left out. The engine's state lists the plan questions asked (never the planner's own question, number 0) and keeps the
+ * text of the planner's own question once it has been said, but not which of them came last. So the question in progress
+ * is the own question only when nothing from the plan has been asked yet; once both have been asked the state cannot say
+ * which is the latest, and the minutes are left out rather than taken from the wrong question. Seen 2026-11-23: a "last quick one" at 4:56 of five minutes got a 49 s answer
  * because nothing told the reply how little time was left.
  */
 export function draftTimingOf(self, engineState) {
   const questions = Array.isArray(self?.settledPlan?.questions) ? self.settledPlan.questions : [];
   const minutes = question => (Number(question?.minutes) > 0 ? Number(question.minutes) : 0);
-  const plannedMs = questions.reduce((sum, question) => sum + minutes(question), 0) * 60000;
+  const plannedMs = plannedMinutesOf(self?.settledPlan) * 60000;
   const asked = Array.isArray(engineState?.askedQuestions) ? engineState.askedQuestions : [];
-  const current = asked.length ? questions.find(question => question.number === asked[asked.length - 1]) : null;
+  const own = questions.find(question => question.number === 0);
+  const ownAsked = !!own && typeof engineState?.askedTexts?.[0] === 'string' && engineState.askedTexts[0] !== '';
+  let current = null;
+  if (ownAsked) current = asked.length ? null : own;
+  else if (asked.length) current = questions.find(question => question.number === asked[asked.length - 1]) ?? null;
   return {
     ...(Number.isFinite(engineState?.elapsedMs) ? { elapsedMs: engineState.elapsedMs } : {}),
     ...(plannedMs > 0 ? { plannedMs } : {}),
@@ -642,9 +691,10 @@ export function createPracticeCallService(deps = {}) {
   }
   /**
    * The label the pad shows: a language only when the exercise requires one. With prepared problems, an interviewer's
-   * label stands only for a language one of them requires (named any common way: "JS", "cpp", "golang"); it then shows
-   * the problem's own name for it. A label naming no required language shows the one required language when there is
-   * exactly one, else nothing. A call without prepared problems keeps the label as written.
+   * label stands only for a language one of them requires, by the same name as the plan's apart from letter case,
+   * spaces and dots (the app keeps no table of nicknames); it then shows the problem's own name for it. A label naming
+   * no required language shows the one required language when there is exactly one, else nothing. A call without
+   * prepared problems keeps the label as written.
    */
   function padLabel(self, lang) {
     const label = String(lang ?? '').trim();
@@ -652,10 +702,10 @@ export function createPracticeCallService(deps = {}) {
     if (!label || !Array.isArray(problems) || !problems.length) return label;
     const required = [...new Set(problems.map(problem => String(problem?.language ?? '').trim()).filter(Boolean))];
     if (!required.length) return '';
-    const said = languageKey(label);
+    const said = padLanguageKey(label);
     // A language the candidate may pick (a problem that allows several) is never a label: the pad offers it instead.
-    if (problems.some(problem => !String(problem?.language ?? '').trim() && (problem?.languages || []).some(name => languageKey(name) === said))) return '';
-    return required.find(name => languageKey(name) === said) ?? (required.length === 1 ? required[0] : '');
+    if (problems.some(problem => !String(problem?.language ?? '').trim() && (problem?.languages || []).some(name => padLanguageKey(name) === said))) return '';
+    return required.find(name => padLanguageKey(name) === said) ?? (required.length === 1 ? required[0] : '');
   }
   /**
    * The languages the pad offers the candidate: those of the prepared problem on screen when it allows several (the
@@ -1372,28 +1422,17 @@ export function createPracticeCallService(deps = {}) {
    * fewer: the lead alone is enough for a call. No voice is made or warmed here: the planner
    * chooses among them, and only the chosen ones are used.
    */
-  async function drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken, leadName, builtIn = { voiceIds: [], names: [] }, pageCache }) {
+  async function drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken, builtIn = { voiceIds: [], names: [] }, pageCache }) {
     const voices = new Set(taken.filter(Boolean));
-    // Every first name and surname already on the call.
-    const names = new Set(String(leadName || '').toLowerCase().split(/\s+/u).filter(Boolean));
     const found = [];
     for (let at = 0; at < MAX_COLLEAGUES; at += 1) {
       try {
         const drawn = await pool.library.drawVoice({ fetch: fetchImpl, key, random, excludeVoiceIds: [...voices, ...builtIn.voiceIds], excludeNames: builtIn.names, pageCache });
         if (!drawn?.voice) continue;
-        // The name is drawn again a few times when it repeats a first name or a surname already on
-        // the call: two interviewers called Cohen read as relatives (seen in the built app).
-        let picked = null;
-        let persona = null;
-        for (let tries = 0; tries < 5 && !persona; tries += 1) {
-          picked = catalog.pickPersonaVoice({ voices: [drawn.voice], random, temperament: null });
-          if (!picked?.voiceId || voices.has(picked.voiceId)) break;
-          const named = personaOf(picked, 'library');
-          const parts = String(named.name).toLowerCase().split(/\s+/u).filter(Boolean);
-          if (!parts.length || parts.some(part => names.has(part))) continue;
-          for (const part of parts) names.add(part);
-          persona = named;
-        }
+        // A voice carries no name: the planner writes each person's and keeps them distinct.
+        const picked = catalog.pickPersonaVoice({ voices: [drawn.voice], random, temperament: null });
+        if (!picked?.voiceId || voices.has(picked.voiceId)) continue;
+        const persona = personaOf(picked, 'library');
         if (!persona) continue;
         voices.add(picked.voiceId);
         found.push({ persona, chosen: picked, raw: drawn.voice });
@@ -1458,7 +1497,24 @@ export function createPracticeCallService(deps = {}) {
    * and timing, the probes and the prepared problems from the voices just drawn. It returns the
    * validated result, or null after failing the call (nothing rings, no session is started).
    */
-  async function planInterview(self, { drawnVoices, targetMinutes }) {
+  /** The interviewers of the newest calls, newest first: the planner names nobody after them. Empty when unreadable. */
+  async function recentInterviewerNames() {
+    try {
+      // A call id starts with its start time in base 36, so the ids sort by time.
+      const ids = ((await store.knownCallIds?.()) ?? []).slice().sort().reverse().slice(0, RECENT_NAME_CALLS);
+      const names = new Map();
+      for (const callId of ids) {
+        const record = await Promise.resolve(store.readRecord?.(callId)).catch(() => null);
+        for (const person of [record?.persona, ...(Array.isArray(record?.panel) ? record.panel : [])]) {
+          const name = String(person?.name ?? '').replace(/\s+/gu, ' ').trim();
+          if (name && !names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
+        }
+      }
+      return [...names.values()];
+    } catch { return []; }
+  }
+
+  async function planInterview(self, { drawnVoices }) {
     self.planAbort = new AbortController();
     state.notice = { ...PLANNING_NOTICE };
     setSetupStep('plan');
@@ -1475,8 +1531,9 @@ export function createPracticeCallService(deps = {}) {
         pool: poolOf(self.plan),
         earlierOwnQuestions: self.earlierOwnQuestions || [],
         application: self.application,
-        voices: drawnVoices.map(voiceView), targetMinutes, steering: self.steering,
+        voices: drawnVoices.map(voiceView), steering: self.steering,
         ...(self.candidateName ? { candidateName: self.candidateName } : {}),
+        recentNames: await recentInterviewerNames(),
         signal: self.planAbort.signal, logger: deps.logger,
         // The first attempt is the step itself, already set above (it was logged twice).
         onAttempt: attempt => { attemptsSeen += 1; if (attemptsSeen > 1 && call === self && !self.finished && state.phase === 'precheck') setSetupStep('plan', Number(attempt) || 1); },
@@ -1497,10 +1554,10 @@ export function createPracticeCallService(deps = {}) {
     const plan = result.plan;
     dbg('plan-attempts', { attempts });
     note(`plan ${JSON.stringify({
-      ms, attempts: attempts.length, kind: plan.interviewKind, lead: { voice: plan.lead?.voice, role: plan.lead?.role },
+      ms, attempts: attempts.length, kind: plan.interviewKind, callMinutes: plan.callMinutes, wrapUpMinutes: plan.wrapUpMinutes, lead: { voice: plan.lead?.voice, name: plan.lead?.name, role: plan.lead?.role },
       // The one question that is not from the pool, as the planner wrote it.
       unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ text: question.text, askedBy: question.askedBy, minutes: question.minutes })),
-      panel: (plan.panel || []).map(member => ({ voice: member.voice, role: member.role })),
+      panel: (plan.panel || []).map(member => ({ voice: member.voice, name: member.name, role: member.role, joins: member.joins, joinMinutes: member.joinMinutes })),
       questions: (plan.questions || []).map(question => ({ number: question.number, askedBy: question.askedBy, minutes: question.minutes })),
       problems: (plan.problems || []).map(problem => problem.ref),
     })}`);
@@ -1513,7 +1570,7 @@ export function createPracticeCallService(deps = {}) {
    * and the prepared problems. Returns null after failing the call when the plan names a voice that
    * was not drawn.
    */
-  async function settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament, joinDraws = null }) {
+  async function settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, temperament, joinDraws = null }) {
     const { plan } = planned;
     try {
       const { VOICE_STABILITY } = await resolve('dialogueVoice');
@@ -1525,13 +1582,19 @@ export function createPracticeCallService(deps = {}) {
       const leadStability = Number.isFinite(plan.lead.stability) ? plan.lead.stability : null;
       const leadRoom = Number.isFinite(plan.lead.room) ? plan.lead.room : null;
       tools.setAmount(leadVoice.voiceId, leadRoom);
+      // The planner writes each person's name; the voice's own is only there on an interview kept from before it did.
+      const nameOf = (person, voice) => String(person?.name ?? '').replace(/\s+/gu, ' ').trim() || String(voice?.name ?? '').trim() || String(voice?.persona?.name ?? '').trim();
+      const leadName = nameOf(plan.lead, leadVoice);
+      if (!leadName) throw new Error('the plan gives the lead no name');
       const persona = {
         ...leadVoice.persona,
+        name: leadName, initials: initialsOf(leadName),
         role: String(plan.lead.role ?? '').trim(),
         // How this person interrupts a long answer (the planner's text), for the watcher and the diagnosis in call.json.
         interrupting: String(plan.lead.interrupting ?? '').trim(),
-        // A temperament the request or brief fixed still wins over the planner's.
-        temperament: temperament ?? (plan.lead.temperament || 'neutral'),
+        // A temperament the request or brief fixed still wins over the planner's, which is its own words (an interview
+        // kept from before may hold one of three single words, printed as they are).
+        temperament: temperament ?? String(plan.lead.temperament ?? '').replace(/\s+/gu, ' ').trim(),
         temperamentFrom: temperament ? 'request' : 'plan',
         stability: stabilityOr(leadStability), stabilityFrom: leadStability === null ? 'fallback' : 'plan',
         room: tools.roomOf(leadVoice.voiceId),
@@ -1541,33 +1604,41 @@ export function createPracticeCallService(deps = {}) {
       // Lateness fits the call. In a five-minute screen (call-mwsvsqmu, 2026-11-23) the colleague who owned the only
       // exercise was drawn to join at 2:52, so the lead filled three minutes and the exercise got two of its four.
       // Whoever asks the plan's first question is there from the start, and nobody arrives later than a quarter of
-      // the way through the planned questions.
+      // the way through the planned questions, whatever the plan says.
       const planQuestions = Array.isArray(plan.questions) ? plan.questions : [];
-      const plannedMs = planQuestions.reduce((sum, question) => sum + (Number(question?.minutes) > 0 ? Number(question.minutes) : 0), 0) * 60000;
-      const lateMaxMs = plannedMs > 0 ? Math.min(LATE_JOIN_MAX_MS, plannedMs / 4) : LATE_JOIN_MAX_MS;
+      const plannedMs = plannedMinutesOf(plan) * 60000;
+      const lateMaxMs = plannedMs > 0 ? plannedMs * LATE_JOIN_LATEST_SHARE : Infinity;
       const lateMinMs = Math.min(LATE_JOIN_MIN_MS, lateMaxMs / 2); // a short plan still has a spread
       const panel = (Array.isArray(plan.panel) ? plan.panel : []).slice(0, COLLEAGUE_IDS.length).map((member, at) => {
         const voice = byKey.get(member.voice);
         if (!voice) throw new Error(`the plan names a voice that was not drawn: ${member.voice}`);
-        // Each colleague joins late with the same chance as before, drawn in plan order. A held-again
-        // interview brings its own draws, so everyone joins as they did the first time.
+        // Each colleague's lateness is the planner's choice (member.joins and member.joinMinutes). An interview held
+        // again brings the draws it was first held with, so everyone joins as they did the first time; one kept from
+        // before the planner chose has such draws and no choice in its plan, and one with neither starts together.
         const saved = joinDraws?.[at];
-        // The chance is drawn even for whoever asks first, so the other colleagues' draws do not depend on it.
         const asksFirst = planQuestions[0]?.askedBy === member.voice;
-        const joins = saved ? (saved.joins === 'late' ? 'late' : 'start') : random() < LATE_JOIN_CHANCE && !asksFirst ? 'late' : 'start';
-        const joinDelayMs = saved && Number.isFinite(saved.joinDelayMs) ? Math.round(saved.joinDelayMs) : Math.round(lateMinMs + random() * (lateMaxMs - lateMinMs));
+        const wantsLate = member.joins === 'late' && Number.isFinite(Number(member.joinMinutes));
+        const joins = saved ? (saved.joins === 'late' ? 'late' : 'start') : wantsLate && !asksFirst ? 'late' : 'start';
+        const savedDelay = saved && Number.isFinite(saved.joinDelayMs) ? Math.round(saved.joinDelayMs) : null;
+        // A saved late draw with no usable delay (a damaged record) and a plan with no minute for it joins as early as
+        // anyone may, never at a time that is not a number.
+        const wantedMs = Number.isFinite(Number(member.joinMinutes)) ? Number(member.joinMinutes) * 60000 : lateMinMs;
+        const joinDelayMs = savedDelay ?? (joins === 'late' ? Math.round(Math.min(lateMaxMs, Math.max(lateMinMs, wantedMs))) : 0);
         const roomAmount = Number.isFinite(member.room) ? member.room : null;
         tools.setAmount(voice.voiceId, roomAmount);
         const stability = stabilityOr(member.stability);
         return {
           ...(roomAmount === null ? {} : { roomAmount }),
-          id: COLLEAGUE_IDS[at], key: member.voice, name: voice.name, role: String(member.role ?? ''), focus: String(member.focus ?? ''), interrupting: String(member.interrupting ?? '').trim(), joins,
+          id: COLLEAGUE_IDS[at], key: member.voice, name: nameOf(member, voice), role: String(member.role ?? ''), focus: String(member.focus ?? ''), interrupting: String(member.interrupting ?? '').trim(), joins,
           voice: voice.persona.voice, voiceId: voice.voiceId, room: tools.roomOf(voice.voiceId) ?? voice.persona.room ?? null, stability, joinDelayMs,
           factory: voiceFactory({ key: self.key, voiceId: voice.voiceId, tier, stability }),
           joined: joins !== 'late', joinedAtMs: joins === 'late' ? null : 0,
         };
       });
+      const unnamed = panel.find(entry => !entry.name);
+      if (unnamed) throw new Error(`the plan gives the colleague on ${unnamed.key} no name`);
       const idByKey = new Map([[plan.lead.voice, 'A'], ...panel.map(entry => [entry.key, entry.id])]);
+      const nameByKey = new Map([[plan.lead.voice, persona.name], ...panel.map(entry => [entry.key, entry.name])]);
       self.settledPlan = plan;
       return {
         persona, factory, panel,
@@ -1579,7 +1650,8 @@ export function createPracticeCallService(deps = {}) {
           plan,
           planAttempts: (planned.attempts || []).map(item => item?.problems).filter(problems => Array.isArray(problems) && problems.length),
           planMs: planned.ms,
-          voices: drawnVoices.map(voice => ({ ...voiceView(voice), voiceId: voice.voiceId, used: idByKey.has(voice.key), id: idByKey.get(voice.key) ?? null })),
+          // A used voice is listed with the name the plan gave its person.
+          voices: drawnVoices.map(voice => ({ ...voiceView(voice), ...(nameByKey.get(voice.key) || voice.name ? { name: nameByKey.get(voice.key) || voice.name } : {}), voiceId: voice.voiceId, used: idByKey.has(voice.key), id: idByKey.get(voice.key) ?? null })),
         },
       };
     } catch (error) {
@@ -1679,7 +1751,7 @@ export function createPracticeCallService(deps = {}) {
     return {
       drawnVoices: entry.drawnVoices,
       candidateVoiceIds: entry.candidateVoiceIds ?? null,
-      targetMinutes: Array.isArray(entry.targetMinutes) ? entry.targetMinutes : deps.targetMinutes ?? [25, 30],
+      targetMinutes: Array.isArray(entry.targetMinutes) ? entry.targetMinutes : deps.targetMinutes ?? targetMinutesOf(plan),
       planned: { plan, attempts: [], ms: 0 },
       joinDraws: Array.isArray(entry.joinDraws) ? entry.joinDraws : null,
     };
@@ -1848,18 +1920,16 @@ export function createPracticeCallService(deps = {}) {
     // never writes to the ElevenLabs account.
     const pool = await openVoicePool();
     const recentVoiceId = mostRecentlyUsed(pool?.state.lastUsed);
-    const prompts = await resolve('prompts');
     const random = deps.random ?? Math.random;
     const temperament = temperamentFor({ request: self.args, brief: self.brief });
     const tools = await roomTools(self);
     const voiceFactory = tools.wrap(await resolve('voiceFactory'));
     const personaOf = (chosen, voiceSource) => {
-      const picked = !chosen?.name && typeof prompts.pickPersona === 'function' ? prompts.pickPersona({ random, temperament: temperament ?? 'neutral' }) : null;
       return {
-        name: chosen?.name || picked?.name || 'Alex Morgan', role: '', team: teamFor(self.brief),
+        name: chosen?.name || '', role: '', team: teamFor(self.brief),
         temperament, temperamentFrom: temperament ? 'request' : null,
         voice: chosen ? { gender: chosen.gender, age: chosen.age, accent: chosen.accent, character: chosen.character } : null,
-        voiceId: chosen?.voiceId, voiceSource, initials: initialsOf(chosen?.name || picked?.name),
+        voiceId: chosen?.voiceId, voiceSource, initials: initialsOf(chosen?.name),
         room: tools.roomOf(chosen?.voiceId),
       };
     };
@@ -1924,7 +1994,7 @@ export function createPracticeCallService(deps = {}) {
       const leadBase = personaOf(chosen, 'library');
       // Up to four more voices for the planner to choose among; the planner makes do with these.
       const extras = pool?.library && typeof pool.library.drawVoice === 'function'
-        ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], leadName: leadBase.name, builtIn, pageCache })
+        ? await drawExtraVoices({ pool, catalog, fetchImpl, key, random, personaOf, taken: [recentVoiceId, leadBase.voiceId], builtIn, pageCache })
         : [];
       if (call !== self || self.finished) return snapshot();
       // The candidate's own voices: one female and one male, drawn the same way and never one an interviewer may use.
@@ -1933,21 +2003,21 @@ export function createPracticeCallService(deps = {}) {
         : null;
       if (call !== self || self.finished) return snapshot();
       drawnVoices = [{ persona: leadBase, chosen, raw: drawn.voice }, ...extras].map((item, at) => ({
-        key: `V${at + 1}`, name: item.persona.name, voiceId: item.persona.voiceId, persona: item.persona,
+        key: `V${at + 1}`, name: item.persona.name, nameStart: nameStartOf(self.callId, item.persona.voiceId), voiceId: item.persona.voiceId, persona: item.persona,
         gender: String(item.chosen?.gender ?? ''), age: String(item.chosen?.age ?? ''), accent: String(item.chosen?.accent ?? ''),
         description: describeVoice(item.chosen, item.raw),
       }));
       mark(self, 'voices', { drawn: drawnVoices.length });
       note(`voices drawn ${JSON.stringify(drawnVoices.map(voiceView))}`);
       self.promptBrief = promptBrief(self.brief);
-      targetMinutes = deps.targetMinutes ?? [25, 30];
-      // The plan decides the cast, the questions and the problems before any interviewer session exists.
-      planned = await planInterview(self, { drawnVoices, targetMinutes });
+      // The plan decides the length of the call, the cast, the questions and the problems before any interviewer session exists.
+      planned = await planInterview(self, { drawnVoices });
       if (!planned) return snapshot();
+      targetMinutes = deps.targetMinutes ?? targetMinutesOf(planned.plan);
       mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
     }
     setSetupStep('voice');
-    const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, random, temperament, joinDraws });
+    const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, temperament, joinDraws });
     if (!settled) return snapshot();
     mark(self, 'cast');
     // Kept so the interview can be saved for holding again once it is answered.
@@ -1976,6 +2046,8 @@ export function createPracticeCallService(deps = {}) {
     self.prepared = settled.prepared;
     self.setup = settled.setup;
     self.targetMinutes = targetMinutes;
+    // How long before the end the interviewer starts closing: the plan's own number (an interview kept from before has none).
+    self.wrapUpMinutes = Number(planned.plan.wrapUpMinutes) > 0 ? Number(planned.plan.wrapUpMinutes) : undefined;
     state.persona = { name: persona.name, initials: persona.initials, role: persona.role, team: persona.team };
     // The meeting's own name, as the calendar invite would have it: the position being interviewed for, not anyone's
     // job title (shown beside the clock, it otherwise read as the role of whoever was presenting).
@@ -2154,7 +2226,7 @@ export function createPracticeCallService(deps = {}) {
       persona: {
         name: self.persona.name, role: self.persona.role, team: self.persona.team, temperament: self.persona.temperament, interrupting: self.persona.interrupting ?? '', voice: self.persona.voice,
       },
-      brief: self.promptBrief, plan: interviewerPoolOf(self), application: self.application, targetMinutes: self.targetMinutes, steering: self.steering,
+      brief: self.promptBrief, plan: interviewerPoolOf(self), application: self.application, ...targetOption(self.targetMinutes), ...(self.wrapUpMinutes ? { wrapUpMinutes: self.wrapUpMinutes } : {}), steering: self.steering,
       ...(self.candidateName ? { candidateName: self.candidateName } : {}),
       // The cast, the questions and the problems were settled by the planning step; no session chooses any of it.
       panel: (self.panel || []).map(entry => ({ id: entry.id, name: entry.name, role: entry.role, focus: entry.focus, interrupting: entry.interrupting ?? '', joins: entry.joins, ...(entry.joined && entry.joins === 'late' ? { joined: true } : {}), voice: entry.voice })),
@@ -2781,7 +2853,9 @@ export function createPracticeCallService(deps = {}) {
           let notes = null;
           try { notes = typeof history.notes === 'function' ? askedNotesOf(self, engineState, answered, unprepared) : null; } catch (error) { warn(`[PracticeCall] question notes not kept: ${error?.message || error}`); }
           if (own.length || notes) await history.record(self.countsKey || self.args.nodeId, own, ...(notes ? [notes] : []));
+          dbg('question-history', { counted: own, countedGeneral: general, noted: notes ? { asked: notes.asked, own: notes.own || null } : null });
         } catch (error) {
+          dbg('question-history', { error: error?.message || String(error) });
           warn(`[PracticeCall] question history not saved: ${error?.message || error}`);
         }
       }

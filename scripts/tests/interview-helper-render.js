@@ -502,7 +502,7 @@ const QA_SETUP_TESTS = [
           const f1 = article(window, 'Tell me about yourself.');
           assert(!f1.querySelector('.qa-origin') && !f1.querySelector('p.whitespace-pre-wrap'), 'a card starts collapsed to its question row');
           await bundle.module.act(async () => { f1.querySelector('button[aria-expanded]').click(); await flush(); });
-          assert(f1.querySelector('.qa-origin').textContent === 'Standard', 'catalog cards must show the Standard badge once expanded');
+          assert(f1.querySelector('.qa-origin').textContent === 'Generated', 'cards the writer made show the Generated badge once expanded (their questions are no longer a standard list)');
           const linkItem = [...f1.querySelectorAll('li')].find(item => item.textContent.startsWith('Also asked at'));
           assert(linkItem?.textContent === 'Also asked at Discord: “Walk me through your background” — source' && linkItem.querySelector('a').getAttribute('href') === 'https://glassdoor.example/q1', 'General links must appear under the matching General card');
           const f2 = article(window, 'What is your biggest weakness?');

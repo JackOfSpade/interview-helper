@@ -2452,7 +2452,7 @@ function manualClock() {
  * Everything a panel start needs: distinct drawn voices, a planner stand-in that seats `cast` (entries name a
  * drawn voice key such as 'V2'), a recording prompt module and a recording engine. `plan` replaces the whole plan.
  */
-function panelHarness({ cast = [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design' }], plan, random = () => 0.1, drawFails = [], silent = [], deps = {}, voices = ['lib-1', 'lib-2', 'lib-3'] } = {}) {
+function panelHarness({ cast = [{ voice: 'V2', role: 'Senior Engineer', focus: 'system design' }], plan, random = () => 0.1, late = false, drawFails = [], silent = [], deps = {}, voices = ['lib-1', 'lib-2', 'lib-3'] } = {}) {
   const draws = [];
   const built = [];
   const starts = [];
@@ -2470,7 +2470,8 @@ function panelHarness({ cast = [{ voice: 'V2', role: 'Senior Engineer', focus: '
     return factory;
   };
   const planner = fakePlanner(drawn => (plan ? plan(drawn) : soloPlan(drawn, {
-    panel: cast.filter(member => drawn.some(voice => voice.key === member.voice)).map(member => ({ stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.', ...member })),
+    // The planner decides who joins late; `late: true` has every colleague say so, 51 s in (0.85 minutes).
+    panel: cast.filter(member => drawn.some(voice => voice.key === member.voice)).map(member => ({ joins: late ? 'late' : 'start', joinMinutes: late ? 0.85 : 0, stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.', ...member })),
   })));
   let made = 0;
   const overrides = {
@@ -2527,15 +2528,19 @@ test('panel: five distinct voices are drawn, each avoiding the others and the ne
   assert.deepEqual(setup.draws[2].excludeVoiceIds.sort(), ['lib-1', 'lib-2', 'lib-9']);
   assert.deepEqual(setup.draws[4].excludeVoiceIds.sort(), ['lib-1', 'lib-2', 'lib-3', 'lib-4', 'lib-9']);
   assert.equal(setup.planner.calls.length, 1, 'planned once');
-  assert.deepEqual(setup.planner.calls[0].voices.map(voice => [voice.key, voice.name]),
-    [['V1', 'Nora Lead'], ['V2', 'Ben Specialist'], ['V3', 'Cara Second'], ['V4', 'Dana Third'], ['V5', 'Eli Fourth']]);
-  for (const voice of setup.planner.calls[0].voices) assert.deepEqual(Object.keys(voice).sort(), ['accent', 'age', 'description', 'gender', 'key', 'name'], 'no voice id reaches the planner');
+  assert.deepEqual(setup.planner.calls[0].voices.map(voice => voice.key), ['V1', 'V2', 'V3', 'V4', 'V5']);
+  // The planner writes each person's name, so a voice comes with no name: only a letter to start looking at.
+  for (const voice of setup.planner.calls[0].voices) {
+    assert.deepEqual(Object.keys(voice).sort(), ['accent', 'age', 'description', 'gender', 'key', 'nameStart'], 'no voice id and no name reaches the planner');
+    assert.match(voice.nameStart, /^[A-Z]$/u);
+  }
+  assert.ok(Array.isArray(setup.planner.calls[0].recentNames), 'the planner is told the people of recent calls');
   // Nothing is made for a voice the plan did not choose: the lead and the one colleague only.
   assert.deepEqual(setup.factoryOptions.map(item => item.voiceId), ['lib-1', 'lib-2']);
 });
 
 test('panel: the plan\'s colleagues settle with ids, names, roles and manner, and every session is built once from them', async () => {
-  const setup = panelHarness({ random: () => 0.1 });
+  const setup = panelHarness({ late: true });
   const { state } = await panelStart(setup);
   assert.equal(state.phase, 'ringing');
   const mains = setup.built.filter(item => item.kind === 'main');
@@ -2565,8 +2570,8 @@ test('panel: the plan\'s colleagues settle with ids, names, roles and manner, an
   assert.deepEqual(state.participants.map(item => [item.id, item.status]), [['A', 'joined']], 'a late colleague is not shown yet');
 });
 
-test('panel: a high random draw starts colleagues at the call start', async () => {
-  const setup = panelHarness({ random: () => 0.9, cast: [{ voice: 'V2', role: 'Engineer', focus: '' }] });
+test('panel: a colleague the plan has there from the start joins at the call start, whatever the random draws', async () => {
+  const setup = panelHarness({ random: () => 0.1, cast: [{ voice: 'V2', role: 'Engineer', focus: '' }] });
   const { state } = await panelStart(setup);
   assert.deepEqual(setup.built.find(item => item.kind === 'main').options.panel.map(item => item.joins), ['start']);
   assert.deepEqual(state.participants.map(item => item.id), ['A', 'B'], 'a colleague who starts with the call is shown at once');
@@ -2629,7 +2634,7 @@ test('panel: the lead may be any drawn voice, and only the chosen voices are mad
 test('panel: a failed extra draw, a repeated voice or a silent warm-up only means fewer colleagues', async () => {
   const failed = panelHarness({ drawFails: [2] });
   await panelStart(failed);
-  assert.deepEqual(failed.planner.calls[0].voices.map(voice => [voice.key, voice.name]), [['V1', 'Nora Lead'], ['V2', 'Cara Second']], 'the voice that could not be drawn is simply not offered');
+  assert.deepEqual(failed.planner.calls[0].voices.map(voice => voice.key), ['V1', 'V2'], 'the voice that could not be drawn is simply not offered');
   assert.deepEqual(failed.built.find(item => item.kind === 'main').options.panel.map(item => [item.id, item.name]), [['B', 'Cara Second']],
     'the colleague who remains takes the first colleague id');
 
@@ -2655,6 +2660,23 @@ test('panel: a failed lead draw still fails the call', async () => {
   assert.equal(state.error.code, 'voice-library-unavailable');
 });
 
+test('panel: the late-join cap is a quarter of the length the planner chose, not of what the question budgets add up to', async () => {
+  const member = { voice: 'V2', role: 'Senior Engineer', focus: 'register work', joins: 'late', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.' };
+  const own = key => ({ number: 0, text: 'What do you assume an attacker can do?', askedBy: key, minutes: 1, probes: [] });
+  const delayFor = async (joinMinutes, callMinutes, questionMinutes) => {
+    const setup = panelHarness({ plan: drawn => soloPlan(drawn, { callMinutes, panel: [{ ...member, joinMinutes }], questions: [own(drawn[0].key), { number: 1, askedBy: 'V2', minutes: questionMinutes, probes: [] }] }) });
+    const started = await panelStart(setup);
+    await started.service.answer();
+    const timers = setup.clock.pending().filter(timer => timer.ms >= 10000 && timer.ms <= 600000).map(timer => timer.ms);
+    await started.service.hangUp({ feedback: false });
+    return timers;
+  };
+  // Ten budgeted minutes on a thirty minute call: a seven minute join is within a quarter of thirty (7:30), not cut to 2:30.
+  assert.deepEqual(await delayFor(7, 30, 9), [420000]);
+  // Budgets that run past the length: the cap follows the length (a quarter of 4 minutes is one).
+  assert.deepEqual(await delayFor(3, 4, 6), [60000]);
+});
+
 test('panel: a fixed temperament still wins over the plan and the plan\'s colleagues are still seated', async () => {
   const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
     lead: { ...soloPlan(drawn).lead, temperament: 'warm' },
@@ -2673,28 +2695,77 @@ test('panel: a fixed temperament still wins over the plan and the plan\'s collea
   assert.equal(opener.options.panel.length, 1, 'the colleagues were seated although the temperament was fixed');
 });
 
+test('a temperament the request or the brief gives is passed through as written, whatever the word', async () => {
+  for (const written of ['Dry and unhurried.', 'Tough', 'tough']) {
+    const setup = panelHarness({ plan: drawn => soloPlan(drawn, { lead: { ...soloPlan(drawn).lead, temperament: 'warm' } }) });
+    const loadBrief = async args => ({ ...(await makeDeps({ tmp: '/unused' }).deps.loadBrief(args)), practice: { temperament: `  ${written} ` } });
+    await panelStart(setup, { deps: { ...setup.overrides, loadBrief } });
+    const opener = setup.built.find(item => item.kind === 'opener');
+    assert.equal(opener.options.persona.temperament, written, 'trimmed, with its case and wording kept');
+  }
+  const blank = panelHarness({ plan: drawn => soloPlan(drawn, { lead: { ...soloPlan(drawn).lead, temperament: 'warm' } }) });
+  const loadBlank = async args => ({ ...(await makeDeps({ tmp: '/unused' }).deps.loadBrief(args)), practice: { temperament: '   ' } });
+  await panelStart(blank, { deps: { ...blank.overrides, loadBrief: loadBlank } });
+  assert.equal(blank.built.find(item => item.kind === 'opener').options.persona.temperament, 'warm', 'a blank one leaves the planner\'s text');
+});
+
 test('panel: whoever asks the plan\'s first question is on the call from the start, and lateness is capped at a quarter of the planned minutes', async () => {
-  const member = { voice: 'V2', role: 'Senior Engineer', focus: 'register work', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.' };
+  const member = { voice: 'V2', role: 'Senior Engineer', focus: 'register work', joins: 'late', joinMinutes: 2, stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.' };
   const own = key => ({ number: 0, text: 'What do you assume an attacker can do?', askedBy: key, minutes: 1, probes: [] });
-  // random 0.1 draws "late" for everyone; the colleague who opens the questions is there anyway (call-mwsvsqmu: the
-  // owner of the only exercise of a five-minute screen joined at 2:52).
-  const first = panelHarness({ random: () => 0.1, plan: drawn => soloPlan(drawn, { panel: [member], questions: [{ number: 1, askedBy: 'V2', minutes: 4, probes: [] }, own(drawn[0].key)] }) });
+  const lateTimers = setup => setup.clock.pending().filter(timer => timer.ms >= 10000 && timer.ms <= 600000);
+  // The plan has the colleague late; the one who opens the questions is there anyway (call-mwsvsqmu: the owner of the
+  // only exercise of a five-minute screen joined at 2:52).
+  const first = panelHarness({ plan: drawn => soloPlan(drawn, { panel: [member], questions: [{ number: 1, askedBy: 'V2', minutes: 4, probes: [] }, own(drawn[0].key)] }) });
   const started = await panelStart(first);
   await started.service.answer();
-  assert.equal(first.clock.pending().filter(timer => timer.ms >= 10000 && timer.ms <= 210000).length, 0, 'no join timer for the colleague who asks first');
+  assert.equal(lateTimers(first).length, 0, 'no join timer for the colleague who asks first');
   assert.deepEqual(started.service.getState().participants.map(item => item.id), ['A', 'B']);
   await started.service.hangUp({ feedback: false });
-  // The lead asks first: the colleague may be late, but within a quarter of the five planned minutes (75 s).
-  const short = panelHarness({ random: () => 0.1, plan: drawn => soloPlan(drawn, { panel: [member], questions: [own(drawn[0].key), { number: 1, askedBy: 'V2', minutes: 4, probes: [] }] }) });
-  const late = await panelStart(short);
-  await late.service.answer();
-  assert.deepEqual(late.service.getState().participants.map(item => item.id), ['A']);
-  assert.deepEqual(short.clock.lateTimers().map(timer => timer.ms), [41250], 'a tenth of the way from 37.5 s to 75 s');
-  await late.service.hangUp({ feedback: false });
+  // The lead asks first: the colleague is late as the plan says, but never past a quarter of the five planned minutes (75 s).
+  const delays = [];
+  for (const joinMinutes of [9, 1.2, 0.1]) {
+    const short = panelHarness({ plan: drawn => soloPlan(drawn, { panel: [{ ...member, joinMinutes }], questions: [own(drawn[0].key), { number: 1, askedBy: 'V2', minutes: 4, probes: [] }] }) });
+    const late = await panelStart(short);
+    await late.service.answer();
+    assert.deepEqual(late.service.getState().participants.map(item => item.id), ['A']);
+    delays.push(lateTimers(short).map(timer => timer.ms));
+    await late.service.hangUp({ feedback: false });
+  }
+  assert.deepEqual(delays, [[75000], [72000], [30000]], 'a later time than a quarter is cut to it, a sensible one kept, and an instant one is at least 30 s in');
+});
+
+test('panel: the planner decides who joins late and when, each colleague on their own', async () => {
+  const cast = [
+    { voice: 'V2', role: 'Senior Engineer', focus: 'api', joins: 'late', joinMinutes: 2.5 },
+    { voice: 'V3', role: 'Director', focus: 'hiring', joins: 'start', joinMinutes: 0 },
+    { voice: 'V4', role: 'Analyst', focus: 'data', joins: 'late', joinMinutes: 4 },
+  ];
+  // Every draw says "late" and sits mid-window, as the old dice would have: only the plan's own words count now.
+  const setup = panelHarness({ cast, voices: ['lib-1', 'lib-2', 'lib-3', 'lib-4'], random: () => 0.1, plan: drawn => soloPlan(drawn, {
+    callMinutes: 40, wrapUpMinutes: 6,
+    panel: cast.map(member => ({ stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.', ...member })),
+    questions: [{ number: 1, askedBy: drawn[0].key, minutes: 20, probes: [] }, { number: 0, text: 'What would you build first here?', askedBy: 'V2', minutes: 10, probes: [] }],
+  }) });
+  const built = await panelStart(setup);
+  assert.equal(built.state.phase, 'ringing');
+  const main = setup.built.find(item => item.kind === 'main');
+  assert.deepEqual(main.options.panel.map(item => [item.id, item.joins]), [['B', 'late'], ['C', 'start'], ['D', 'late']]);
+  assert.equal(built.state.participants.map(item => item.id).join(''), 'AC', 'only the colleague who is there from the start is shown');
+  await built.service.answer();
+  assert.deepEqual(setup.clock.pending().filter(timer => timer.ms >= 100000 && timer.ms <= 600000).map(timer => timer.ms), [150000, 240000], 'the minutes the plan gave, each colleague\'s own');
+  assert.deepEqual(built.service.getState().participants.map(item => item.id), ['A', 'C']);
+  await built.service.hangUp({ feedback: false });
+});
+
+test('panel: a colleague the plan gives no join choice (a stand-in plan, or one kept from before) is there from the start', async () => {
+  const setup = panelHarness({ random: () => 0.1, plan: drawn => soloPlan(drawn, { panel: [{ voice: 'V2', role: 'Engineer', focus: 'api', stability: 0.3, room: 0.4, manner: 'Plain.', interrupting: 'Rarely cuts in.' }] }) });
+  const built = await panelStart(setup);
+  assert.deepEqual(setup.built.find(item => item.kind === 'main').options.panel.map(item => item.joins), ['start']);
+  assert.deepEqual(built.state.participants.map(item => item.id), ['A', 'B']);
 });
 
 test('panel: a late colleague joins when the timer fires, once, and the record keeps the time', async () => {
-  const setup = panelHarness({ random: () => 0.1 });
+  const setup = panelHarness({ late: true });
   const { service, deps } = await panelStart(setup);
   const events = [];
   service.onEvent(event => events.push(event));
@@ -2704,7 +2775,7 @@ test('panel: a late colleague joins when the timer fires, once, and the record k
   const late = setup.clock.lateTimers();
   assert.equal(late.length, 1, 'one timer for the one late colleague');
   assert.equal(late[0].ms >= 40000 && late[0].ms <= 210000, true);
-  assert.equal(late[0].ms, 51000, 'uniform from 40 s up to a quarter of the planned ten minutes (150 s), from the random draw');
+  assert.equal(late[0].ms, 51000, 'the 0.85 minutes the plan says, inside a quarter of the planned ten minutes (150 s)');
   assert.deepEqual(service.getState().participants.map(item => item.id), ['A']);
   setup.clock.setNow(1000 + 51000);
   setup.clock.fire(late[0]);
@@ -2727,7 +2798,7 @@ test('panel: a colleague who never joined has a null join time and every way a c
     ['abandon', service => service.abandon()],
     ['interviewer leaves', async (service, built, setup) => { setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' }); }],
   ]) {
-    const setup = panelHarness({ random: () => 0.1 });
+    const setup = panelHarness({ late: true });
     const built = await panelStart(setup);
     await built.service.answer();
     const timers = setup.clock.lateTimers();
@@ -2744,7 +2815,7 @@ test('panel: a colleague who never joined has a null join time and every way a c
 });
 
 test('panel: a pause holds a late colleague\'s wait on the call clock, and the resume waits only for what is left', async () => {
-  const setup = panelHarness({ random: () => 0.1 });
+  const setup = panelHarness({ late: true });
   const built = await panelStart(setup);
   await built.service.answer();
   const engine = setup.engineOptions[0].onEvent;
@@ -2892,9 +2963,9 @@ const waitFor = async (check, label) => {
   for (let i = 0; i < 100; i += 1) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.fail(`timed out waiting: ${label}`);
 };
-/** A panel service that keeps its interviews in `saved`; `extra` replaces deps (cards, posting key, random). */
-async function savedPanel(saved, { random = () => 0.1, extra = {} } = {}) {
-  const setup = panelHarness({ random, deps: { savedInterviews: saved, ...extra } });
+/** A panel service that keeps its interviews in `saved`; `extra` replaces deps (cards, posting key, random); the colleague joins late unless `late` is false. */
+async function savedPanel(saved, { random = () => 0.1, late = true, extra = {} } = {}) {
+  const setup = panelHarness({ random, late, deps: { savedInterviews: saved, ...extra } });
   const started = await startOf({ modelReady: true, deps: setup.overrides });
   return { setup, ...started };
 }
@@ -2965,8 +3036,8 @@ test('saved interviews: an answered call is kept, and a repeat for the same job 
   assert.equal(kept.company, 'Acme');
   assert.equal(kept.timesUsed, 1);
 
-  // A different draw (0.9 makes the colleague join at the start) and a reordered pool: the repeat still matches the first.
-  const again = await savedPanel(saved, { random: () => 0.9, extra: { loadCards: async () => [OTHER_CARD, CARD] } });
+  // A new plan that would have the colleague there from the start, and a reordered pool: the repeat still matches the first.
+  const again = await savedPanel(saved, { random: () => 0.9, late: false, extra: { loadCards: async () => [OTHER_CARD, CARD] } });
   const state = await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
   assert.notEqual(state.phase, 'error', JSON.stringify(state.error));
   assert.equal(again.setup.draws.length, 0, 'no voice is drawn');
@@ -3056,7 +3127,7 @@ test('saved interviews: one of another job, or a bad id, is refused before anyth
 });
 
 test('panel: a late timer that fires after the interviewers left does not add anyone', async () => {
-  const setup = panelHarness({ random: () => 0.1 });
+  const setup = panelHarness({ late: true });
   const built = await panelStart(setup);
   await built.service.answer();
   const [timer] = setup.clock.lateTimers();
@@ -3274,18 +3345,41 @@ test('tidying leftover audio never touches the call that is protected', async ()
 });
 
 // Seen in the built app: the lead and her colleague were both called Cohen.
-test('panel: a colleague never shares a first name or a surname with someone already on the call', async () => {
-  const setup = panelHarness({ cast: [{ voice: 'V2', role: 'Engineer', focus: '' }, { voice: 'V3', role: 'Designer', focus: '' }] });
-  // The first name drawn for each colleague repeats the lead's surname; the next draw is free.
-  const offered = { 'lib-2': ['Ben Lead', 'Ben Specialist'], 'lib-3': ['Nora Second', 'Cara Second'] };
-  setup.overrides.catalog = { pickPersonaVoice: options => {
-    const voiceId = options.voices[0].voiceId;
-    const queue = offered[voiceId];
-    return { voiceId, name: queue ? (queue.length > 1 ? queue.shift() : queue[0]) : PANEL_VOICES[voiceId] };
-  } };
-  await panelStart(setup);
-  assert.deepEqual(setup.planner.calls[0].voices.map(voice => voice.name), ['Nora Lead', 'Ben Specialist', 'Cara Second'], 'the planner is offered only distinct names');
-  assert.deepEqual(setup.built.find(item => item.kind === 'main').options.panel.map(item => item.name), ['Ben Specialist', 'Cara Second']);
+// The app keeps no list of names (owner's request, 2026-11-23: the same few first names came up call after call).
+// The planner writes each person's name to fit the voice; a voice is drawn without one.
+test('panel: every person carries the name the plan wrote; a drawn voice has none of its own', async () => {
+  const setup = panelHarness({ plan: voices => ({ ...soloPlan(voices), lead: { ...soloPlan(voices).lead, name: 'Ingrid Solberg' },
+    panel: [{ voice: 'V2', name: '  Tevita   Fonua ', role: 'Engineer', focus: 'x', stability: 0.3, room: 0.2, manner: '', interrupting: 'Rarely.' },
+      { voice: 'V3', role: 'Designer', focus: 'y', stability: 0.3, room: 0.2, manner: '', interrupting: 'Rarely.' }] }) });
+  // As the real catalog now does: a voice with no name (the third one as on an interview kept from before).
+  setup.overrides.catalog = { pickPersonaVoice: options => ({ voiceId: options.voices[0].voiceId, name: options.voices[0].voiceId === 'lib-3' ? 'Kept Before' : '' }) };
+  const started = await panelStart(setup);
+  assert.equal(setup.planner.calls[0].voices.some(voice => 'name' in voice), false, 'no name reaches the planner with a voice');
+  const state = started?.state ?? started;
+  assert.equal(state.persona.name, 'Ingrid Solberg');
+  assert.equal(state.persona.initials, 'IS');
+  // The second colleague's plan has no name (an interview kept from before): the name its voice was drawn with stands.
+  assert.deepEqual(setup.built.find(item => item.kind === 'main').options.panel.map(item => item.name), ['Tevita Fonua', 'Kept Before']);
+});
+
+test('panel: the planner is told the people of the newest calls, newest first and each once; a colleague the plan leaves nameless fails the start', async () => {
+  const setup = panelHarness();
+  const started = await startOf({ modelReady: true, deps: setup.overrides });
+  const known = typeof started.deps.store.knownCallIds === 'function';
+  if (known) {
+    await started.deps.store.writeRecord('call-aaaa0001-abc', { persona: { name: 'Dev Rivera' }, panel: [{ name: 'Omar Cohen' }] });
+    await started.deps.store.writeRecord('call-aaaa0002-abc', { persona: { name: ' Mei  Tanaka ' }, panel: [{ name: 'dev rivera' }, { name: '' }] });
+  }
+  await started.service.start(ARGS);
+  const recent = setup.planner.calls[0].recentNames;
+  if (known) assert.deepEqual(recent, ['Mei Tanaka', 'dev rivera', 'Omar Cohen']);
+  else assert.deepEqual(recent, []);
+  await started.service.hangUp();
+
+  const nameless = panelHarness({ cast: [{ voice: 'V2', role: 'Engineer', focus: 'x' }] });
+  nameless.overrides.catalog = { pickPersonaVoice: options => ({ voiceId: options.voices[0].voiceId, name: options.voices[0].voiceId === 'lib-1' ? 'Nora Lead' : '' }) };
+  const { state } = await panelStart(nameless);
+  assert.equal(state.phase, 'error', 'nobody joins a call without a name');
 });
 
 // A latent fault found in review: the engine adopts whatever restartSession returns as the new
@@ -3553,6 +3647,31 @@ test('pad: the pad names a language only when a prepared problem requires it', a
   assert.equal(await labelFor('C++', 'cpp'), 'C++');
   assert.equal(await labelFor('', 'Java'), '');
   assert.equal(await labelFor('', ''), '');
+});
+
+test('pad: a label is matched to the plan\'s language names without any table of nicknames', async () => {
+  const labelAmong = async (languages, written) => {
+    const setup = panelHarness({ plan: drawn => soloPlan(drawn, {
+      problems: languages.map((language, at) => ({ ref: `p${at + 1}`, question: 1, language, parts: [{ title: `Task ${at}`, content: 'Reverse a list.' }], solution: 'Reverse it.', edgeCases: [], hints: [] })),
+    }) });
+    const { service } = await panelStart(setup);
+    await service.answer();
+    setup.engineOptions[0].onEvent({ type: 'pad', open: true, lang: written, atMs: 100 });
+    const lang = service.getState().pad.lang;
+    await service.hangUp();
+    return lang;
+  };
+  // Two languages are required, so a label has to name one: the same name (case, spaces and dots aside) does.
+  assert.equal(await labelAmong(['JavaScript', 'Python'], 'javascript'), 'JavaScript');
+  assert.equal(await labelAmong(['JavaScript', 'Python'], ' Java Script '), 'JavaScript');
+  assert.equal(await labelAmong(['Node.js', 'Python'], 'nodejs'), 'Node.js');
+  // A nickname is not known to the app: it names nothing here, and with two required languages the pad shows none.
+  assert.equal(await labelAmong(['JavaScript', 'Python'], 'JS'), '');
+  assert.equal(await labelAmong(['C++', 'Python'], 'cpp'), '');
+  assert.equal(await labelAmong(['Go', 'Python'], 'golang'), '');
+  assert.equal(await labelAmong(['Python', 'Rust'], 'py'), '');
+  // One required language still stands for whatever label names no other, as before.
+  assert.equal(await labelAmong(['JavaScript'], 'JS'), 'JavaScript');
 });
 
 test('pad: an exercise that leaves the language open offers none and takes no pick; offered languages are whatever the plan wrote', async () => {
@@ -4142,7 +4261,7 @@ test('a throwing room processor leaves the audio untouched and warns once', asyn
   const factories = setup.engineOptions[0].voice.panelOf.factories;
   assert.deepEqual([...heardFrom(factories.A, 'u1')], [1, 0, 2, 0, 3]);
   assert.deepEqual([...heardFrom(factories.B, 'u2')], [1, 0, 2, 0, 3]);
-  assert.equal(warnings.length, 1);
+  assert.equal(warnings.length, 1, JSON.stringify(warnings));
 });
 
 // Chosen room amounts: the plan's numbers reach roomFor, the treated audio and the record.
@@ -4292,7 +4411,7 @@ test('a solo call hands the engine a panel voice, so the share silence has a gap
 
 const flushAll = () => new Promise(resolve => setTimeout(resolve, 10));
 
-test('plan: the planner gets the sealed brief, the pool by number, the drawn voices, the length, the focus note, the name and a signal', async () => {
+test('plan: the planner gets the sealed brief, the pool by number, the drawn voices, the focus note, the name and a signal', async () => {
   const setup = panelHarness({ cast: [] });
   setup.overrides.loadCards = async () => PLAN_CARDS;
   setup.overrides.loadCandidateName = async () => 'Synthetic Person';
@@ -4307,7 +4426,7 @@ test('plan: the planner gets the sealed brief, the pool by number, the drawn voi
   assert.deepEqual(input.pool.map(item => [item.number, item.timesAsked]), [[1, 0], [2, 3], [3, 0]]);
   assert.equal(input.pool.some(item => 'answer' in item), false, 'the planner never sees prepared answers');
   assert.deepEqual(input.application, { resume: 'Synthetic resume text.', coverLetter: 'Synthetic cover letter text.' });
-  assert.deepEqual(input.targetMinutes, [25, 30]);
+  assert.equal('targetMinutes' in input, false, 'the planner chooses the call length itself: none is handed to it');
   assert.equal(input.steering, '');
   assert.equal(input.candidateName, 'Synthetic Person');
   assert.equal(typeof input.callText, 'function');
@@ -4481,7 +4600,7 @@ test('plan: the setup is saved with the record and logged as it happens', async 
   ]);
   assert.equal(JSON.stringify(record.setup).includes('key-should-never-be-logged'), false);
   const info = lines.filter(([level]) => level === 'info').map(([, line]) => line);
-  assert.equal(info.some(line => line.includes('voices drawn') && line.includes('Nora Lead') && line.includes('V3')), true, 'the drawn voices are logged');
+  assert.equal(info.some(line => line.includes('voices drawn') && line.includes('nameStart') && line.includes('V3')), true, 'the drawn voices are logged');
   const planned = info.find(line => line.includes('plan {'));
   assert.ok(planned, 'the plan summary is logged');
   assert.equal(planned.includes('"ms":4321') && planned.includes('"attempts":2') && planned.includes('"problems":["p1"]'), true);
@@ -4492,6 +4611,112 @@ test('plan: the log falls back to warn when the logger has no info', async () =>
   const setup = panelHarness({ cast: [], deps: { logger: { warn: line => lines.push(line) } } });
   await panelStart(setup);
   assert.equal(lines.some(line => line.includes('voices drawn')) && lines.some(line => line.includes('plan {')), true);
+});
+
+/** The options the main and opener prompts were built with, for a plan stand-in that carries `change` over a solo plan. */
+async function promptOptionsFor(change, extra = {}) {
+  const lines = [];
+  const setup = panelHarness({ cast: [], deps: { logger: { warn() {}, info: line => lines.push(line) }, ...extra }, plan: drawn => soloPlan(drawn, change) });
+  const { service } = await panelStart(setup);
+  await service.hangUp({ feedback: false }).catch(() => {});
+  return { main: setup.built.find(item => item.kind === 'main').options, opener: setup.built.find(item => item.kind === 'opener').options, lines };
+}
+
+test('length: the interviewer prompts get the length the planner chose and when it starts the wrap-up', async () => {
+  // Owner's decision, 2026-11-23: no fixed 25 to 30 minutes; the planner decides how long this interview would run.
+  const { main, opener, lines } = await promptOptionsFor({ callMinutes: 40, wrapUpMinutes: 6, questions: [{ number: 1, askedBy: 'V1', minutes: 30, probes: [] }] });
+  for (const options of [main, opener]) assert.deepEqual([options.targetMinutes, options.wrapUpMinutes], [[33, 40], 6]);
+  const note = lines.find(line => line.includes('plan {'));
+  assert.equal(note.includes('"callMinutes":40') && note.includes('"wrapUpMinutes":6'), true, 'the debug log shows both');
+  const short = await promptOptionsFor({ callMinutes: 10, wrapUpMinutes: 2, questions: [{ number: 1, askedBy: 'V1', minutes: 8, probes: [] }] });
+  assert.deepEqual([short.main.targetMinutes, short.main.wrapUpMinutes], [[8, 10], 2]);
+  // A stand-in plan with no length (one kept from before has none either) is as long as its question budgets.
+  const bare = await promptOptionsFor({});
+  assert.deepEqual(bare.main.targetMinutes, [8, 10]);
+  assert.equal('wrapUpMinutes' in bare.main, false, 'no wrap-up time is made up: the prompts scale it from the length');
+  // A length handed to the service (the unit suites) still wins for the prompts; the wrap-up is the plan's.
+  const fixed = await promptOptionsFor({ callMinutes: 40, wrapUpMinutes: 6 }, { targetMinutes: [12, 14] });
+  assert.deepEqual([fixed.main.targetMinutes, fixed.main.wrapUpMinutes], [[12, 14], 6]);
+  // A plan with neither a length nor question budgets gives the prompts no range at all: a null would print as 0:00,
+  // while left out the prompt builder uses its own default.
+  const none = await promptOptionsFor({ questions: [] });
+  for (const options of [none.main, none.opener]) assert.equal('targetMinutes' in options, false);
+});
+
+test('temperament: the lead\'s own words reach the prompts as written, and a fixed one still wins', async () => {
+  const words = 'Courteous but exacting; waits out a thin answer before moving on.';
+  const planned = await promptOptionsFor({ lead: { ...soloPlan([{ key: 'V1' }]).lead, temperament: ` ${words} ` } });
+  assert.equal(planned.main.persona.temperament, words);
+  assert.equal(planned.main.callPlan.people[0].temperament, words);
+  assert.equal(planned.opener.persona.temperament, words);
+  // An interview kept from before holds one of the old single words, and it is passed on as that word.
+  const old = await promptOptionsFor({ lead: { ...soloPlan([{ key: 'V1' }]).lead, temperament: 'warm' } });
+  assert.equal(old.main.persona.temperament, 'warm');
+});
+
+test('late joins: an interview kept from before the planner chose (saved draws, no choice in its plan) replays its draws, and a kept new one its plan', async () => {
+  const rootDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews');
+  const saved = createSavedInterviewStore({ rootDir });
+  const first = await savedPanel(saved, { random: () => 0.9 });
+  await first.service.start(ARGS);
+  await first.service.answer();
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'the interview is kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  const file = path.join(rootDir, kept.id, 'interview.json');
+  const entry = JSON.parse(await nodeFs.readFile(file, 'utf8'));
+  assert.deepEqual(entry.joinDraws, [{ joins: 'late', joinDelayMs: 51000 }], 'the draws are kept with the interview');
+  assert.deepEqual([entry.targetMinutes, entry.planned.plan.callMinutes, entry.planned.plan.wrapUpMinutes], [[8, 10], undefined, undefined], 'a stand-in plan has no length of its own');
+  // The same interview as an earlier version kept it: the old temperament word, no join choice, the draws and the 25 to 30 range.
+  delete entry.planned.plan.panel[0].joins; delete entry.planned.plan.panel[0].joinMinutes;
+  entry.planned.plan.lead.temperament = 'tough';
+  entry.joinDraws = [{ joins: 'late', joinDelayMs: 57000 }];
+  entry.targetMinutes = [25, 30];
+  await nodeFs.writeFile(file, JSON.stringify(entry));
+  const again = await savedPanel(saved, { random: () => 0.9, late: false });
+  const state = await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.notEqual(state.phase, 'error', JSON.stringify(state.error));
+  const main = again.setup.built.find(item => item.kind === 'main').options;
+  assert.deepEqual(main.panel.map(item => item.joins), ['late'], 'the saved draw stands');
+  assert.deepEqual([main.targetMinutes, 'wrapUpMinutes' in main, main.persona.temperament], [[25, 30], false, 'tough']);
+  await again.service.answer();
+  assert.deepEqual(again.setup.clock.lateTimers().map(timer => timer.ms), [57000], 'at the moment it was drawn for');
+  await again.service.hangUp({ feedback: false });
+  // The plan carries the choice too, so a kept interview with no draws of its own still has its colleague late.
+  const newer = JSON.parse(await nodeFs.readFile(file, 'utf8'));
+  Object.assign(newer.planned.plan.panel[0], { joins: 'late', joinMinutes: 1 });
+  delete newer.joinDraws;
+  await nodeFs.writeFile(file, JSON.stringify(newer));
+  const plain = await savedPanel(saved, { random: () => 0.9, late: false });
+  await plain.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  await plain.service.answer();
+  assert.equal(plain.setup.clock.pending().filter(timer => timer.ms === 60000).length, 1, 'the plan\'s minute');
+  await plain.service.hangUp({ feedback: false });
+});
+
+test('late joins: a kept late draw with no usable delay and a plan with no minute joins at the earliest time, never at NaN', async () => {
+  const rootDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'practice-saved-')), 'practice-interviews');
+  const saved = createSavedInterviewStore({ rootDir });
+  const first = await savedPanel(saved, { random: () => 0.9 });
+  await first.service.start(ARGS);
+  await first.service.answer();
+  await waitFor(async () => (await first.service.listSaved('node-1')).length === 1, 'the interview is kept');
+  await first.service.hangUp();
+  const [kept] = await first.service.listSaved('node-1');
+  const file = path.join(rootDir, kept.id, 'interview.json');
+  const entry = JSON.parse(await nodeFs.readFile(file, 'utf8'));
+  delete entry.planned.plan.panel[0].joins; delete entry.planned.plan.panel[0].joinMinutes;
+  entry.joinDraws = [{ joins: 'late' }];
+  await nodeFs.writeFile(file, JSON.stringify(entry));
+  const again = await savedPanel(saved, { random: () => 0.9, late: false });
+  const state = await again.service.start({ ...ARGS, repeatInterviewId: kept.id });
+  assert.notEqual(state.phase, 'error', JSON.stringify(state.error));
+  await again.service.answer();
+  const delays = again.setup.clock.pending().filter(timer => timer.ms >= 10000 && timer.ms <= 600000).map(timer => timer.ms);
+  assert.equal(delays.length, 1);
+  assert.equal(Number.isFinite(delays[0]) && delays[0] >= 0, true, `a real delay, not ${delays[0]}`);
+  assert.deepEqual(again.service.getState().participants.map(item => item.id), ['A'], 'the colleague is still to join');
+  await again.service.hangUp({ feedback: false });
 });
 
 test('plan: the engine gets the prepared problems by reference, and none when the plan has none', async () => {
@@ -4875,6 +5100,49 @@ test('notes: a topic asked and answered is noted by its prepared problem, the ow
   }, 'topic 4 was asked but not answered, q1 is fixed: neither is noted');
 });
 
+test('notes: a long exercise note ends at a sentence end past half the limit, else it is left for the word-end cut; the history write is logged (call-mwttebvu)', async () => {
+  const sentence = 'Write a function that merges two sorted lists into one sorted list.';
+  const long = `${sentence} ${sentence} ${sentence} ${sentence} Then explain the cost of each step in detail, and (2) say what changes when the lists are very large.`;
+  const noEnd = 'word '.repeat(80).trim();
+  const run = async (content, debug) => {
+    const history = notedHistory();
+    const planner = fakePlanner(voices => soloPlan(voices, {
+      questions: [{ number: 3, askedBy: voices[0].key, minutes: 5, probes: [] }],
+      problems: [{ ...TOPIC_PROBLEM, parts: [{ title: 'Merge', content }] }],
+    }));
+    const made = await startOf({ deps: { ...(debug ? { debugFs: nodeFs } : {}), planCall: planner, loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, engineFactory: topicEngine([3], {}, [3]) } });
+    await made.service.start(ARGS);
+    await made.service.answer();
+    await made.service.hangUp({ feedback: false });
+    return { history, tmp: made.tmp };
+  };
+  const cut = (await run(long)).history.written[0].extra.asked['topic-aaaaaaaaaaaa'];
+  assert.ok(cut.length <= 300 && cut.endsWith('.') && !cut.endsWith('(2)'), `ends at a sentence: ${cut}`);
+  assert.ok(cut.length > 150);
+  const words = (await run(noEnd)).history.written[0].extra.asked['topic-aaaaaaaaaaaa'];
+  assert.ok(words.length > 300, 'no sentence end past half: the note is passed whole for the history\'s word-end cut');
+});
+
+test('the debug log records what the hang-up counted and noted in the practice history, and the error when the write fails (call-mwttebvu)', async () => {
+  const logOf = async tmp => (await readFile(path.join(tmp, 'practice-calls', 'call-1', 'debug.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)).filter(line => line.event === 'question-history');
+  const planner = () => fakePlanner(voices => soloPlan(voices, { questions: [{ number: 3, askedBy: voices[0].key, minutes: 5, probes: [] }], problems: [TOPIC_PROBLEM] }));
+  const deps = history => ({ debugFs: nodeFs, planCall: planner(), loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, logger: { warn() {} }, engineFactory: topicEngine([3], {}, [3]) });
+  const ok = await startOf({ deps: deps(notedHistory()) });
+  await ok.service.start(ARGS);
+  await ok.service.answer();
+  await ok.service.hangUp({ feedback: false });
+  const [entry] = await logOf(ok.tmp);
+  assert.deepEqual(entry.data.counted, ['topic-aaaaaaaaaaaa']);
+  assert.equal(entry.data.noted.asked['topic-aaaaaaaaaaaa'].startsWith('Balanced Delimiters / Nesting: Write a function'), true, 'the note text is in the log');
+  const broken = notedHistory();
+  broken.record = async () => { throw new Error('disk gone'); };
+  const bad = await startOf({ deps: deps(broken) });
+  await bad.service.start(ARGS);
+  await bad.service.answer();
+  await bad.service.hangUp({ feedback: false });
+  assert.deepEqual((await logOf(bad.tmp)).map(line => line.data), [{ error: 'disk gone' }]);
+});
+
 test('notes: a topic with no problem is noted by what the interviewer said, an unanswered one or one with no words by nothing, a repeat once', async () => {
   const history = notedHistory();
   const { service } = await startOf({ deps: { loadCards: async () => SCOPED_CARDS, questionHistory: history, storeKey: async () => 'posting:abc', loadTopics: async () => TOPICS, engineFactory: topicEngine([3, 4], { 3: 'Good. Which index would you add for a slow join? And why that one?' }, [3, 4]) } });
@@ -5158,7 +5426,7 @@ test('departures: a lost connection drops everyone at once, with no timers', asy
 });
 
 test('departures: a colleague who had not joined yet is not on the call to leave', async () => {
-  const setup = panelHarness({ random: () => 0.1 });
+  const setup = panelHarness({ late: true });
   const built = await panelStart(setup);
   await built.service.answer();
   setup.engineOptions[0].onEvent({ type: 'ended', reason: 'interviewer' });
@@ -5492,6 +5760,30 @@ test('draftTimingOf gives the active time, the planned length and the minutes of
   assert.deepEqual(draftTimingOf(self, { elapsedMs: 5000, askedQuestions: [] }), { elapsedMs: 5000, plannedMs: 300000 });
   assert.deepEqual(draftTimingOf(self, { askedQuestions: [9] }), { plannedMs: 300000 }, 'a question the plan does not hold has no minutes');
   assert.deepEqual(draftTimingOf({}, {}), {});
+});
+
+test('draftTimingOf reads the planned length the interviewer reads: the planner\'s call length when it has one, else the budgets', () => {
+  const questions = [{ number: 1, minutes: 20 }, { number: 2, minutes: 17.5 }]; // budgets may reach 1.25 times the length
+  assert.equal(draftTimingOf({ settledPlan: { callMinutes: 30, questions } }, {}).plannedMs, 30 * 60000, 'not 37:30 for a call that wraps up at 30:00');
+  assert.equal(draftTimingOf({ settledPlan: { callMinutes: 30, questions: [{ number: 1, minutes: 5 }] } }, {}).plannedMs, 30 * 60000, 'and not the short sum of a few budgets');
+  for (const callMinutes of [undefined, 0, -3, 'x', null]) {
+    assert.equal(draftTimingOf({ settledPlan: { callMinutes, questions } }, {}).plannedMs, 37.5 * 60000, `a plan with length ${callMinutes} adds the budgets up`);
+  }
+});
+
+test('draftTimingOf gives the planner\'s own question its minutes while it is the one in progress, and none when the state cannot tell', () => {
+  const self = { settledPlan: { questions: [{ number: 0, minutes: 1 }, { number: 1, minutes: 4 }, { number: 2, minutes: 3 }] } };
+  const own = { 0: 'What do you assume an attacker can do?' };
+  // Nothing from the plan asked yet and the own question said: it is the question in progress, not the one before it.
+  assert.equal(draftTimingOf(self, { askedQuestions: [], askedTexts: own }).questionMinutes, 1);
+  // Before anything is said, no question is in progress.
+  assert.equal('questionMinutes' in draftTimingOf(self, { askedQuestions: [], askedTexts: {} }), false);
+  // Both asked: the engine keeps no order between the own question and the plan's, so no minutes rather than the wrong ones.
+  assert.equal('questionMinutes' in draftTimingOf(self, { askedQuestions: [1], askedTexts: { ...own, 1: 'Tell me about a bug.' } }), false);
+  // The own question was never asked: the last plan question's minutes stand, as before.
+  assert.equal(draftTimingOf(self, { askedQuestions: [1, 2], askedTexts: { 1: 'x', 2: 'y' } }).questionMinutes, 3);
+  // A plan with no question of its own and no state about it behaves as before.
+  assert.equal(draftTimingOf({ settledPlan: { questions: [{ number: 1, minutes: 4 }] } }, { askedQuestions: [1] }).questionMinutes, 4);
 });
 
 test('the engine\'s spoken line is matched back to the sent messages it was joined from', () => {

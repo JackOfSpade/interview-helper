@@ -1,7 +1,7 @@
 import { assert } from './testHelpers.js';
 import { interviewAnswerV5ReplayFixture } from '../fixtures/interview-answer-v5-replay.mjs';
 import { buildInterviewPreparedAnswers } from '../../electron/ipc/interviewPreparation.js';
-import { inspectInterviewAnswerCards, isInterviewAnswerBank, INTERVIEW_REQUIRED_QUESTIONS } from '../../electron/ipc/interviewAnswerBank.js';
+import { inspectInterviewAnswerCards, isInterviewAnswerBank } from '../../electron/ipc/interviewAnswerBank.js';
 
 function boundary(prompt, label) {
   const match = prompt.match(new RegExp(`<untrusted-${label}-[a-f0-9]+>\\n([\\s\\S]*?)\\n</untrusted-${label}-[a-f0-9]+>`));
@@ -13,7 +13,7 @@ const claimKey = claim => JSON.stringify([claim.text, claim.evidenceIds]);
 
 export default [
   {
-    name: 'interview v5 replay: saved sparse repairs retain ten safe answers including required intro and project',
+    name: 'interview v5 replay: saved sparse repairs retain nine safe answers including the required intro; the project walkthrough is an ordinary card now',
     async run() {
       const fixture = interviewAnswerV5ReplayFixture();
       const { context } = fixture;
@@ -49,8 +49,10 @@ export default [
         onValidationRound: round => diagnostics.push(round),
       });
       const final = diagnostics.at(-1);
-      assert(bank.cards.length >= 10, `v5 replay must recover at least ten safe cards; got ${bank.cards.length}, dropped ${JSON.stringify(final?.droppedCards)}`);
-      assert(INTERVIEW_REQUIRED_QUESTIONS.every(question => bank.cards.some(card => card.question === question)), 'required intro and project must survive');
+      // The recording kept ten: the project walkthrough was required then and survived as a narrow card. It is an ordinary card now, and this one could not be repaired.
+      assert(bank.cards.length >= 9, `v5 replay must recover at least nine safe cards; got ${bank.cards.length}, dropped ${JSON.stringify(final?.droppedCards)}`);
+      assert(bank.cards.some(card => card.kind === 'intro' && card.set === 'general'), 'the required introduction must survive');
+      assert((bank.droppedQuestions || []).includes('Walk me through a project.'), 'an unrepairable project walkthrough is dropped like any other optional card');
       assert(isInterviewAnswerBank(bank, context) && inspectInterviewAnswerCards(bank.cards, context).failures.length === 0, 'every surviving claim must pass complete bank and truth validation');
       const strengths = bank.cards.find(card => card.id === 'strengths');
       const earlierStrengths = fixture.responses[1].cards.find(card => card.id === 'strengths');

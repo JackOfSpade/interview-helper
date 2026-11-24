@@ -1,36 +1,13 @@
 /**
  * Account voice catalogue and persona voice picking.
- * Voices come from the documented voices search endpoint; names come from voiceNames.js data.
+ * Voices come from the documented voices search endpoint. A voice gets no name here: the call planner writes each
+ * person's name to fit the voice's accent and gender (the app keeps no list of names).
  */
 import { classifyFailure, voiceError, redact } from './voiceErrors.js';
-import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from './voiceNames.js';
 
 export const VOICES_URL = 'https://api.elevenlabs.io/v2/voices';
  const PAGE_SIZE = 100;
  const MAX_PAGES = 20;
-
-// Longest, most specific accents first so "south african" never matches a bare "african".
-const ACCENT_KEYS = [
-  ['south african', 'south african'],
-  ['new zealand', null],
-  ['indian', 'indian'],
-  ['nigerian', 'nigerian'],
-  ['irish', 'irish'],
-  ['scottish', 'scottish'],
-  ['australian', 'australian'],
-  ['spanish', 'spanish'],
-  ['cantonese', 'chinese'],
-  ['mandarin', 'chinese'],
-  ['taiwan', 'chinese'],
-  ['chinese', 'chinese'],
-  ['french', 'french'],
-  ['german', 'german'],
-  ['italian', 'italian'],
-  ['japanese', 'japanese'],
-  ['korean', 'korean'],
-  ['brazilian', 'brazilian'],
-  ['mexican', 'mexican'],
-];
 
 export const normalizeGender = value => {
   const text = String(value ?? '').trim().toLowerCase();
@@ -112,13 +89,6 @@ export const isStandardPrice = voice => {
   return rate === null || rate <= 1;
 };
 
-/** Accent label → regional name pool key, or null for the deliberately diverse pool. */
-export function accentPoolKey(accent) {
-  const text = String(accent ?? '').trim().toLowerCase();
-  for (const [needle, key] of ACCENT_KEYS) if (text.includes(needle)) return key;
-  return null;
-}
-
 export function normalizeVoice(voice) {
   const labels = voice?.labels ?? {};
   return {
@@ -183,7 +153,7 @@ export async function listConversationalVoices({
   return voices;
 }
 
-/** Picks the voice first, then a name that fits its accent and gender label. */
+/** Picks the voice. The person's name is written later by the call planner. */
 export function pickPersonaVoice({ voices = [], random = Math.random, temperament, avoidVoiceIds } = {}) {
   const known = voices.filter(voice => voice?.voiceId && hasKnownGender(voice));
   const conversational = known.filter(isConversational);
@@ -195,23 +165,11 @@ export function pickPersonaVoice({ voices = [], random = Math.random, temperamen
   const pool = fresh.length ? fresh : eligible;
   const voice = pick(pool, random);
   const gender = normalizeGender(voice.gender);
-  const accent = String(voice.accent ?? '').trim().toLowerCase();
-  const key = accentPoolKey(accent);
-  const names = (key && NAME_POOLS[key]) || DIVERSE_POOL;
-  const gendered = names[gender];
-  const firstNames = gender === 'neutral'
-    ? (names.neutral?.length ? names.neutral : NEUTRAL_FIRST_NAMES)
-    : (gendered?.length ? gendered : NEUTRAL_FIRST_NAMES);
-  const first = pick(firstNames, random);
-  const last = pick(names.last, random);
-  // Only a requested temperament is set here; otherwise Claude chooses one that fits the voice.
-  const mood = temperament && ['warm', 'neutral', 'tough'].includes(String(temperament).toLowerCase())
-    ? String(temperament).toLowerCase()
-    : null;
+  // Only a requested temperament is set here, as the text it came in; otherwise the planner writes one that fits the voice.
+  const mood = String(temperament ?? '').replace(/\s+/gu, ' ').trim() || null;
   return {
     voiceId: voice.voiceId,
     voiceName: voice.voiceName ?? '',
-    name: `${first} ${last}`,
     gender,
     age: voice.age || 'unknown',
     accent: voice.accent || 'unknown',

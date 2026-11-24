@@ -128,18 +128,41 @@ test('brevity is its own bullet that overrides the ranges, in both prompts, and 
 test('a topic the documents never touch is answered as a prepared candidate would, without disclaiming; consistency stays', () => {
   const prompt = draftAnswerPrompt(CONTEXT);
   assert(prompt.includes('A topic the documents never touch at all') && prompt.includes('without saying it is outside your experience'));
+  // call-mwttebvu: the rule says what to do instead of disclaiming.
+  assert(prompt.includes('how you would approach or learn it') && prompt.includes('never state that you lack it'));
   assert(prompt.includes('Keep anything you make up consistent with the documents'));
 });
 
 test('work: the silent typing budget is given in numbers', () => {
   const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
-  assert(prompt.includes('about eight to ten seconds') && prompt.includes('ninety to a hundred characters') && prompt.includes('three to four short lines'));
-  assert(prompt.includes('signature at most') && prompt.includes('never more than about a hundred characters typed in silence'));
+  assert(prompt.includes('about eight to ten seconds') && prompt.includes('roughly fifty characters') && prompt.includes('one or two short lines'));
+  assert(prompt.includes('signature at most') && prompt.includes('never more than about fifty characters typed in silence'));
 });
 
 test('prepared answers are offered as ideas to take in a few sentences, not as scripts', () => {
   const prompt = draftAnswerPrompt(CONTEXT);
   assert(prompt.includes('<prepared-answers (your own notes; take the idea from one when it fits, in a few sentences, never the whole thing)>'));
+});
+
+test('cleanDraft strips markdown marks from what is said and keeps the words and identifier underscores (call-mwttebvu)', () => {
+  assert.equal(cleanDraft('`has` follows the array\'s `object_comparison` setting.'), 'has follows the array\'s object_comparison setting.');
+  assert.equal(cleanDraft('It is **really** fast and *quite* simple.'), 'It is really fast and quite simple.');
+  assert.equal(cleanDraft('*emphasis* here, and snake_case_name stays, 2 * 3 * 4 too.'), 'emphasis here, and snake_case_name stays, 2 * 3 * 4 too.');
+  assert.equal(cleanDraft('the __init__ method and a _private field'), 'the __init__ method and a _private field');
+  const work = cleanWork({ waitForReply: false, steps: [
+    { say: 'Use `find` here.', code: 'x = `y`', explain: 'before', bridge: null },
+    { say: 'Then `done`.', code: 'x = `y`\nz = 1', explain: 'after', bridge: 'Now `next`.' },
+  ] });
+  assert.equal(work[0].say, 'Use find here.');
+  assert.equal(work[1].say, 'Now next.', 'the bridge');
+  assert.equal(work[2].say, 'Then done.');
+  assert.equal(work[0].code, 'x = `y`', 'code is never touched');
+});
+
+test('work: the prompt covers greeting back, no disclaiming and the thanks rule (call-mwttebvu)', () => {
+  const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
+  assert(prompt.includes('your first line returns the greeting briefly'));
+  assert(prompt.includes('never say you lack experience') && prompt.includes('how you would approach or learn it'));
 });
 
 test('cleanDraft drops a label and wrapping quotes and keeps within the chat limit at a sentence end', () => {
@@ -247,6 +270,11 @@ test('both prompts share the spoken-not-notes rule and the realism options, with
     assert(prompt.includes('Thanking the interviewers for their time') && prompt.includes('once, when the call is actually closing'), 'thanks once, at the close');
     assert(prompt.includes('rather than reciting every digit') && prompt.includes('says hexadecimal the way engineers say it aloud'), 'values aloud');
     assert(prompt.includes('follow-up or one-fact question gets a short answer'), 'size follows the question');
+    // call-mwttebvu: a 41 s answer to a one-minute question with the exercise still to come.
+    assert(prompt.includes('planned minutes below are small while more of the interview is still to come'), 'small planned minutes with more to come');
+    // call-mwttebvu: a joined colleague's greeting went unanswered; the thanks at the questions invitation was repeated at goodbye.
+    assert(prompt.includes('has just greeted you, or has just joined the call and been introduced') && prompt.includes('returns the greeting briefly before anything else'), 'greeting returned');
+    assert(prompt.includes('An invitation to ask them questions is not the close') && prompt.includes('not said again in the same words or at length'), 'invitation is not the close');
   }
   for (const quoted of ['Short version', 'Leading explanation', 'I think that\'s it', 'Happy to go through', 'assume the arrays', 'centre the coordinates', 'x equals x minus', 'about 170 kilograms', 'two point nine amps']) {
     assert(!reply.includes(quoted) && !work.includes(quoted), `no quotable example: ${quoted}`);
@@ -256,7 +284,7 @@ test('both prompts share the spoken-not-notes rule and the realism options, with
 test('work: the prompt keeps words and typing in step: the line is about its own code, with the real pace, and the pad is only added to', () => {
   const prompt = draftWorkPrompt({ ...CONTEXT, pad: { open: true, lang: 'python', text: '' } });
   assert(prompt.includes('A step\'s line is about the code that same step types') && prompt.includes('an earlier step already typed') && prompt.includes('a later piece'));
-  assert(prompt.includes('ten to twelve characters a second') && prompt.includes('two and a half words a second'));
+  assert(prompt.includes('five to six characters a second') && prompt.includes('each spoken word covers about two typed characters') && prompt.includes('two and a half words a second'));
   assert(prompt.includes('either say more about that piece while you type it') && prompt.includes('split the piece'));
   assert(prompt.includes('only added to, in order, unless you are fixing something'));
   assert(prompt.includes('ten seconds or more'), 'the silence guidance stays');

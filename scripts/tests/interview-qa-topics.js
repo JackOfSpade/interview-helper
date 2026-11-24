@@ -15,6 +15,12 @@ export default [
     assert.equal(INTERVIEW_TOPICS_STAGE, 'qa-technical-topics');
     assert.deepEqual(INTERVIEW_TOPICS_SCHEMA.required, ['topics', 'technical']);
   } },
+  { name: 'interview topics: the prompt quotes no sample topic and still says what a topic is', run() {
+    const prompt = interviewTopicsPrompt({ brief, listingText: 'x', questions: [] });
+    assert(!prompt.includes('REST API design') && !prompt.includes('Example of the form'), 'no sample topic to copy');
+    assert(prompt.includes('A topic is a subject in 1 to 6 words, not a question and not a sentence.') && !prompt.includes('taken from this job') && prompt.includes('the subject the numbered question tests')
+      && prompt.includes('Return JSON {"topics":["..."],"technical":[{"number":1,"topic":"..."}]}.'), 'the topic form and the output format stay');
+  } },
   { name: 'interview topics: validation trims, de-duplicates, caps and maps numbers to the offered questions', run() {
     const questions = ['Design a rate limiter.', 'Why Acme?'];
     const result = validateInterviewTopics({

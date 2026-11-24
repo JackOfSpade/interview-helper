@@ -20,3 +20,10 @@ export function padLanguageNames(values, max = Infinity) {
   }
   return names;
 }
+
+/**
+ * One spelling of a language name for comparing two of them: lower case, with spaces and dots dropped. There is no
+ * table of short names here: "JS" and "JavaScript" are different names, and a label that matches nothing is left
+ * to the caller's rule for that.
+ */
+export const padLanguageKey = value => String(value ?? '').toLowerCase().replace(/[\s.]+/gu, '');

@@ -28,7 +28,7 @@ const cron = source('cron', "Maintained cron jobs that pull and sync the CWA's d
 
 const examples = [
   {
-    name: 'collaboration', question: 'How do you collaborate with others?',
+    name: 'collaboration', kind: 'collaboration',
     before: inventory.text,
     headline: 'I work closely with one other engineer, splitting solo and shared work.',
     headlineSources: [inventory, integrations],
@@ -38,7 +38,7 @@ const examples = [
     ],
   },
   {
-    name: 'planning-delivery', question: 'How do you approach planning and delivery?',
+    name: 'planning-delivery', kind: 'delivery',
     before: migration.text,
     headline: 'I migrated platforms over about four months with another engineer, without interrupting daily operations.',
     headlineSources: [migration],
@@ -49,7 +49,7 @@ const examples = [
     ],
   },
   {
-    name: 'project-result', question: 'Tell me about a result from your work.',
+    name: 'project-result', kind: 'outcome',
     before: routing.text,
     headline: 'I implemented and tested a curvature-aware B* routing algorithm that shipped in a ferry planning application.',
     headlineSources: [routing],
@@ -326,7 +326,7 @@ export default [
         for (const [text, sources] of example.bullets) supported(text, sources, `${example.name} bullet`);
         const speech = [example.headline, ...example.bullets.map(([text]) => text)].join(' ');
         const evidence = [...example.headlineSources, ...example.bullets.flatMap(([, sources]) => sources)];
-        assert(interviewQuestionFit(example.question, speech, evidence) === (example.name === 'planning-delivery'), `${example.name} answer must honestly reflect the question shape`);
+        assert(interviewQuestionFit(example.kind, speech, evidence) === (example.name === 'planning-delivery'), `${example.name} answer must honestly reflect the question shape`);
       }
       // A second phrasing retains the team's choice and candidate implementation.
       const shortTeamChoice = 'The team chose the algorithm before I joined, and I implemented and tested it.';
@@ -396,8 +396,8 @@ export default [
     name: 'interview spoken claims: narrow evidence never supplies an invented problem or outcome',
     run() {
       const narrow = source('narrow', 'Built RPC APIs for the local warehouse database to provide controlled access. Technologies used: Quartz.');
-      assert(!interviewQuestionFit('Walk me through a technical problem.', 'I built RPC APIs giving controlled access to a local warehouse database.', [narrow]), 'a deliverable alone cannot claim a documented technical problem');
-      assert(!interviewQuestionFit('Tell me about a result from your work.', 'I built RPC APIs giving controlled access to a local warehouse database.', [narrow]), 'a deliverable alone cannot supply a measured or shipped result');
+      assert(!interviewQuestionFit('problem', 'I built RPC APIs giving controlled access to a local warehouse database.', [narrow]), 'a deliverable alone cannot claim a documented technical problem');
+      assert(!interviewQuestionFit('outcome', 'I built RPC APIs giving controlled access to a local warehouse database.', [narrow]), 'a deliverable alone cannot supply a measured or shipped result');
       rejected('I solved database outages and reduced data loss.', [narrow], 'invented problem and resolution');
       const negated = source('negated', 'The experiment did not improve conversion in 2024.');
       rejected('I improved conversion in 2024.', [negated], 'discarded negation');

@@ -33,6 +33,14 @@ export default [
     assert.notEqual(gapClosestFailure('The closest I have done is running Docker services.', ''), null, 'a line with no career piece is refused');
     assert.notEqual(gapClosestFailure('Running Docker services on one machine was close.', PIECE), null, 'the line is first person');
   } },
+  { name: 'interview gap: the prompt quotes no sample question opener or reminder, and keeps its rules', run() {
+    const role = { themes: ['Incident response'], listingText: 'You will carry the pager.', existing: [] };
+    const prompt = interviewGapPrompt([{ id: 'a', question: 'Q?' }], [{ id: 'p1', text: PIECE }], role);
+    for (const sample of ['Tell me about a time you', 'What is your experience with', 'Explain how you would learn it', 'Example of the form']) assert(!prompt.includes(sample), `${sample} is gone`);
+    assert(/starting with a verb, 2–8 words/u.test(prompt) && /no final period/u.test(prompt) && /NEVER describe the candidate/u.test(prompt), 'the reminder rules stay');
+    assert(/one natural spoken question/u.test(prompt) && prompt.includes('never a knowledge or quiz question and never a hands-on exercise'), 'role questions are described, not quoted');
+    assert(prompt.includes('Return JSON {cards:[{id,gap,admission,closest:{text,piece},reminders:[...]}],roleQuestions:'), 'the output format stays');
+  } },
   { name: 'interview gap: only career pieces are offered, a structured piece keeps its label, and the stage is registered', run() {
     assert.deepEqual(gapCareerPieces(evidence), [{ id: 'evidence-long-hash-1', text: PIECE }, { id: 'evidence-long-hash-2', text: 'Engineer · Old Health: Wrote the billing export.' }]);
     assert.deepEqual(gapCareerPieces(null), []);

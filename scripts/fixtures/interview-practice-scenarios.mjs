@@ -1,5 +1,5 @@
 // SYNTHETIC fixture data only. Every export below is invented for benchmarking; no real company, person or private interview material.
-import { formatTurnMessage, pickPersona } from '../../electron/interviewPracticeCallPrompt.js';
+import { formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 
 const minutes = (m, s = 0) => (m * 60 + s) * 1000;
 
@@ -32,11 +32,6 @@ export const SYNTHETIC_PLAN = [
   { question: 'What would you do in your first ninety days?', answer: 'Shadow on-call, fix a small bug end to end, then map the scheduling code and propose one improvement.' },
   { question: 'What questions do you have for us?', answer: 'I would ask how the team measures reliability and how decisions with hardware get made.' },
 ];
-
-function seeded(seed) {
-  let state = seed >>> 0 || 1;
-  return () => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state / 2 ** 32; };
-}
 
 const turn = (elapsedMs, candidateText, expect, extra = {}) => ({
   message: formatTurnMessage({ elapsedMs, candidateText, ...extra.format }),
@@ -135,7 +130,12 @@ export const SCENARIOS = [
       turn(minutes(18, 30), 'There are three things I would check before trusting the route planner. First, that every planned route keeps the battery reserve above the safety margin. Second, that two Drifters are never given the same aisle at the same time. And third, that a lost network link makes a Drifter stop rather than guess. That is how I would test it.', 'All three things are given and the answer ends on a conclusion: the interviewer replies out loud, not <listen/>.'),
     ],
   },
-].map(scenario => ({ ...scenario, persona: pickPersona({ random: seeded(scenario.seed), temperament: scenario.temperament }) }));
+// The app keeps no list of people: a call's interviewer is written by its planner. These synthetic scenarios only need
+// someone to speak as, so each gets a plain stand-in with the scenario's temperament. The prompt has no default length
+// either, so every scenario states the call it is part of: a 50 minute call (the range is the planned length and a
+// sixth less, as the app passes it) whose wrap-up starts four minutes before the end, at 46:00, which scenario g's
+// expectation at 46:00 relies on.
+].map(scenario => ({ targetMinutes: [42, 50], wrapUpMinutes: 4, ...scenario, persona: { name: 'the interviewer', role: 'Hiring Manager', team: '', temperament: scenario.temperament } }));
 
 // SYNTHETIC classifier cases: interviewer partial sentence + candidate overlap words. Labels are assigned in code, not by a model.
 const ACK_OVERLAPS = ['right', 'mm-hm', 'yeah', 'okay', 'uh-huh', 'sure', 'got it', 'yes', 'makes sense', 'I see', 'right right', 'mm-hm, okay'];

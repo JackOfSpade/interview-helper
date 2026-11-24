@@ -22,10 +22,9 @@ import {
   createDialogueVoiceFactory, fetchSubscriptionTier, rateForTier, redact,
 } from '../../electron/practiceCall/eleven/dialogueVoice.js';
 import {
-  VOICES_URL, accentPoolKey, hasKnownGender, isConversational, isEnglishVoice, isStandardPrice,
+  VOICES_URL, hasKnownGender, isConversational, isEnglishVoice, isStandardPrice,
   listConversationalVoices, normalizeGender, normalizeVoice, pickPersonaVoice,
 } from '../../electron/practiceCall/eleven/voiceCatalog.js';
-import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from '../../electron/practiceCall/eleven/voiceNames.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { buildInterviewerInstructions } from '../../electron/interviewPracticeCallPrompt.js';
 import { wavHeader } from '../../electron/practiceCall/audio/wavFormat.js';
@@ -137,25 +136,17 @@ function chiSquarePValue(statistic, df) {
 
 // ---------------------------------------------------------------- voice / name / WAV helpers
 
-/** The name pool the picker must draw from for a voice's accent and gender. */
-function expectedNames({ accent, gender }) {
-  const key = accentPoolKey(accent);
-  const names = (key && NAME_POOLS[key]) || DIVERSE_POOL;
-  const normalized = normalizeGender(gender);
-  const gendered = names[normalized];
-  const list = normalized === 'neutral'
-    ? (Array.isArray(names.neutral) && names.neutral.length ? names.neutral : NEUTRAL_FIRST_NAMES)
-    : (Array.isArray(gendered) && gendered.length ? gendered : NEUTRAL_FIRST_NAMES);
-  return { key: key || 'diverse', firstNames: [...list], lastNames: [...(names.last ?? [])] };
+// The app keeps no name lists: the call planner writes each person's name to fit the voice. This probe only reports
+// the accent a name would have to fit, and greets with a stand-in first name.
+function expectedNames({ accent }) {
+  return { key: String(accent ?? '').trim().toLowerCase() || 'unknown' };
 }
+
+// A voice has no name: the planner writes one when it plans a call. The probe's prompts and greetings use this one.
+const STAND_IN_NAME = 'Morgan Reyes';
 
 function firstNameOf(fullName) {
   return String(fullName ?? '').trim().split(/\s+/)[0] ?? '';
-}
-
-function lastNameOf(fullName) {
-  const parts = String(fullName ?? '').trim().split(/\s+/);
-  return parts.slice(1).join(' ');
 }
 
 /** Re-parses a 44-byte header and reports whether it is a valid mono/16-bit PCM WAV at `sampleRate`. */
@@ -331,11 +322,9 @@ async function step4Draws({ pool, draws, seed }) {
   const byId = new Map(pool.map(voice => [voice.voiceId, voice]));
   const random = mulberry32(seed);
   const violations = {
-    voice: newBucket(), gender: newBucket(), first: newBucket(),
-    last: newBucket(), language: newBucket(), temperament: newBucket(),
+    voice: newBucket(), gender: newBucket(), language: newBucket(), temperament: newBucket(),
   };
   const counts = new Map();
-  const nameStats = new Map();
   const drawn = [];
 
   for (let index = 0; index < draws; index += 1) {
@@ -350,20 +339,10 @@ async function step4Draws({ pool, draws, seed }) {
     const voice = byId.get(draw.voiceId);
     if (!voice) violate(violations.voice, `#${index} voiceId=${draw.voiceId} not in pool`);
     counts.set(draw.voiceId, (counts.get(draw.voiceId) ?? 0) + 1);
-    const first = firstNameOf(draw.name);
-    const last = lastNameOf(draw.name);
-    const stats = nameStats.get(draw.voiceId) ?? { full: new Set(), first: new Set(), examples: [] };
-    stats.full.add(draw.name);
-    stats.first.add(first);
-    if (stats.examples.length < 3 && !stats.examples.includes(draw.name)) stats.examples.push(draw.name);
-    nameStats.set(draw.voiceId, stats);
     if (!voice) continue;
 
     const expectedGender = normalizeGender(voice.gender);
     if (draw.gender !== expectedGender) violate(violations.gender, `#${index} ${draw.voiceId} ${draw.gender} != ${expectedGender}`);
-    const names = expectedNames({ accent: voice.accent, gender: voice.gender });
-    if (!names.firstNames.includes(first)) violate(violations.first, `#${index} ${first} not in ${names.key}.${expectedGender}`);
-    if (!last || !names.lastNames.includes(last)) violate(violations.last, `#${index} ${last || '(none)'} not in ${names.key}.last`);
     const language = String(draw.language ?? voice.language ?? '').trim().toLowerCase();
     if (!(language === '' || language.startsWith('en'))) violate(violations.language, `#${index} ${draw.voiceId} language=${language}`);
     // No temperament was requested, so none is set: Claude chooses one from the voice.
@@ -373,8 +352,6 @@ async function step4Draws({ pool, draws, seed }) {
 
   invariantCheck('voiceId in pool', violations.voice);
   invariantCheck('gender matches voice label', violations.gender);
-  invariantCheck('first name from expected pool', violations.first);
-  invariantCheck('last name from expected pool', violations.last);
   invariantCheck("language is '' or starts with 'en'", violations.language);
   invariantCheck('temperament left for Claude, voice character present', violations.temperament);
 
@@ -385,14 +362,10 @@ async function step4Draws({ pool, draws, seed }) {
   const rows = pool.map(voice => {
     const picks = counts.get(voice.voiceId) ?? 0;
     chiSquare += ((picks - expected) ** 2) / expected;
-    const stats = nameStats.get(voice.voiceId) ?? { full: new Set(), first: new Set(), examples: [] };
     return {
       voice,
       picks,
       share: total ? picks / total : 0,
-      full: stats.full.size,
-      first: stats.first.size,
-      examples: stats.examples,
       key: expectedNames({ accent: voice.accent, gender: voice.gender }).key,
     };
   });
@@ -407,13 +380,12 @@ async function step4Draws({ pool, draws, seed }) {
 
   console.log([
     pad('voice', 28), pad('gender', 8), pad('accent', 18), pad('pool', 14),
-    pad('picks', 6), pad('share', 8), pad('distinct', 20), 'examples',
+    pad('picks', 6), 'share',
   ].join(' '));
   for (const row of rows) {
     console.log([
       pad(row.voice.voiceName || '-', 28), pad(row.voice.gender || '-', 8), pad(row.voice.accent || '-', 18),
-      pad(row.key, 14), pad(String(row.picks), 6), pad(fmtPct(row.share), 8),
-      pad(`${row.full} full/${row.first} first`, 20), row.examples.join(', '),
+      pad(row.key, 14), pad(String(row.picks), 6), fmtPct(row.share),
     ].join(' '));
   }
 
@@ -509,7 +481,7 @@ async function step7PromptAlignment({ pool, seed }) {
   for (const voice of voices) {
     const draw = pickPersonaVoice({ voices: [voice], random });
     const persona = {
-      name: draw.name, role: 'Hiring Manager', team: 'Platform', temperament: null,
+      name: STAND_IN_NAME, role: 'Hiring Manager', team: 'Platform', temperament: null,
       voice: { gender: draw.gender, age: draw.age, accent: draw.accent, character: draw.character },
     };
     const text = buildInterviewerInstructions({ persona, brief, plan: [], targetMinutes: [25, 30] });
@@ -518,8 +490,8 @@ async function step7PromptAlignment({ pool, seed }) {
     const firstName = String(voice.voiceName ?? '').split(/\s[-\u2013\u2014]\s/)[0].trim();
     const leaksName = firstName.length >= 2
       && new RegExp(`(?<![\\p{L}])${firstName.replace(/[^\p{L}'-]/gu, '')}(?![\\p{L}])`, 'iu').test(voiceLine);
-    check(`prompt: ${draw.name} has a voice line that does not leak the voice name`,
-      text.startsWith(`You are ${draw.name}, `) && Boolean(voiceLine) && !leaksName,
+    check(`prompt: ${voice.voiceName} has a voice line that does not leak the voice name`,
+      text.startsWith(`You are ${STAND_IN_NAME}, `) && Boolean(voiceLine) && !leaksName,
       `voiceLine=${Boolean(voiceLine)} leaksVoiceName=${leaksName}`);
   }
 }
@@ -560,7 +532,7 @@ function withTimeout(promise, timeoutMs, onTimeout) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function speakOne({ key, tier, voice, persona, index, outDir }) {
+async function speakOne({ key, tier, voice, index, outDir }) {
   const factory = createDialogueVoiceFactory({ key, voiceId: voice.voiceId, tier });
   const stream = factory.open({ utteranceId: `e2e-${index}` });
   const chunks = [];
@@ -578,7 +550,7 @@ async function speakOne({ key, tier, voice, persona, index, outDir }) {
     chunks.push(Buffer.from(chunk));
   });
 
-  const firstName = firstNameOf(persona.name);
+  const firstName = firstNameOf(STAND_IN_NAME);
   const sentAt = performance.now();
   const accepted = stream.sendText(greetingFor(firstName));
   let timedOut = false;
@@ -607,7 +579,7 @@ async function speakOne({ key, tier, voice, persona, index, outDir }) {
   if (wavProblems.length > 0) problems.push(`bad wav: ${wavProblems.join(',')}`);
   return {
     voiceName: voice.voiceName || voice.voiceId,
-    name: persona.name,
+    name: STAND_IN_NAME,
     sampleRate: audioRate,
     firstAudioMs,
     audioMs,
@@ -634,13 +606,12 @@ async function step8Speech({ key, tier, pool, args }) {
   const rows = [];
   for (let index = 0; index < targets.length; index += 1) {
     const voice = targets[index];
-    const persona = pickPersonaVoice({ voices: [voice], random });
     let row;
     try {
-      row = await speakOne({ key, tier, voice, persona, index, outDir: args.out });
+      row = await speakOne({ key, tier, voice, index, outDir: args.out });
     } catch (error) {
       row = {
-        voiceName: voice.voiceName || voice.voiceId, name: persona.name, sampleRate: null,
+        voiceName: voice.voiceName || voice.voiceId, name: STAND_IN_NAME, sampleRate: null,
         firstAudioMs: null, audioMs: 0, words: 0, wavPath: '', ok: false,
         problems: [redact(error?.message ?? error, key)],
       };
@@ -784,7 +755,6 @@ async function step10WarmUpThenSpeak({ key, tier, args, draw }) {
     check('warm-up: a library voice was drawn', false, 'step 9 produced no library pick');
     return;
   }
-  const persona = pickPersonaVoice({ voices: [voice], random: mulberry32(args.seed + 10) });
   const factory = createDialogueVoiceFactory({ key, voiceId: voice.voiceId, tier });
 
   const warm = await speakLine({ factory, key, text: 'Hi.', utteranceId: 'warm-up' });
@@ -795,7 +765,7 @@ async function step10WarmUpThenSpeak({ key, tier, args, draw }) {
   check(`warm-up: one discarded 'Hi.' on ${voice.voiceName || voice.voiceId}`, warmProblems.length === 0,
     `${warmProblems.join('; ')} firstAudio=${fmtMs(warm.firstAudioMs)}`);
 
-  const firstName = firstNameOf(persona.name);
+  const firstName = firstNameOf(STAND_IN_NAME);
   const greeting = await speakLine({ factory, key, text: greetingFor(firstName), utteranceId: 'library-greeting' });
   const problems = [];
   if (!greeting.accepted) problems.push('sendText rejected');
@@ -816,7 +786,7 @@ async function step10WarmUpThenSpeak({ key, tier, args, draw }) {
   }
   console.log(`warm-up first audio ${fmtMs(warm.firstAudioMs)}; greeting first audio ${fmtMs(greeting.firstAudioMs)}, `
     + `audio ${Math.round(greeting.audioMs)}ms, wav=${wavPath || '-'}`);
-  check(`speech: library voice ${voice.voiceName || voice.voiceId} as ${persona.name}`, problems.length === 0,
+  check(`speech: library voice ${voice.voiceName || voice.voiceId} as ${STAND_IN_NAME}`, problems.length === 0,
     problems.join('; '));
   console.log(`WAV file in ${args.out}`);
 }

@@ -332,7 +332,7 @@ export async function runBenchmark(options) {
       let turnIndex = null;
       try {
         session = await createSession(config);
-        const instructions = buildInterviewerInstructions({ persona: scenario.persona, brief, plan, history: scenario.history });
+        const instructions = buildInterviewerInstructions({ persona: scenario.persona, brief, plan, history: scenario.history, targetMinutes: scenario.targetMinutes, wrapUpMinutes: scenario.wrapUpMinutes });
         await bounded(timeoutMs, signal => session.start({ instructions, signal }));
         for (turnIndex = 0; turnIndex < scenario.turns.length; turnIndex += 1) {
           const item = scenario.turns[turnIndex];

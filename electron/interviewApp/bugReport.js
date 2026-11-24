@@ -54,6 +54,11 @@ const isoTime = (value) => {
   const date = new Date(value);
   return Number.isFinite(value) && !Number.isNaN(date.getTime()) ? date.toISOString() : 'unknown';
 };
+const TIMING_LABELS = { precheckMs: 'setup before the ring', setupLeadMs: 'recording trimmed before the answer (includes the ready and ringing screens)', finalizeMs: 'wrap-up' };
+/** The call's stored timings with plain labels and seconds; the stored key names stay as they are. */
+const timingsText = timings => Object.entries(timings)
+  .filter(([, value]) => Number.isFinite(value))
+  .map(([key, value]) => `${TIMING_LABELS[key] ?? key} ${seconds(value)}`).join(' · ');
 const seconds = ms => (Number.isFinite(ms) && ms >= 0 ? `${Math.round(ms / 1000)}s` : 'unknown');
 const code = (value, pattern = /^[A-Za-z0-9_.:-]{1,80}$/u) => (typeof value === 'string' && pattern.test(value) ? value : null);
 
@@ -307,7 +312,7 @@ function practiceCallsSection({ calls, windowEvents, logStats, now }) {
         + ` · feedback skipped ${yes(record.feedbackSkipped)} · recording ${call.hasAudio ? 'kept' : record.recordingPruned ? 'pruned' : 'none'}`
       : '- Record: none (the call never reached its record: a setup that failed, a missed call, or a call still running).');
     if (record?.timings && Object.keys(record.timings).length) {
-      out.push(`- Timings: ${Object.entries(record.timings).map(([key, value]) => `${key} ${Math.round(value)}`).join(' · ')}`);
+      out.push(`- Timings: ${timingsText(record.timings)}`);
     }
     out.push(analysis
       ? `- Review: ${code(analysis.status) || 'unknown'}${analysis.tooShort ? ' (too short to review)' : ''} · ${count(analysis.chapters)} chapter(s) · feedback ${yes(analysis.hasFeedback)}`

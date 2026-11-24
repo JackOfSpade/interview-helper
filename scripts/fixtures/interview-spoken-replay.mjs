@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { buildInterviewAnswerEvidence, INTERVIEW_ANSWER_QUESTION_CATALOG, interviewAnswerBankApplicationDigest } from '../../electron/ipc/interviewAnswerBank.js';
+import { buildInterviewAnswerEvidence, interviewAnswerBankApplicationDigest } from '../../electron/ipc/interviewAnswerBank.js';
+import { legacyQuestionEntry } from '../../electron/ipc/interviewCardKinds.js';
+import { interviewQuestionFailure } from '../../electron/ipc/interviewQuestionText.js';
 import { deriveInterviewResumeConsistency } from '../../electron/ipc/interviewResumeCoverage.js';
 
 const data = JSON.parse(fs.readFileSync(new URL('./interview-spoken-replay.json', import.meta.url), 'utf8'));
@@ -54,14 +56,19 @@ export function interviewSpokenReplayFixture() {
   const responses = structuredClone(data.responses).map(({ recordedStep, cards }) => {
     // Retain the twelve-card replay shape while exercising the now-required
     // honest introduction fallback. The other recorded claim failures remain.
-    const introIntent = INTERVIEW_ANSWER_QUESTION_CATALOG[0];
+    const introIntent = legacyQuestionEntry('Tell me about yourself.');
     const source = data.sources.find(item => item.key === 'source-07');
     const headline = { text: 'I built RPC APIs for the local warehouse database to provide controlled access.',
       evidenceIds: [source.key], quotes: [{ evidenceId: source.key, quote: source.text }] };
-    cards[cards.length - 1] = { id: cards.at(-1).id, question: introIntent.question, variants: [...introIntent.variants],
+    cards[cards.length - 1] = { id: cards.at(-1).id, question: introIntent.question, variants: [...introIntent.variants], set: introIntent.set, kind: introIntent.kind,
       headline, bullets: [], example: structuredClone(headline), thinEvidence: true,
       consistency: { consistentWithResume: false, resumeQuote: '' } };
     for (const card of cards) {
+      // The recorded wording is read as the wording the writer chose, with the set and kind the fixed list gave it.
+      const entry = legacyQuestionEntry(card.question);
+      card.set = entry.set; card.kind = entry.kind;
+      // Only variants the question check accepts are kept, as when a card is written (interviewQuestionText.js).
+      card.variants = card.variants.filter(item => !interviewQuestionFailure(item, { set: entry.set }));
       // Historical speech replay has no separately generated optional claims.
       // Explicitly exercise the current sparse-empty handoff representation.
       card.extensions = [];

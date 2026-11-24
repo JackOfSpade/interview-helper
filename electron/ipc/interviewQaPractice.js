@@ -10,12 +10,12 @@
  */
 import crypto from 'node:crypto';
 import { normalizeQuestion } from './interviewQaStore.js';
+import { legacyKindOfQuestion } from './interviewCardKinds.js';
 
 export const PRACTICE_MAX_QUESTIONS = 40;
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const CODE_LENGTH = 20;
 export const PRACTICE_CODE_RE = new RegExp(`^PRACTICE-[${CODE_ALPHABET}]{${CODE_LENGTH}}$`, 'u');
-const INTRO = normalizeQuestion('Tell me about yourself.');
 
 // `question` bounds a planned question the host copies from the plan itself (it is never the model's own text), so it is generous.
 const LIMITS = Object.freeze({
@@ -40,33 +40,48 @@ export const INTERVIEW_PRACTICE_ORDER_SCHEMA = Object.freeze({
   properties: { order: { type: 'array', maxItems: PRACTICE_MAX_QUESTIONS, items: { type: 'integer', minimum: 0, maximum: PRACTICE_MAX_QUESTIONS - 1 } } },
 });
 
-export function interviewPracticeOrderPrompt({ questions, company }) {
-  return `Plan the order an interviewer at ${JSON.stringify(company || 'this company')} would most plausibly ask these questions in one practice interview. Use every question exactly once. Follow a natural interview arc: an introduction first, motivation (why this role/company) early, experience, projects and behavioral questions in the middle, technical or role-specific questions after rapport is built, and closing or reflective questions last. Within each phase, vary the order the way a real interviewer would rather than listing questions in their given order. Return {"order":[index,...]} using the indices below.\nQUESTIONS:\n${JSON.stringify(questions.map((question, index) => ({ index, question })))}`;
+// The questions that are the introduction: those named in `opening`, or, when none is given, those saved in the old introduction wording.
+function introductionIndices(questions, opening) {
+  const marked = Array.isArray(opening) ? new Set(opening.map(normalizeQuestion)) : null;
+  return questions.flatMap((question, index) => ((marked ? marked.has(normalizeQuestion(question)) : legacyKindOfQuestion(question) === 'intro') ? [index] : []));
 }
 
-/** The order must use every index once and never leave the introduction late. */
-export function validatePracticeOrder(value, questions) {
+/**
+ * `opening` lists the questions that are the introduction (the cards the
+ * answer writer marked as kind intro). The interviewer starts with it.
+ */
+export function interviewPracticeOrderPrompt({ questions, company, opening }) {
+  const openers = introductionIndices(questions, opening);
+  return `Plan the order an interviewer at ${JSON.stringify(company || 'this company')} would most plausibly ask these questions in one practice interview. Use every question exactly once. Follow a natural interview arc: an introduction first, motivation (why this role/company) early, experience, projects and behavioral questions in the middle, technical or role-specific questions after rapport is built, and closing or reflective questions last. Within each phase, vary the order the way a real interviewer would rather than listing questions in their given order. ${openers.length ? `The introduction is index ${openers[0]}: it must come first. ` : ''}Return {"order":[index,...]} using the indices below.\nQUESTIONS:\n${JSON.stringify(questions.map((question, index) => ({ index, question })))}`;
+}
+
+/**
+ * The order must use every index once and never leave the introduction late.
+ * `opening` names the introduction questions; when it is not given, a question
+ * saved in the introduction's old wording is still recognised as one.
+ */
+export function validatePracticeOrder(value, questions, { opening } = {}) {
   const order = Array.isArray(value?.order) ? value.order : null;
   if (!order) throw new Error('order-shape: return {"order":[...]} with every index once.');
   const indices = new Set(order);
   if (order.length !== questions.length || indices.size !== questions.length || order.some(index => !Number.isInteger(index) || index < 0 || index >= questions.length)) {
     throw new Error(`order-permutation: use each index 0..${questions.length - 1} exactly once.`);
   }
-  const intro = questions.findIndex(question => normalizeQuestion(question) === INTRO);
+  const intro = introductionIndices(questions, opening)[0] ?? -1;
   if (intro >= 0 && order[0] !== intro) throw new Error(`order-intro: the introduction (index ${intro}) must be asked first.`);
   return order;
 }
 
-export async function planInterviewPracticeOrder({ questions, company, callText, signal }) {
+export async function planInterviewPracticeOrder({ questions, opening, company, callText, signal }) {
   const byKey = new Map();
   for (const item of questions) if (typeof item === 'string' && item.trim() && !byKey.has(normalizeQuestion(item))) byKey.set(normalizeQuestion(item), item.trim());
   const unique = [...byKey.values()].slice(0, PRACTICE_MAX_QUESTIONS);
   if (unique.length < 2) return unique;
-  const reply = await callText(interviewPracticeOrderPrompt({ questions: unique, company }), {
+  const reply = await callText(interviewPracticeOrderPrompt({ questions: unique, company, opening }), {
     signal, task: 'interview-qa-practice', claudeStage: 'qa-practice-order', responseSchema: INTERVIEW_PRACTICE_ORDER_SCHEMA,
-    responseValidator: value => validatePracticeOrder(value, unique),
+    responseValidator: value => validatePracticeOrder(value, unique, { opening }),
   });
-  return validatePracticeOrder(reply, unique).map(index => unique[index]);
+  return validatePracticeOrder(reply, unique, { opening }).map(index => unique[index]);
 }
 
 /** Put saved order first, then any card the plan does not know yet. */

@@ -380,6 +380,14 @@ test('tags are inserted by code before the named sentences: the words never chan
   const batchPrompt = candidateTagPrompt({ sentences: ['One.', 'Two.'] });
   assert(batchPrompt.includes('in each line') && !batchPrompt.includes('whole line'), 'a batch is told the limit per line');
   assert(prompt.includes('in the whole line') && !prompt.includes('in each line'), 'the single-line wording stays');
+  // No sample tags in the prompt (the model copied them), and the reply format stays plain.
+  for (const text of [prompt, batchPrompt]) {
+    assert(!/\[[a-z][a-z -]*\]/u.test(text.split('<conversation-so-far>')[0].replace(/\[<tag>\]/gu, '')), 'the instructions hold no sample tag');
+    for (const sample of ['warmly', 'engaged', 'thoughtful', 'matter-of-fact', 'brightening', 'earnest', 'light laugh', 'slightly slower', 'laugh']) assert(!text.includes(sample), `the sample "${sample}" is gone`);
+    assert(text.includes('<sentence number>: [<tag>]') && text.includes('output "none"') && /never a sigh, groan, gasp or yawn/u.test(text), 'the format, the none reply and the professional-sounds rule stay');
+    assert(/a feeling, an energy, a pace or a small human sound/u.test(text), 'a tag is described by kind');
+    assert(/a small human sound only when the moment really calls for it/iu.test(text), 'no particular sound is named');
+  }
   const tagged = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => '1: [warmly]' });
   assert.deepEqual(tagged, { text: '[warmly] Thanks for having me.', tagged: true, tags: 1 });
   const retyped = await tagCandidateLine({ text: 'Thanks for having me.', tagText: async () => 'Thank you for having me.' });

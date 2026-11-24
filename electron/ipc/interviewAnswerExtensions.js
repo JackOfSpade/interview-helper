@@ -4,7 +4,8 @@
  */
 import { interviewClaimContent, interviewClaimGuardFailures,
   interviewSpokenWordCount, interviewStandaloneFailures } from './interviewSpokenClaims.js';
-import { isInterviewWhyQuestion, interviewResearchInterestText } from './interviewQuestionFit.js';
+import { cardKind } from './interviewCardKinds.js';
+import { interviewInterestFailures, interviewInterestReason } from './interviewInterest.js';
 
 export const INTERVIEW_EXTENSION_MAX_CHARACTERS = 220;
 export const INTERVIEW_EXTENSION_MAX_WORDS = 18;
@@ -49,11 +50,12 @@ export function validateInterviewExtensionPoint(point, { evidence = [], card, pr
   if (sources.some(source => !source || !['career', 'research'].includes(source.kind))
     || sources.some(source => point.quotes.find(quote => quote.evidenceId === source.id)?.quote !== source.text)) extensionFailure('INTERVIEW_EXTENSION_SOURCE');
   const researchOnly = sources.every(source => source.kind === 'research');
-  if (sources.some(source => source.kind === 'research') && (!researchOnly || !isInterviewWhyQuestion(card?.question))) extensionFailure('INTERVIEW_EXTENSION_RESEARCH');
-  const researchFact = interviewResearchInterestText(point.text);
-  const interest = researchOnly && researchFact !== undefined && !/\b(?:I|we|my|our|me|us)\b/iu.test(researchFact);
-  if (researchOnly && /\b(?:I|we|my|our|me|us)\b/iu.test(point.text) && !interest) extensionFailure('INTERVIEW_ANSWER_RESEARCH_AGENCY');
-  const grounded = interest ? { ...point, text: researchFact } : point;
+  if (sources.some(source => source.kind === 'research') && (!researchOnly || cardKind(card) !== 'motivation')) extensionFailure('INTERVIEW_EXTENSION_RESEARCH');
+  // A research-only point that speaks as "I" or "we" must be a plain statement
+  // of interest; its research reason is what the claim guards ground.
+  const speaksAsCandidate = researchOnly && /\b(?:I|we|my|our|me|us)\b/iu.test(point.text);
+  if (speaksAsCandidate && interviewInterestFailures(point.text, sources).length) extensionFailure('INTERVIEW_ANSWER_RESEARCH_AGENCY');
+  const grounded = speaksAsCandidate ? { ...point, text: interviewInterestReason(point.text) } : point;
   const failures = interviewClaimGuardFailures(grounded, sources, undefined, evidence);
   if (failures.length) extensionFailure(failures[0].rule);
   if (interviewStandaloneFailures(point.text).length || interviewClaimContent(grounded.text).length < 2) extensionFailure('INTERVIEW_EXTENSION_CONCRETE');

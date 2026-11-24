@@ -4,8 +4,8 @@
  */
 const SENTENCES = new Intl.Segmenter('en', { granularity: 'sentence' });
 const WORDS = /[\p{L}]+(?:\+\+|#|\*)?|\d+(?:[.,]\d+)*|[%$£€]/gu;
-const FUNCTION_WORDS = new Set(('a an the i we my our me us it its they their them he she his her this that these those and or but so as at by for from in into of on to with without through between against than until while which who whom what when where how each all some others another other one both also then there had has have having be been being am is are was were do did does can could would should will may might not no never only already about over under up out before after more most such per very own together solo co closely correctly example work job approach strength strengths experience taking').split(' '));
-const NUMBER_WORDS = new Map(Object.entries({ zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20', thirty: '30', forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80', ninety: '90', hundred: '100', thousand: '1000', million: '1000000', billion: '1000000000' }));
+export const FUNCTION_WORDS = new Set(('a an the i we my our me us it its they their them he she his her this that these those and or but so as at by for from in into of on to with without through between against than until while which who whom what when where how each all some others another other one both also then there had has have having be been being am is are was were do did does can could would should will may might not no never only already about over under up out before after more most such per very own together solo co closely correctly example work job approach strength strengths experience taking').split(' '));
+export const NUMBER_WORDS = new Map(Object.entries({ zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20', thirty: '30', forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80', ninety: '90', hundred: '100', thousand: '1000', million: '1000000', billion: '1000000000' }));
 const ROOTS = new Map();
 for (const group of [
   'build built building', 'choose chose chosen choosing', 'design designed designing',
@@ -41,11 +41,11 @@ for (const group of [
   'preserve preserved preserves preserving',
 ]) for (const form of group.split(' ')) ROOTS.set(form, group.split(' ')[0]);
 
-function rawTokens(value) {
+export function rawTokens(value) {
   // Possessive punctuation does not introduce an extra content noun "s".
   return String(value || '').normalize('NFKC').replace(/(?<=\p{L})['’]s\b/gu, '').match(WORDS) || [];
 }
-function root(value) {
+export function root(value) {
   const word = value.toLowerCase();
   if (ROOTS.has(word)) return ROOTS.get(word);
   if (NUMBER_WORDS.has(word)) return NUMBER_WORDS.get(word);
@@ -96,7 +96,7 @@ function quantities(value) {
   return result;
 }
 // "didn't" / "wasn’t" carry the same limitation as "did not" / "was not".
-const decontract = value => String(value || '').normalize('NFKC')
+export const decontract = value => String(value || '').normalize('NFKC')
   .replace(/\b(can)['’]t\b/giu, '$1 not').replace(/\bwon['’]t\b/giu, 'will not').replace(/(?<=\p{L})n['’]t\b/giu, ' not');
 function negativePredicates(value) {
   return [...decontract(value).matchAll(/\b(?:did not|does not|do not|never|not|failed to)\s+(?:\w+ly\s+)?([\p{L}]+)/giu)].map(match => root(match[1]));

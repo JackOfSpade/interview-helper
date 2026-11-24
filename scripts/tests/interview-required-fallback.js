@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { assert } from './testHelpers.js';
 import { interviewRequiredFallbackCandidates, interviewWhyFallbackCandidates } from '../../electron/ipc/interviewRequiredFallback.js';
-import { buildInterviewAnswerEvidence, inspectInterviewAnswerCards, INTERVIEW_ANSWER_QUESTION_CATALOG,
+import { buildInterviewAnswerEvidence, inspectInterviewAnswerCards,
   interviewAnswerBankApplicationDigest } from '../../electron/ipc/interviewAnswerBank.js';
+import { INTERVIEW_LEGACY_QUESTION_CATALOG } from '../../src/utils/interviewAnswerQuestions.js';
 
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 function contextFixture(text = 'I built an internal reporting hub. I tested the reporting workflow.') {
@@ -21,7 +22,7 @@ function contextFixture(text = 'I built an internal reporting hub. I tested the 
 function cardFixture(context, question = 'Walk me through a project.') {
   const source = buildInterviewAnswerEvidence(context).find(item => item.kind === 'career');
   const claim = text => ({ text, evidenceIds: [source.id], quotes: [{ evidenceId: source.id, quote: source.text }] });
-  const catalog = INTERVIEW_ANSWER_QUESTION_CATALOG.find(item => item.question === question);
+  const catalog = INTERVIEW_LEGACY_QUESTION_CATALOG.find(item => item.question === question);
   return { id: 'required-answer', question, variants: [...catalog.variants], thinEvidence: false,
     headline: claim('I built 900 reporting hubs.'),
     bullets: [{ stage: 'point', ...claim('I tested the reporting workflow.') }],
@@ -30,7 +31,7 @@ function cardFixture(context, question = 'Walk me through a project.') {
 
 export default [
   {
-    name: 'interview why fallback: reviewed interest frames stay bound to the role or company question and prefer the own draft',
+    name: 'interview why fallback: a pooled reason must itself be a plain statement of interest or fact, and the card\'s own reason leads',
     run() {
       const context = contextFixture();
       context.brief.companyFacts = [{ sourceId: 'synthetic-research', sourceUrl: 'https://example.test/about',
@@ -39,23 +40,22 @@ export default [
       const research = evidence.find(source => source.kind === 'research');
       const career = evidence.find(source => source.kind === 'career');
       const claim = (source, text) => ({ text, evidenceIds: [source.id], quotes: [{ evidenceId: source.id, quote: source.text }] });
-      for (const subject of ['role', 'company']) {
-        const question = `Why are you interested in this ${subject}?`;
-        const otherSubject = subject === 'role' ? 'company' : 'role';
-        const wrongReason = claim(research, `This ${otherSubject} interests me because ${research.text}`);
+      for (const shape of ['legacy', 'current']) {
+        const card = cardFixture(context, 'Why are you interested in this role?');
+        if (shape === 'current') Object.assign(card, { set: 'posting', kind: 'motivation', question: 'What draws you to this role?', variants: ['Why does this position appeal to you?'] });
         const connection = claim(career, 'I tested the reporting workflow.');
-        const card = cardFixture(context, question); card.bullets = []; card.example = connection;
-        const reviewed = [wrongReason, connection];
-        assert(interviewWhyFallbackCandidates(card, context, reviewed).length === 0,
-          `a reason approved for the ${otherSubject} question cannot silently answer the ${subject} question`);
-        const ownReason = claim(research, `This ${subject} interests me because ${research.text}`);
+        card.bullets = []; card.example = connection;
+        // A reason that speaks of the candidate's past, or as the company, is never pooled.
+        const unsafe = [claim(research, `I built ${research.text}`), claim(research, `This role interests me because we build ${research.text}`)];
+        assert(interviewWhyFallbackCandidates(card, context, [...unsafe, connection]).length === 0, `${shape}: a reason that fails the interest rule cannot answer the question`);
+        const ownReason = claim(research, `I am drawn to this role because ${research.text}`);
         card.bullets = [{ stage: 'point', ...ownReason }];
-        const candidates = interviewWhyFallbackCandidates(card, context, [...reviewed, claim(research, research.text)]);
-        assert(candidates.length && candidates[0].bullets[0].text === ownReason.text,
-          'the card’s own safe research reason must precede a pooled third-person fact');
-        assert(candidates.every(candidate => !candidate.bullets[0].text.startsWith(`This ${otherSubject} interests me because`)
-          && inspectInterviewAnswerCards([candidate], context).failures.length === 0),
-        'all candidates retain a matching research reason and every factual guard');
+        const candidates = interviewWhyFallbackCandidates(card, context, [...unsafe, connection, claim(research, research.text)]);
+        assert(candidates.length && candidates[0].bullets[0].text === ownReason.text, `${shape}: the card's own safe research reason precedes a pooled third-person fact`);
+        assert(candidates.every(candidate => inspectInterviewAnswerCards([candidate], context).failures.length === 0
+          && candidate.question === card.question && JSON.stringify(candidate.variants) === JSON.stringify(card.variants)
+          && (shape === 'legacy' ? !('kind' in candidate) : candidate.kind === 'motivation' && candidate.set === 'posting')),
+        `${shape}: every candidate keeps the card's identity and passes every factual guard`);
       }
     },
   },
@@ -132,6 +132,35 @@ export default [
       assert(candidates[0].consistency.consistentWithResume && candidates[0].consistency.resumeQuote.includes('Tested the reporting workflow.'), 'host recovers genuine complete captured résumé support for the surviving claim');
       const optional = cardFixture(context, 'Describe a challenge you faced.');
       assert(interviewRequiredFallbackCandidates(optional, context).length === 0, 'optional questions never acquire the required-card format exception');
+    },
+  },
+  {
+    name: 'interview required fallback: a current intro keeps its set and kind, and a question that fails the question rule is replaced by a variant that passes',
+    run() {
+      const context = contextFixture();
+      const card = cardFixture(context, 'Tell me about yourself.');
+      Object.assign(card, { set: 'general', kind: 'intro', question: 'Which employers have you worked for in 2019?', variants: ['How did you save $2 million at work?', 'Can you give me a short introduction to your background?', 'Tell me about your journey.'] });
+      const candidates = interviewRequiredFallbackCandidates(card, context);
+      assert(candidates.length > 0 && candidates.every(candidate => candidate.kind === 'intro' && candidate.set === 'general'), 'the candidate carries the writer\'s set and kind');
+      assert(candidates.every(candidate => candidate.question === 'Can you give me a short introduction to your background?'
+        && JSON.stringify(candidate.variants) === JSON.stringify(['Tell me about your journey.'])), 'the first wording that passes becomes the question; wording that failed is not kept as a variant');
+      assert(candidates.every(candidate => inspectInterviewAnswerCards([candidate], context).failures.length === 0), 'every candidate passes the validator, question rule included');
+      const noneUsable = { ...card, question: 'How did you cut costs by 40 percent?', variants: ['How did you save $2 million at work?'] };
+      assert(interviewRequiredFallbackCandidates(noneUsable, context).length === 0, 'with no wording that passes there is no fallback, and the required-answer failure applies');
+      const other = { ...card, kind: 'other', set: 'posting' };
+      assert(interviewRequiredFallbackCandidates(other, context).length === 0, 'only the introduction is required of a current card');
+    },
+  },
+  {
+    name: 'interview required fallback: a card with no set or kind keeps its catalog wording and its two required questions',
+    run() {
+      const context = contextFixture();
+      for (const question of ['Tell me about yourself.', 'Walk me through a project.']) {
+        const card = cardFixture(context, question);
+        const candidates = interviewRequiredFallbackCandidates(card, context);
+        assert(candidates.length > 0 && candidates.every(candidate => candidate.question === question && !('set' in candidate)
+          && JSON.stringify(candidate.variants) === JSON.stringify(card.variants)), `${question} falls back with the words it was saved with`);
+      }
     },
   },
 ];

@@ -313,8 +313,9 @@ test('candidate speech after speculation aborts both sessions and the voice and 
   const expectedText = "Candidate: 'I built a scheduler and I tested it'";
   const openerMessage = rig.sessions.opener.calls[1].message;
   const mainMessage = rig.sessions.main.calls[2].message;
-  assert.match(openerMessage, /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] Candidate: 'I built a scheduler and I tested it'$/);
-  assert.match(mainMessage, /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] Candidate: 'I built a scheduler and I tested it'$/); // the acknowledgement was dropped: no marker
+  // Nothing had been written yet (call-mwttebvu): a dropped reply that produced no words is no lost reply, so no note.
+  assert.match(openerMessage, /^\[elapsed \d\d:\d\d\] \[You last said: 'Hello, welcome to the call\.'\] Candidate: 'I built a scheduler and I tested it'$/);
+  assert.match(mainMessage, /^\[elapsed \d\d:\d\d\] Candidate: 'I built a scheduler and I tested it'$/);
   assert(openerMessage.endsWith(expectedText));
   assert.deepEqual(rig.engine.state().transcript.map(entry => entry.speaker), ['interviewer'], 'a discarded turn leaves no transcript entry');
 });
@@ -542,37 +543,38 @@ test('the opener message lists the last four spoken reactions with their speaker
   for (const reaction of reactions) await answerTurn(rig, 'Go on.', reaction);
   const messages = rig.sessions.opener.calls.map(call => call.message);
   assert(!messages[0].includes('recent reactions'), messages[0]);
-  assert(messages[1].includes("[Your recent reactions, do not reuse their words: Interviewer: 'Right.']"), messages[1]);
+  assert(messages[1].includes("[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right.']"), messages[1]);
   assert(messages[5 - 1].includes("Interviewer: 'Right.' Interviewer: 'Mm-hm, okay.' Interviewer: 'Gotcha, fine.' Interviewer: 'Sure, yes.'"), messages[4]);
   assert.equal(rig.of('opener').at(-1).outcome, 'spoken');
   assert(!rig.sessions.main.calls.at(-1).message.includes('recent reactions'), 'only the opener message carries the list');
 });
 
-test('an opener that thanks right after one that did, or starts like a recent one, is dropped without a re-roll', async () => {
+test('an opener that starts like a recent one, or repeats one of its sentences whole, is dropped without a re-roll; case and punctuation do not count', async () => {
   const rig = makeRig();
   await greet(rig);
   await answerTurn(rig, 'Go on.', 'Okay, thank you.');
-  await answerTurn(rig, 'Go on.', 'Sure, thanks for that.');
-  await answerTurn(rig, 'Go on.', 'Ah, lovely.');
+  await answerTurn(rig, 'Go on.', 'OKAY thank you!'); // the same two opening words, case and punctuation aside
   await answerTurn(rig, 'Go on.', 'Okay, got it.');
   await answerTurn(rig, 'Go on.', 'Okay, got it again.'); // same first two words as a recent one
+  await answerTurn(rig, 'Go on.', 'Mm-hm.');
+  await answerTurn(rig, 'Go on.', 'mm-hm');
   await answerTurn(rig, 'Go on.', 'Yeah, fine.');
   assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text]), [
-    ['spoken', 'Okay, thank you.'], ['dropped', 'Sure, thanks for that.'], ['dropped', 'Ah, lovely.'], ['spoken', 'Okay, got it.'], ['dropped', 'Okay, got it again.'], ['spoken', 'Yeah, fine.'],
+    ['spoken', 'Okay, thank you.'], ['dropped', 'OKAY thank you!'], ['spoken', 'Okay, got it.'], ['dropped', 'Okay, got it again.'], ['spoken', 'Mm-hm.'], ['dropped', 'mm-hm'], ['spoken', 'Yeah, fine.'],
   ]);
-  assert.equal(rig.sessions.opener.calls.length, 6, 'no re-roll');
+  assert.equal(rig.sessions.opener.calls.length, 7, 'no re-roll');
 });
 
-test('an opener that reuses a longer word of a recent reaction, in any ending, is dropped; short sounds stay free', async () => {
+test('an opener is never dropped for a word of a recent reaction, in any ending: the reaction writer is told its recent reactions, and no word list or stemming decides here', async () => {
   const rig = makeRig();
   await greet(rig);
   await answerTurn(rig, 'Go on.', 'Okay, all followed.');
   await answerTurn(rig, 'Go on.', 'Right, I follow you.'); // follow / followed
-  await answerTurn(rig, 'Go on.', 'Mm-hm, okay.'); // okay is a short sound
+  await answerTurn(rig, 'Go on.', 'Mm-hm, okay.');
   await answerTurn(rig, 'Go on.', 'Sure, happy to.');
   await answerTurn(rig, 'Go on.', 'Glad, happy to.');
   assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text]), [
-    ['spoken', 'Okay, all followed.'], ['dropped', 'Right, I follow you.'], ['spoken', 'Mm-hm, okay.'], ['spoken', 'Sure, happy to.'], ['dropped', 'Glad, happy to.'],
+    ['spoken', 'Okay, all followed.'], ['spoken', 'Right, I follow you.'], ['spoken', 'Mm-hm, okay.'], ['spoken', 'Sure, happy to.'], ['spoken', 'Glad, happy to.'],
   ]);
 });
 
@@ -586,17 +588,19 @@ test('an opener may reuse "right": it is a listening sound, not a word to vary (
 });
 
 test('an opener whose later sentence repeats a recent reaction is cut there, and what came before is still said', async () => {
-  // Call of 2026-11-22: "Right. That's followed." was dropped whole after "Yep, followed.", leaving 3.1 s of silence.
+  // Call of 2026-11-22: a reaction was dropped whole for one repeated word, and the interviewer was silent 3.1 s instead of
+  // about 1.7 s while the main reply was written. Only a whole repeated sentence cuts a reaction now, and what is before it is said.
   const rig = makeRig();
   await greet(rig);
   await answerTurn(rig, 'Go on.', 'Yep, followed.');
-  const stream = await answerTurn(rig, 'Go on.', 'Right. That\'s followed.');
-  await answerTurn(rig, 'Go on.', 'All followed. Right.');
+  const stream = await answerTurn(rig, 'Go on.', 'Right. Yep, followed.');
+  await answerTurn(rig, 'Go on.', 'That\'s followed. Right.');
   assert.deepEqual(rig.of('opener').map(event => [event.outcome, event.text, event.cutFrom]), [
-    ['spoken', 'Yep, followed.', undefined], ['spoken', 'Right.', 'Right. That\'s followed.'], ['dropped', 'All followed. Right.', undefined],
+    ['spoken', 'Yep, followed.', undefined], ['spoken', 'Right.', 'Right. Yep, followed.'], ['spoken', 'That\'s followed.', 'That\'s followed. Right.'],
   ]);
   assert(stream.texts.join(' ').startsWith('Right.') && !stream.texts.join(' ').includes('followed'), stream.texts.join(' | '));
   assert(rig.sessions.main.calls.at(-2).message.includes("started your reply out loud with: 'Right.'"), 'the main reply carries on from what was said');
+  assert(rig.sessions.main.calls.at(-1).message.includes("started your reply out loud with: 'That's followed.'"), 'a cut first sentence is not the end of the reaction: the rest is judged on its own');
 });
 
 test('listen from main after a finished line: the opener reaction is not spoken, nothing plays, the line stays unconsumed', async () => {
@@ -1139,7 +1143,7 @@ test('silence prompt fires after the limit, restarts after each interviewer utte
   await rig.clock.advance(1);
   // Nothing was said, so no acknowledgement is spoken before a silence check-in.
   assert.equal(rig.sessions.opener.calls.length, 0);
-  assert.equal(rig.sessions.main.calls[1].message, '[elapsed 00:20] [candidate silent 20s, check 1 of 3]');
+  assert.equal(rig.sessions.main.calls[1].message, '[elapsed 00:20] [candidate silent 20s, check 1]');
   rig.sessions.main.answer('Still with me?');
   rig.streams[1].audio(500);
   await flush();
@@ -1150,7 +1154,7 @@ test('silence prompt fires after the limit, restarts after each interviewer utte
   assert.equal(rig.sessions.main.calls.length, 2);
   await rig.clock.advance(1);
   assert.equal(rig.sessions.main.calls.length, 3, 'the timer restarts after each interviewer utterance, 20 s later with the default patience');
-  assert.match(rig.sessions.main.calls[2].message, /\[candidate silent 40s, check 2 of 3\]/, 'the real cumulative silence is reported');
+  assert.match(rig.sessions.main.calls[2].message, /\[candidate silent 40s, check 2\]/, 'the real cumulative silence is reported');
 
   const quiet = makeRig();
   await greet(quiet);
@@ -1180,21 +1184,28 @@ test('pause blocks every check-in and the silence ending, however long the clock
 test('pause also holds the silence ending after the checks were already used', async () => {
   const rig = makeRig();
   await greet(rig);
-  for (let check = 1; check <= 3; check += 1) {
-    await rig.clock.advance(check === 3 ? 30000 : 20000); // the gaps widen: 20 s, 20 s, 30 s
+  for (let check = 1; check <= 8; check += 1) {
+    await rig.clock.advance(check <= 2 ? 20000 : 30000); // the gaps widen: 20 s, 20 s, then 30 s
     rig.sessions.main.answer('Still there?');
     rig.streams[check].audio(300);
     await flush();
     rig.h.playback(`utt${check + 1}`, 'started');
     rig.h.playback(`utt${check + 1}`, 'finished', 500);
     await flush();
-    if (check === 3) break;
   }
   rig.engine.setPaused(true);
   await rig.clock.advance(5 * 60 * 1000);
   assert.equal(rig.of('ended').length, 0, 'the line does not drop while paused');
   rig.engine.setPaused(false);
   await rig.clock.advance(60 * 1000);
+  assert.equal(rig.of('ended').length, 0, 'the last check-in comes first');
+  rig.sessions.main.answer('Are you still there?'); // the last check-in
+  rig.streams[9].audio(300);
+  await flush();
+  rig.h.playback('utt10', 'started');
+  rig.h.playback('utt10', 'finished', 500);
+  await flush();
+  await rig.clock.advance(120 * 1000);
   assert.equal(rig.of('ended').length, 1);
   assert.equal(rig.of('ended')[0].cause, 'silence');
 });
@@ -1236,7 +1247,7 @@ test('resume re-arms the silence wait from zero with the same patience and keeps
   assert.equal(rig.sessions.main.calls.length, 2, 'the wait restarted from zero');
   await rig.clock.advance(1);
   assert.equal(rig.sessions.main.calls.length, 3);
-  assert.match(rig.sessions.main.calls[2].message, /check 2 of 3/, 'the count of checks already made is kept');
+  assert.match(rig.sessions.main.calls[2].message, /check 2/, 'the count of checks already made is kept');
 });
 
 test('only the shortcut resumes: speech and chat neither resume nor start a turn', async () => {
@@ -1788,7 +1799,7 @@ test('F1: a typed message before the earlier typed reply commits is merged, in o
   assert.equal(rig.sessions.opener.calls.length, 2);
   assert(rig.sessions.opener.calls[0].signal.aborted, 'the first typed reply was discarded');
   assert.match(rig.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] Candidate \(typed in chat\): 'first message here\nsecond one'$/);
+    /^\[elapsed \d\d:\d\d\] \[You last said: 'Hello, welcome to the call\.'\] Candidate \(typed in chat\): 'first message here\nsecond one'$/, 'the first typed reply had written nothing: no lost-reply note (call-mwttebvu)');
   rig.sessions.opener.answer('Okay.');
   await flush();
   assert.equal(rig.sessions.main.calls[1].message.split('Candidate (typed in chat): ')[1].replace(/ \[You have already started your reply out loud with: .*$/, ''), "'first message here\nsecond one'", 'the first typed turn never started its main reply');
@@ -2235,7 +2246,7 @@ test('F14: the opener restarts at most once, an empty heard text leaves no entry
   whole.h.vad(false);
   await whole.clock.advance(600);
   assert.match(whole.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] \[Your recent reactions, do not reuse their words: Interviewer: 'Right, got it\.'\] Candidate: 'wait what do you mean'$/);
+    /^\[elapsed \d\d:\d\d\] \[You last said: 'Right, got it\. Tell me about the design\. What was hard\?'\] \[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right, got it\.'\] Candidate: 'wait what do you mean'$/);
 });
 
 test('G5: the cancel fallback timer resolves a stop when the helper never reports cancelled', async () => {
@@ -2397,7 +2408,7 @@ test('G6: resuming one millisecond before commit returns to listening and the ne
   rig.h.vad(false);
   await rig.clock.advance(600);
   assert.match(rig.sessions.opener.calls[1].message,
-    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] \[Your recent reactions, do not reuse their words: Interviewer: 'Right\.'\] Candidate: 'I built a scheduler and tested it'$/);
+    /^\[elapsed \d\d:\d\d\] \[Your previous reply was not spoken: the candidate was still talking\.\] \[You last said: 'Hello, welcome to the call\.'\] \[Your recent reactions, do not repeat any of them or how they open: Interviewer: 'Right\.'\] Candidate: 'I built a scheduler and tested it'$/);
 });
 
 const lengthOf = list => list.reduce((sum, text) => sum + text.length, 0);
@@ -3969,17 +3980,24 @@ test('panel: the acknowledgement is spoken in the floor holder\'s voice and the 
   assert(!rig.sessions.opener.calls.at(-1).message.includes('[You last said:'));
 });
 
-test('a warm reaction is dropped right after another, or for the same warm word, but not for a different one said a while back', async () => {
+test('a reaction is not dropped for a word said minutes ago or in the one before: only an opening or a whole sentence repeated counts', async () => {
   const rig = makeRig();
   await greet(rig);
   await answerTurn(rig, 'Go on.', 'Ah, lovely to meet you.');
   await answerTurn(rig, 'Go on.', 'Mm-hm.');
   await answerTurn(rig, 'Go on.', 'Okay, sure.');
   await answerTurn(rig, 'Go on.', 'Right, thanks for that.'); // heard 2026-11-23: dropped for the "lovely" three reactions back, 3.9 s of silence
-  await answerTurn(rig, 'Go on.', 'Yeah, thank you.'); // right after a thanks
+  await answerTurn(rig, 'Go on.', 'Yeah, thank you.'); // a thanks right after a thanks is for the reaction writer, who is told its recent reactions
   await answerTurn(rig, 'Go on.', 'No worries.');
-  await answerTurn(rig, 'Go on.', 'Oh, thanks.'); // the same warm word again within the last few
-  assert.deepEqual(rig.of('opener').map(event => event.outcome), ['spoken', 'spoken', 'spoken', 'spoken', 'dropped', 'spoken', 'dropped']);
+  await answerTurn(rig, 'Go on.', 'Oh, thanks.');
+  await answerTurn(rig, 'Go on.', 'Oh, thanks.'); // the same reaction again
+  assert.deepEqual(rig.of('opener').map(event => event.outcome), ['spoken', 'spoken', 'spoken', 'spoken', 'spoken', 'spoken', 'spoken', 'dropped']);
+});
+
+test('the reaction guard holds no word list: its source names none of the words the earlier version matched', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../electron/interviewPracticeCallEngine.js', import.meta.url), 'utf8');
+  for (const gone of ['warmWords', 'BACKCHANNEL_WORDS', 'thank you|thanks|lovely', 'allright']) assert.equal(source.includes(gone), false, gone);
 });
 
 test('a candidate who resumes while the acknowledgement is pending discards the turn: no main call, no report, a late answer changes nothing', async () => {
@@ -4256,7 +4274,7 @@ test('when the quiet look listens too, the first silence check comes 10 s after 
   assert.equal(rig.sessions.main.calls.length, before);
   await rig.clock.advance(100); // 10000 ms
   assert.equal(rig.sessions.main.calls.length, before + 1);
-  assert.match(rig.sessions.main.calls.at(-1).message, /\[candidate silent 10s, check 1 of 3\]$/);
+  assert.match(rig.sessions.main.calls.at(-1).message, /\[candidate silent 10s, check 1\]$/);
 });
 
 test('a single unfinished verdict keeps the normal silence check; a wait the interviewer set beats the early one', async () => {
@@ -5337,7 +5355,7 @@ test('wait tag: a wait that arrives after the reply was committed still counts',
   assert.equal(await checkInAt(rig, 50, 'first'), 50);
 });
 
-test('silence: a check-in answered with listen still counts, its wait sets the next gap, and the engine ends the call after check 3', async () => {
+test('silence: a check-in answered with listen still counts, its wait sets the next gap, and the engine ends the call only at its backstop of eight unanswered checks', async () => {
   const options = [];
   const rig = makeRig({ createParser: patienceParser, formatTurn: option => { options.push(option); return `[candidate silent ${Math.round((option.silenceMs ?? 0) / 1000)}s]`; } });
   await greet(rig);
@@ -5351,11 +5369,83 @@ test('silence: a check-in answered with listen still counts, its wait sets the n
   assert.equal(await checkInAt(rig, 45, 'third'), 175);
   assert.equal(options.filter(item => item.silenceCheck === 3).length, 1);
   await answerCheckIn(rig, 'Hello?');
+  assert.deepEqual(rig.of('ended'), [], 'the third check no longer ends the call');
+  // What each check-in is for is the interviewer's choice: the engine asks for four more and drops the line only after the eighth.
+  for (let check = 4; check <= 8; check += 1) {
+    const before = rig.sessions.main.calls.length;
+    await rig.clock.advance(60000); // the gaps are 45 s at most here
+    assert.equal(rig.sessions.main.calls.length, before + 1, `check ${check} is asked`);
+    await answerCheckIn(rig, 'Are you there?');
+    assert.deepEqual(rig.of('ended'), [], `after check ${check}`);
+  }
+  assert.deepEqual(options.filter(item => item.silenceMs !== null && item.silenceMs !== undefined).map(item => item.silenceCheck), [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(options.some(item => item.lastCall), false, 'none of the eight is marked as the last');
+  // At the backstop the interviewer is asked once more, told it is the last, so it can close the call in words.
+  await rig.clock.advance(60000);
+  assert.deepEqual(rig.of('ended'), [], 'the line is not dropped before the interviewer has had its last turn');
+  assert.equal(rig.sessions.main.calls.length, 11, 'one last check-in message');
+  assert.equal(options.filter(item => item.lastCall).length, 1);
+  assert.equal(options.at(-1).lastCall, true);
+  await answerCheckIn(rig, 'Are you still there? I will have to let you go.');
   assert.deepEqual(rig.of('ended'), []);
   await rig.clock.advance(120000);
-  assert.deepEqual(rig.of('ended'), [{ type: 'ended', reason: 'interviewer', cause: 'silence' }]);
+  assert.deepEqual(rig.of('ended'), [{ type: 'ended', reason: 'interviewer', cause: 'silence' }], 'only a quiet that outlasts the last check-in drops the line');
   assert.equal(rig.engine.state().phase, 'ended');
-  assert.equal(rig.sessions.main.calls.length, 5, 'no fourth check-in message');
+  assert.equal(rig.sessions.main.calls.length, 11, 'no tenth check-in message');
+});
+
+test('silence: a call that has been quiet for ten minutes in all gets one last check-in, and the line drops only if that stays unanswered, whatever the interviewer waited for', async () => {
+  const options = [];
+  const rig = makeRig({ createParser: patienceParser, formatTurn: option => { options.push(option); return `[candidate silent ${Math.round((option.silenceMs ?? 0) / 1000)}s]`; } });
+  await greet(rig);
+  await deliver(rig, 'Take your time with this one.<wait s="300"/>');
+  assert.equal(await checkInAt(rig, 300, 'first'), 300);
+  rig.sessions.main.answer('<listen/><wait s="300"/>', { chunks: ['<listen/><wait s="300"/>'] });
+  await flush();
+  const calls = rig.sessions.main.calls.length;
+  await rig.clock.advance(299999);
+  assert.deepEqual(rig.of('ended'), [], 'not before the ten minutes are up');
+  assert.equal(rig.sessions.main.calls.length, calls);
+  await rig.clock.advance(1);
+  assert.deepEqual(rig.of('ended'), [], 'the interviewer is asked once more first');
+  assert.equal(rig.sessions.main.calls.length, calls + 1);
+  assert.equal(options.at(-1).lastCall, true);
+  // It waits for a long time again, which does not hold the line: the last check-in has only a short wait.
+  rig.sessions.main.answer('<listen/><wait s="300"/>', { chunks: ['<listen/><wait s="300"/>'] });
+  await flush();
+  await rig.clock.advance(30000);
+  assert.deepEqual(rig.of('ended'), [{ type: 'ended', reason: 'interviewer', cause: 'silence' }]);
+  assert.equal(rig.sessions.main.calls.length, calls + 1, 'no further check-in is asked');
+
+  // Closing the call in words at the last check-in is the way it is meant to go.
+  const closing = makeRig({ createParser: patienceParser });
+  await greet(closing);
+  await deliver(closing, 'Take your time with this one.<wait s="300"/>');
+  assert.equal(await checkInAt(closing, 300, 'first'), 300);
+  closing.sessions.main.answer('<listen/><wait s="300"/>', { chunks: ['<listen/><wait s="300"/>'] });
+  await flush();
+  await closing.clock.advance(300000);
+  assert.equal(closing.sessions.main.calls.length, calls + 1);
+  closing.sessions.main.answer('It sounds as if the line has gone, so I will let you go. Goodbye.<end-call/>');
+  closing.streams[closing.streams.length - 1].audio(300);
+  await flush();
+  await playOut(closing);
+  assert.equal(closing.of('ended').length, 1, 'ended by the interviewer\'s own farewell');
+  assert.notEqual(closing.of('ended')[0].cause, 'silence');
+});
+
+test('silence: the interviewer may end the call itself at the very first check-in, so a quiet candidate is not run through a fixed ladder', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await rig.clock.advance(20000);
+  assert.equal(rig.sessions.main.calls.length, 2);
+  rig.sessions.main.answer('I will try you again another time. Goodbye.<end-call/>');
+  rig.streams[1].audio(300);
+  await flush();
+  rig.h.playback('utt2', 'started');
+  rig.h.playback('utt2', 'finished', 800);
+  await flush();
+  assert.deepEqual(rig.of('ended'), [{ type: 'ended', reason: 'interviewer' }], 'ended by the interviewer, not by the backstop');
 });
 
 // A reply that asked nothing (<wait s="N" statement/>): after N s of quiet the interviewer picks the conversation up once,
@@ -5372,7 +5462,7 @@ test('statement: a quiet stretch after a line that asked nothing brings one unco
   await answerCheckIn(rig, 'Did that answer what you were after?');
   assert.equal(rig.engine.state().transcript.filter(item => item.speaker === 'interviewer').at(-1).statement, undefined);
   await checkInAt(rig, 20, 'first check');
-  assert(rig.sessions.main.calls.at(-1).message.includes('check 1 of 3'), rig.sessions.main.calls.at(-1).message);
+  assert(rig.sessions.main.calls.at(-1).message.includes('check 1'), rig.sessions.main.calls.at(-1).message);
 });
 
 test('statement: only one carry-on in a row; a second statement into the quiet is followed by a real check-in', async () => {
@@ -5382,7 +5472,7 @@ test('statement: only one carry-on in a row; a second statement into the quiet i
   assert.equal(await checkInAt(rig, 3, 'carry-on, clamped up to 3 s'), 3);
   await answerCheckIn(rig, 'Happy to say more about it.<wait s="4" statement/>');
   await checkInAt(rig, 4, 'second quiet stretch');
-  assert(rig.sessions.main.calls.at(-1).message.includes('check 1 of 3'), rig.sessions.main.calls.at(-1).message);
+  assert(rig.sessions.main.calls.at(-1).message.includes('check 1'), rig.sessions.main.calls.at(-1).message);
 });
 
 test('statement: the candidate speaking makes the next statement get its carry-on again; a plain wait is still at least 6 s', async () => {
@@ -6639,7 +6729,7 @@ test('live cut-in: a look is dropped silently when the candidate stops, and the 
   assert.equal(mainCalls(rig).length, 3, 'the end of the turn runs on the whole answer');
   const message = mainCalls(rig)[2].message;
   assert(!message.includes(STILL) && message.includes('and that was it'), message);
-  assert(message.includes('Your previous reply was not spoken'));
+  assert(!message.includes('Your previous reply was not spoken'), 'the look wrote nothing, so nothing was lost (call-mwttebvu)');
 });
 
 test('live cut-in: a look that began in a pause is dropped when the pause reaches the speculation point', async () => {
@@ -7365,4 +7455,106 @@ test('watcher: a short follow-up that is not a question, or a reaction that asks
   const asking = watchRig({ createParser: askedParser, autoOpener: false });
   const other = await reactionAfterPlanQuestion(asking, 'Sorry, which one?', '<listen/>');
   assert.equal(other.questionText, 'Sorry, which one?');
+});
+
+// ---- audit of call-mwttebvu-hx0rby ----------------------------------------------------------------------------------
+
+test('call-mwttebvu: a silent pad look dropped because the candidate began speaking is no lost reply', async () => {
+  const rig = padRig();
+  await greet(rig);
+  rig.engine.setPadText('PADCODE_LOOK');
+  await rig.clock.advance(PAD_IDLE);
+  assert.equal(idleTurns(rig).length, 1, 'the look is in flight, not yet answered');
+  rig.h.vad(true);
+  rig.h.transcript('so the next part', 'a', rig.clock.now(), false, rig.clock.now() + 300);
+  await rig.clock.advance(300);
+  assert.equal(rig.of('discarded').at(-1)?.reason, 'resumed');
+  rig.h.vad(false);
+  await rig.clock.advance(2500);
+  const turn = rig.options.filter(option => typeof option.candidateText === 'string' && option.candidateText).at(-1);
+  assert(turn, 'the candidate\'s line reached the interviewer');
+  assert(!turn.notSpoken, 'nothing had been written, so no reply was lost');
+});
+
+test('call-mwttebvu: a dropped look that had words to speak still says the reply was not spoken', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await speculate(rig);
+  rig.sessions.opener.answer('Right.');
+  await flush();
+  rig.sessions.main.answer('Why?');
+  rig.streams[1].audio(300);
+  await rig.clock.advance(599);
+  rig.h.vad(true);
+  await rig.clock.advance(5);
+  rig.h.transcript('and tested it', 'b', rig.clock.now());
+  await rig.clock.advance(200);
+  rig.h.vad(false);
+  await rig.clock.advance(600);
+  assert.match(rig.sessions.opener.calls[1].message, /Your previous reply was not spoken/u);
+});
+
+test('call-mwttebvu: the reply\'s wait is logged as applied, with whether it was a statement', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'We run blameless post-mortems.<wait s="5" statement/>');
+  assert.deepEqual(rig.of('wait').map(item => ({ seconds: item.seconds, statement: item.statement })), [{ seconds: null, statement: false }, { seconds: 5, statement: true }], 'the greeting wrote no wait (seconds null: the default applies), the reply wrote one');
+  const other = makeRig();
+  await greet(other);
+  await deliver(other, 'How would you start?<wait s="90"/>');
+  assert.deepEqual(other.of('wait').map(item => ({ seconds: item.seconds, statement: item.statement })), [{ seconds: null, statement: false }, { seconds: 90, statement: false }]);
+});
+
+test('call-mwttebvu: the watcher gets the shared screen once, and again only when it changes', async () => {
+  const rig = watchRig({ createParser: screenParser, thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  await rig.clock.advance(3000);
+  await watchedAnswer(rig, 'Here is my plan');
+  await rig.clock.advance(3100);
+  assert.equal(watchSent(rig).screen, undefined, 'no screen up, none sent');
+  await watchSays(rig, 'listen');
+  rig.h.vad(false);
+  await deliver(rig, 'Have a look.[[screen:Reverse a list|Reverse a linked list in place.|#0]]');
+  assert.equal(rig.engine.state().screen?.title, 'Reverse a list');
+  const before = watchCalls(rig).length;
+  await watchedAnswer(rig, 'So I would walk the list and flip each pointer');
+  await rig.clock.advance(3100);
+  assert.equal(watchCalls(rig).length, before + 1);
+  assert.deepEqual(watchSent(rig).screen, { title: 'Reverse a list', content: 'Reverse a linked list in place.' });
+  await watchSays(rig, 'listen');
+  await rig.clock.advance(1100);
+  assert.equal(watchCalls(rig).length, before + 2);
+  assert.equal(watchSent(rig).screen, undefined, 'an unchanged screen is not sent again');
+});
+
+test('call-mwttebvu: a look at an injected line still playing gives the sent words up to what was heard, not the recogniser\'s mishearing', async () => {
+  const lines = [];
+  const candidateVoice = {
+    open({ utteranceId, text }) {
+      const line = { utteranceId, text };
+      line.done = new Promise(resolve => { line.finish = resolve; });
+      lines.push(line);
+      return { sampleRate: 24000, onAudio: callback => { line.audioCb = callback; }, onWords: callback => { line.wordsCb = callback; }, cancel() {}, done: line.done };
+    },
+  };
+  const rig = watchRig({ candidateVoice, inject: true, createParser: askedParser, thresholds: { watchTimeoutMs: 5000 } });
+  await greet(rig);
+  rig.engine.typed('Use a queue and process each job in order.', { chatId: 'm1' });
+  await flush();
+  const line = lines[0];
+  line.audioCb(Buffer.alloc(48000 * 4));
+  line.wordsCb(line.text.split(' ').map((word, index) => ({ word, startMs: index * 300, endMs: index * 300 + 280 })));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  rig.h.vad(true);
+  rig.h.transcript('Us a cue and process each jerb in order.', 's1', rig.clock.now(), false, rig.clock.now() + 300);
+  await rig.clock.advance(2900);
+  rig.h.inject(line.utteranceId, 'position', 900);
+  await rig.clock.advance(200);
+  assert(watchCalls(rig).length >= 1, 'the watcher looked while the line was still playing');
+  const heard = watchSent(rig, 0).answerText;
+  assert.equal(heard, 'Use a queue and', heard);
+  assert(!/cue|jerb/u.test(heard), 'the mishearing is not shown');
 });

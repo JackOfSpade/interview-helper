@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  PLAN_ATTEMPTS, PLAN_SCHEMA, buildPlanPrompt, buildPlanRetryPrompt, planCall, validatePlan,
+  PLAN_ATTEMPTS, PLAN_SCHEMA, buildPlanPrompt, buildPlanRetryPrompt, planCall, validatePlan, CALL_MINUTES_MIN, CALL_MINUTES_MAX,
 } from '../../electron/practiceCall/callPlanner.js';
 
 const pool = [
@@ -15,12 +15,13 @@ const voices = [
 ];
 const brief = { company: 'Acme Gadgets', role: 'Widget engineer', summary: 'Builds widgets.', themes: ['caching'], facts: ['Founded in a garage'] };
 const application = { resume: 'RESUME-LINE Built widget pipelines.', coverLetter: 'LETTER-LINE I love gadgets.' };
-const ctx = { pool, voices, targetMinutes: 30 };
+const ctx = { pool, voices };
 
 const goodPlan = () => ({
   interviewKind: 'A hiring-manager screen with one technical segment.',
-  lead: { voice: 'V1', role: 'Engineering manager', temperament: 'warm', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.', interrupting: 'Lets people finish and rarely cuts in.' },
-  panel: [{ voice: 'V2', role: 'Senior engineer', focus: 'caching design', stability: 0.35, room: 0.4, manner: 'Direct and curious.', interrupting: 'Lets people finish and rarely cuts in.' }],
+  callMinutes: 30, wrapUpMinutes: 5,
+  lead: { voice: 'V1', name: 'Ingrid Solberg', role: 'Engineering manager', temperament: 'Patient and encouraging; gives a thin answer room before pressing.', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.', interrupting: 'Lets people finish and rarely cuts in.' },
+  panel: [{ voice: 'V2', name: 'Tevita Fonua', role: 'Senior engineer', focus: 'caching design', joins: 'start', joinMinutes: 0, stability: 0.35, room: 0.4, manner: 'Direct and curious.', interrupting: 'Lets people finish and rarely cuts in.' }],
   questions: [
     { number: 1, askedBy: 'V1', minutes: 8, probes: ['Ask what exactly they built.'] },
     { number: 0, text: 'Tell me about a time a widget shipment went wrong.', askedBy: 'V1', minutes: 5, probes: [] },
@@ -35,6 +36,51 @@ const goodPlan = () => ({
 const check = raw => validatePlan(raw, ctx);
 
 const tests = [
+  {
+    name: 'practice call planner: the planner writes every person\'s name; names are plain, distinct and never the candidate\'s',
+    async run() {
+      // Owner's request, 2026-11-23: names had come from fixed lists of eight, so "Dev" turned up call after call.
+      const ok = validatePlan(goodPlan(), ctx);
+      assert.deepEqual(ok.problems, []);
+      assert.equal(ok.plan.lead.name, 'Ingrid Solberg');
+      assert.equal(ok.plan.panel[0].name, 'Tevita Fonua');
+      const with_ = change => { const plan = goodPlan(); change(plan); return plan; };
+      const problemsOf = (plan, extra = {}) => validatePlan(plan, { ...ctx, ...extra }).problems.join(' | ');
+      assert.match(problemsOf(with_(plan => { delete plan.lead.name; })), /lead\.name must be a string/u);
+      assert.match(problemsOf(with_(plan => { plan.panel[0].name = '  '; })), /panel\[0\]\.name must be at least 1 character/u);
+      assert.match(problemsOf(with_(plan => { plan.lead.name = 'Ingrid'; })), /lead\.name must be a first name and a surname/u);
+      assert.match(problemsOf(with_(plan => { plan.lead.name = 'V1 Solberg2'; })), /lead\.name must be a plain name/u);
+      assert.match(problemsOf(with_(plan => { plan.lead.name = `Ingrid ${'x'.repeat(70)}`; })), /lead\.name is \d+ characters long/u);
+      assert.match(problemsOf(with_(plan => { plan.panel[0].name = 'Tevita solberg'; })), /panel\[0\]\.name "Tevita solberg" shares "solberg" with lead \(Ingrid Solberg\)/u);
+      assert.match(problemsOf(goodPlan(), { candidateName: 'Ingrid Wu' }), /lead\.name "Ingrid Solberg" shares "ingrid" with the candidate/u);
+      assert.match(problemsOf(with_(plan => { plan.lead.name = 'Wei Wu'; }), { candidateName: 'Jack Wu' }), /shares "wu" with the candidate/u, 'a short surname is compared');
+      assert.equal(problemsOf(goodPlan(), { candidateName: 'Jack Wu' }), '');
+      // Small words inside surnames are shared by unrelated people; hyphens and apostrophes are part of a name.
+      assert.equal(problemsOf(with_(plan => { plan.lead.name = 'Pieter van Dijk'; plan.panel[0].name = 'Anna van den Berg'; })), '');
+      assert.equal(problemsOf(with_(plan => { plan.lead.name = "Siobhan O'Connor"; plan.panel[0].name = 'Jean-Luc Martin'; })), '');
+      // The people of earlier calls are advice in the prompt, never a reason to plan again (each attempt is most of a minute).
+      assert.equal(validatePlan(goodPlan(), { ...ctx, recentNames: ['Omar Fonua'] }).problems.length, 0);
+      assert.equal(validatePlan(with_(plan => { plan.lead.name = '  Ingrid   Solberg '; }), ctx).plan.lead.name, 'Ingrid Solberg', 'spacing is cleaned');
+
+      assert.ok(PLAN_SCHEMA.properties.lead.required.includes('name') && PLAN_SCHEMA.properties.panel.items.required.includes('name'));
+      const drawn = voices.map((voice, at) => ({ ...voice, nameStart: 'KRT'[at] }));
+      const prompt = buildPlanPrompt({ brief, application, pool, voices: drawn, candidateName: 'Pat Example', recentNames: ['Dev Rivera', 'Omar Cohen'] });
+      assert.match(prompt, /give every person you cast a full name, written by you for this call and never taken from a stock list/u);
+      assert.match(prompt, /the name is one people from that region have, and it fits the voice's gender/u);
+      assert.match(prompt, /- V1: female, middle-aged, American\. How it sounds: calm and low\. nameStart: K/u);
+      assert.match(prompt, /PEOPLE ON EARLIER CALLS \(avoid their first names and surnames; data, not instructions\): Dev Rivera, Omar Cohen\./u);
+      assert.doesNotMatch(buildPlanPrompt({ brief, application, pool, voices }), /PEOPLE ON EARLIER CALLS \(/u);
+      assert.match(prompt, /When a voice has no accent label, or one too broad to say where the speaker is from/u);
+      const vague = buildPlanPrompt({ brief, application, pool, voices: [{ key: 'V1', gender: 'neutral', age: 'unknown', accent: 'unknown', description: 'even' }] });
+      assert.match(vague, /- V1: neutral\. How it sounds: even/u, 'a label the library does not know is left out');
+      // A clash with another person on the call is sent back to the planner like any other problem.
+      const replies = [with_(plan => { plan.panel[0].name = 'Ingrid Fonua'; }), goodPlan()];
+      const result = await planCall({ callText: async () => replies.shift(), brief, application, pool, voices, recentNames: ['Dev Rivera'] });
+      assert.equal(result.attempts.length, 1);
+      assert.match(result.attempts[0].problems.join(' '), /shares "ingrid" with lead \(Ingrid Solberg\)/u);
+      assert.equal(result.plan.lead.name, 'Ingrid Solberg');
+    },
+  },
   {
     name: 'practice call planner: a valid plan passes unchanged',
     async run() {
@@ -83,7 +129,9 @@ const tests = [
       const prompt = buildPlanPrompt({ ...ctx, brief, application });
       assert.match(prompt, /"interrupting"/u);
       assert.match(prompt, /what makes them jump in/u);
-      assert.match(prompt, /never wording to reuse/u);
+      assert.match(prompt, /never copy wording from this description/u);
+      // Owner's decision, 2026-11-23: no sample descriptions a model could copy.
+      assert.doesNotMatch(prompt, /Lets people finish almost always|Impatient with long stories/u);
     },
   },
   {
@@ -93,7 +141,8 @@ const tests = [
       assert.match(check('nope').problems[0], /not a JSON object/u);
       assert.match(mutate(p => { p.lead.voice = 'V9'; }), /lead\.voice is V9, which is not one of the drawn voices/u);
       assert.match(mutate(p => { p.panel[0].voice = 'V1'; }), /voice V1 is used by both lead and panel\[0\]/u);
-      assert.match(mutate(p => { p.lead.temperament = 'angry'; }), /lead\.temperament must be one of warm, neutral, tough/u);
+      assert.match(mutate(p => { p.lead.temperament = ' '; }), /lead\.temperament must be at least 1 character/u);
+      assert.match(mutate(p => { delete p.lead.temperament; }), /lead\.temperament must be a string/u);
       assert.match(mutate(p => { p.lead.role = ''; }), /lead\.role must be at least 1 character/u);
       assert.match(mutate(p => { p.questions[0].askedBy = 'V3'; }), /questions\[0\]\.askedBy is V3, who is neither the lead nor a panel member/u);
       assert.match(mutate(p => { p.questions[0].number = 99; }), /questions\[0\]\.number is 99, which is not a question number in the pool/u);
@@ -185,7 +234,7 @@ const tests = [
       };
       const controller = new AbortController();
       const started = [];
-      const result = await planCall({ callText, brief, pool, voices, targetMinutes: 30, signal: controller.signal, onAttempt: attempt => { started.push(attempt); throw new Error('a progress listener must not cost the plan'); } });
+      const result = await planCall({ callText, brief, pool, voices, signal: controller.signal, onAttempt: attempt => { started.push(attempt); throw new Error('a progress listener must not cost the plan'); } });
       assert.deepEqual(result.plan, goodPlan());
       assert.deepEqual(started, [1, 2], 'each attempt is announced as it starts');
       assert.equal(result.attempts.length, 1);
@@ -205,7 +254,7 @@ const tests = [
     async run() {
       let calls = 0;
       const callText = async () => { calls += 1; return { nonsense: true }; };
-      await assert.rejects(() => planCall({ callText, brief, pool, voices, targetMinutes: 30 }), error => {
+      await assert.rejects(() => planCall({ callText, brief, pool, voices }), error => {
         assert.equal(error.code, 'plan-failed');
         assert.equal(error.attempts.length, PLAN_ATTEMPTS);
         assert.ok(error.attempts.every(attempt => attempt.problems.length > 0));
@@ -220,18 +269,18 @@ const tests = [
       let calls = 0;
       const controller = new AbortController();
       const callText = async () => { calls += 1; controller.abort(); throw Object.assign(new Error('aborted'), { name: 'AbortError' }); };
-      await assert.rejects(() => planCall({ callText, brief, pool, voices, targetMinutes: 30, signal: controller.signal }), error => error.name === 'AbortError');
+      await assert.rejects(() => planCall({ callText, brief, pool, voices, signal: controller.signal }), error => error.name === 'AbortError');
       assert.equal(calls, 1);
       const early = new AbortController(); early.abort();
       let never = 0;
-      await assert.rejects(() => planCall({ callText: async () => { never += 1; return goodPlan(); }, brief, pool, voices, targetMinutes: 30, signal: early.signal }), error => error.name === 'AbortError');
+      await assert.rejects(() => planCall({ callText: async () => { never += 1; return goodPlan(); }, brief, pool, voices, signal: early.signal }), error => error.name === 'AbortError');
       assert.equal(never, 0);
     },
   },
   {
     name: 'practice call planner: the prompt carries the pool, the voices with keys and only those inputs',
     async run() {
-      const prompt = buildPlanPrompt({ brief, application, pool, voices, targetMinutes: 30, steering: 'Focus on caching.', candidateName: 'Pat Example' });
+      const prompt = buildPlanPrompt({ brief, application, pool, voices, steering: 'Focus on caching.', candidateName: 'Pat Example' });
       for (const item of pool) assert.ok(prompt.includes(`Question ${item.number}: ${item.question}`));
       assert.doesNotMatch(prompt, /PRIVATE-ANSWER/u, 'prepared answers never reach the planner');
       assert.match(prompt, /THE CANDIDATE MAY NOT FIT THIS JOB\..*Never pick, drop, soften or reword a question because of what the application shows/u, 'the plan is the role\'s real interview, not one fitted to the candidate');
@@ -246,29 +295,30 @@ const tests = [
       assert.match(prompt, /realistic, distinct identifiers/u, 'exercise identifiers are realistic');
       assert.match(prompt, /WHOLE pool/u);
       assert.match(prompt, /number 0/u);
-      const empty = buildPlanPrompt({ brief, application: { resume: '', coverLetter: '  ' }, pool, voices, targetMinutes: 30 });
+      const empty = buildPlanPrompt({ brief, application: { resume: '', coverLetter: '  ' }, pool, voices });
       assert.match(empty, /submitted no resume text/u);
       assert.match(empty, /submitted no cover letter text/u);
-      const career = buildPlanPrompt({ brief, application: { resume: 'CAREER-LINE Ran a lab.', coverLetter: '', source: 'career-documents' }, pool, voices, targetMinutes: 30 });
+      const career = buildPlanPrompt({ brief, application: { resume: 'CAREER-LINE Ran a lab.', coverLetter: '', source: 'career-documents' }, pool, voices });
       assert.match(career, /CAREER-LINE Ran a lab\./u);
       assert.match(career, /not a resume tailored to this job/u);
       assert.doesNotMatch(career, /RESUME \(what the candidate submitted/u);
-      const richBrief = buildPlanPrompt({ brief: { company: 'Acme', role: 'Dev', roleSummary: 'RS-TEXT', roleThemes: ['RT-ONE'], companyFacts: ['CF-ONE'], recentContext: [{ text: 'RC-ONE' }] }, pool, voices, targetMinutes: 30 });
+      const richBrief = buildPlanPrompt({ brief: { company: 'Acme', role: 'Dev', roleSummary: 'RS-TEXT', roleThemes: ['RT-ONE'], companyFacts: ['CF-ONE'], recentContext: [{ text: 'RC-ONE' }] }, pool, voices });
       for (const bit of ['RS-TEXT', 'RT-ONE', 'CF-ONE', 'RC-ONE']) assert.ok(richBrief.includes(bit), bit);
       assert.match(prompt, /timesAsked: 3/u);
-      for (const voice of voices) { assert.ok(prompt.includes(`- ${voice.key}: ${voice.name}`)); assert.ok(prompt.includes(voice.description)); }
+      for (const voice of voices) { assert.ok(prompt.includes(`- ${voice.key}: ${voice.gender}`)); assert.ok(!prompt.includes(voice.name), 'a voice comes with no name'); assert.ok(prompt.includes(voice.description)); }
       assert.match(prompt, /Acme Gadgets/u);
       assert.match(prompt, /Focus on caching\./u);
       assert.match(prompt, /Pat Example/u);
-      assert.match(prompt, /about 30 minutes/u);
+      assert.match(prompt, /Decide how long this interview would really run/u, 'the planner is told to choose the length');
+      assert.doesNotMatch(prompt, /about 30 minutes/u);
       assert.match(prompt, /MANNER ONLY/u);
       assert.match(prompt, /make do with them/u);
       assert.doesNotMatch(prompt, /V4|V5/u, 'only the drawn voices are listed');
-      const retry = buildPlanRetryPrompt({ brief, pool, voices, targetMinutes: 30 }, ['x is wrong'], '{"rejected":"RAW-PLAN"}');
+      const retry = buildPlanRetryPrompt({ brief, pool, voices }, ['x is wrong'], '{"rejected":"RAW-PLAN"}');
       assert.match(retry, /- x is wrong/u);
       assert.ok(retry.indexOf('RAW-PLAN') > 0 && retry.indexOf('RAW-PLAN') < retry.indexOf('- x is wrong'), 'the rejected plan comes before the problem list');
-      const long = buildPlanRetryPrompt({ brief, pool, voices, targetMinutes: 30 }, ['y'], 'z'.repeat(70000));
-      assert.ok(long.length < buildPlanPrompt({ brief, pool, voices, targetMinutes: 30 }).length + 61000);
+      const long = buildPlanRetryPrompt({ brief, pool, voices }, ['y'], 'z'.repeat(70000));
+      assert.ok(long.length < buildPlanPrompt({ brief, pool, voices }).length + 61000);
     },
   },
   {
@@ -276,20 +326,20 @@ const tests = [
     async run() {
       const solo = [voices[0]];
       const plan = {
-        interviewKind: 'A short solo call.',
-        lead: { voice: 'V1', role: 'Recruiter', temperament: 'neutral', stability: 0.3, room: 0.1, manner: '', interrupting: 'Lets people finish and rarely cuts in.' },
+        interviewKind: 'A short solo call.', callMinutes: 10, wrapUpMinutes: 2,
+        lead: { voice: 'V1', name: 'Ingrid Solberg', role: 'Recruiter', temperament: 'Even and businesslike.', stability: 0.3, room: 0.1, manner: '', interrupting: 'Lets people finish and rarely cuts in.' },
         panel: [],
         questions: [{ number: 3, askedBy: 'V1', minutes: 5, probes: [] }, { number: 0, text: 'What is your notice period?', askedBy: 'V1', minutes: 2, probes: [] }],
         problems: [],
       };
-      assert.deepEqual(validatePlan(plan, { pool, voices: solo, targetMinutes: 10 }).problems, []);
+      assert.deepEqual(validatePlan(plan, { pool, voices: solo }).problems, []);
       const asked = [];
-      const result = await planCall({ callText: async ({ prompt }) => { asked.push(prompt); return plan; }, brief, pool, voices: solo, targetMinutes: 10 });
+      const result = await planCall({ callText: async ({ prompt }) => { asked.push(prompt); return plan; }, brief, pool, voices: solo });
       assert.deepEqual(result.plan.panel, []);
-      assert.match(asked[0], /- V1: Alex/u);
+      assert.match(asked[0], /- V1: female/u);
       assert.doesNotMatch(asked[0], /V2/u);
-      const two = JSON.parse(JSON.stringify(plan)); two.panel = [{ voice: 'V2', role: 'Peer', focus: 'x', stability: 0.3, room: 0, manner: '', interrupting: 'Lets people finish and rarely cuts in.' }];
-      assert.match(validatePlan(two, { pool, voices: solo, targetMinutes: 10 }).problems.join(' | '), /panel\[0\]\.voice is V2, which is not one of the drawn voices \(V1\)/u);
+      const two = JSON.parse(JSON.stringify(plan)); two.panel = [{ voice: 'V2', name: 'Tevita Fonua', role: 'Peer', focus: 'x', joins: 'start', joinMinutes: 0, stability: 0.3, room: 0, manner: '', interrupting: 'Lets people finish and rarely cuts in.' }];
+      assert.match(validatePlan(two, { pool, voices: solo }).problems.join(' | '), /panel\[0\]\.voice is V2, which is not one of the drawn voices \(V1\)/u);
     },
   },
   {
@@ -298,7 +348,7 @@ const tests = [
       const prompts = [];
       const answers = ['not json at all', JSON.stringify(goodPlan())];
       const callText = async ({ prompt }) => { prompts.push(prompt); return answers.shift(); };
-      const result = await planCall({ callText, brief, application, pool, voices, targetMinutes: 30 });
+      const result = await planCall({ callText, brief, application, pool, voices });
       assert.deepEqual(result.plan, goodPlan());
       assert.match(result.attempts[0].problems[0], /not valid JSON/u);
       assert.ok(prompts[1].includes('not json at all'));
@@ -363,7 +413,7 @@ const tests = [
     name: 'practice call planner: the prompt explains technical topic pool items and shows them like any other item',
     run() {
       const topicPool = [...pool, { number: 4, question: '[Technical topic, not a fixed question] SQL query tuning. If you pick this, make up your own question or hands-on exercise on this topic.', answer: '', timesAsked: 0 }];
-      const prompt = buildPlanPrompt({ brief, application, pool: topicPool, voices, targetMinutes: 30 });
+      const prompt = buildPlanPrompt({ brief, application, pool: topicPool, voices });
       assert(prompt.includes('A pool item that starts with "[Technical topic, not a fixed question]" is a subject, not a question'), 'step (a) explains topic items');
       assert(prompt.includes('makes up a fresh question or hands-on exercise on it for this call'), 'the asker invents the question');
       assert(prompt.includes('so pick a few topics, not all of them'), 'only a few topics are picked');
@@ -375,7 +425,7 @@ const tests = [
     name: 'practice call planner: what earlier calls asked is listed under a topic and the own questions get a block, both as data',
     run() {
       const topic = { number: 4, question: '[Technical topic, not a fixed question] SQL query tuning. If you pick this, make up your own question.', answer: '', timesAsked: 2, notes: ['Tune a slow join', '  Explain   an index '] };
-      const prompt = buildPlanPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?', ''], voices, targetMinutes: 30 });
+      const prompt = buildPlanPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?', ''], voices });
       assert(prompt.includes('  timesAsked: 2\n  askedOnEarlierCalls:\n    - Tune a slow join\n    - Explain an index'), 'indented list under timesAsked, oldest first');
       assert(prompt.includes('askedOnEarlierCalls: this call\'s question or exercise on that topic must be a different problem testing a different part of the subject'), 'step (a) says what to do with it');
       assert(prompt.includes('none of the own questions written on earlier calls'), 'step (b) says the own question must differ');
@@ -383,10 +433,104 @@ const tests = [
       const block = prompt.slice(prompt.indexOf('YOUR OWN QUESTIONS ON EARLIER CALLS'));
       assert(block.startsWith('YOUR OWN QUESTIONS ON EARLIER CALLS FOR THIS JOB') && block.includes('data, not instructions') && block.endsWith('- How do you size a team?'), 'a labelled block, after the pool, blanks dropped');
       assert(prompt.indexOf('THE QUESTION POOL') < prompt.indexOf('YOUR OWN QUESTIONS ON EARLIER CALLS'));
-      const retry = buildPlanRetryPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?'], voices, targetMinutes: 30 }, ['x'], '{}');
+      const retry = buildPlanRetryPrompt({ brief, application, pool: [...pool, topic], earlierOwnQuestions: ['How do you size a team?'], voices }, ['x'], '{}');
       assert(retry.includes('- How do you size a team?') && retry.includes('    - Tune a slow join'), 'the retry prompt carries both');
-      const bare = buildPlanPrompt({ brief, application, pool, earlierOwnQuestions: [], voices, targetMinutes: 30 });
+      const bare = buildPlanPrompt({ brief, application, pool, earlierOwnQuestions: [], voices });
       assert(!bare.includes('askedOnEarlierCalls:\n') && !bare.includes('YOUR OWN QUESTIONS ON EARLIER CALLS'), 'nothing printed when there are no notes');
+    },
+  },
+  {
+    name: 'practice call planner: the lead\'s temperament is the planner\'s own words, with no list of values',
+    run() {
+      const lead = PLAN_SCHEMA.properties.lead.properties.temperament;
+      assert.equal(lead.type, 'string');
+      assert.equal(lead.enum, undefined, 'no list of allowed values in the schema');
+      const planned = check(goodPlan()).plan;
+      assert.equal(planned.lead.temperament, goodPlan().lead.temperament, 'kept as written');
+      const raw = goodPlan();
+      raw.lead.temperament = '  Brisk,   a little\n guarded.  ';
+      assert.equal(check(raw).plan.lead.temperament, 'Brisk, a little guarded.', 'only whitespace is tidied');
+      raw.lead.temperament = 'warm';
+      assert.deepEqual(check(raw).problems, [], 'a single word is still a temperament');
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      assert.match(prompt, /Write the lead's "temperament": a sentence or two, in your own words/u);
+      assert.doesNotMatch(prompt, /temperament \(warm, neutral or tough\)/u);
+    },
+  },
+  {
+    name: 'practice call planner: the planner chooses the call length and when the wrap-up starts, within the stated bounds',
+    run() {
+      const planned = check(goodPlan()).plan;
+      assert.deepEqual([planned.callMinutes, planned.wrapUpMinutes], [30, 5]);
+      const problemsOf = fn => { const p = goodPlan(); fn(p); return check(p).problems.join(' | '); };
+      assert.match(problemsOf(p => { delete p.callMinutes; }), /callMinutes must be a number/u);
+      assert.match(problemsOf(p => { p.wrapUpMinutes = 'soon'; }), /wrapUpMinutes must be a number/u);
+      // A length outside the bounds is clamped (a plan is not thrown away over it); the budgets are checked against it.
+      const long = goodPlan(); long.callMinutes = 400; long.wrapUpMinutes = 90;
+      assert.deepEqual([check(long).plan.callMinutes, check(long).plan.wrapUpMinutes], [CALL_MINUTES_MAX, CALL_MINUTES_MAX / 2]);
+      const short = goodPlan(); short.callMinutes = 1; short.wrapUpMinutes = 0;
+      short.questions.forEach(question => { question.minutes = 1; });
+      assert.deepEqual([check(short).plan.callMinutes, check(short).plan.wrapUpMinutes], [CALL_MINUTES_MIN, 1]);
+      const half = goodPlan(); half.callMinutes = 10; half.wrapUpMinutes = 9; half.questions.forEach(question => { question.minutes = 3; });
+      assert.equal(check(half).plan.wrapUpMinutes, 5, 'never more than half the call');
+      // The question budgets are checked against the plan's own length, not one passed in.
+      const tight = goodPlan(); tight.callMinutes = 10;
+      assert.match(check(tight).problems.join(' | '), /add up to 28, more than 1\.25 times the call length of 10/u);
+      const roomy = goodPlan(); roomy.callMinutes = 25;
+      assert.deepEqual(check(roomy).problems, [], 'the same budgets fit a longer call');
+      assert.deepEqual(validatePlan(goodPlan(), { ...ctx, targetMinutes: 5 }).problems, [], 'a length passed in is ignored');
+      const props = PLAN_SCHEMA.properties;
+      assert(PLAN_SCHEMA.required.includes('callMinutes') && PLAN_SCHEMA.required.includes('wrapUpMinutes'));
+      assert.deepEqual([props.callMinutes.minimum, props.callMinutes.maximum], [5, 60]);
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      assert.match(prompt, /"callMinutes"/u);
+      assert.match(prompt, /the only limits are 5 and 60 minutes, and no length is usual or expected/u);
+      assert.match(prompt, /"wrapUpMinutes"/u);
+      assert.match(prompt, /If the candidate's focus note asks for a length, that is the call length/u);
+      assert.doesNotMatch(prompt, /CALL LENGTH:/u, 'no length is handed to the planner');
+      assert.doesNotMatch(prompt, /ten minute call/u);
+    },
+  },
+  {
+    name: 'practice call planner: each colleague says whether they are there from the start or join late, and about when',
+    run() {
+      const member = PLAN_SCHEMA.properties.panel.items;
+      assert(member.required.includes('joins') && member.required.includes('joinMinutes'));
+      assert.deepEqual(member.properties.joins.enum, ['start', 'late']);
+      assert.equal(PLAN_SCHEMA.properties.lead.properties.joins, undefined, 'the lead is always there');
+      const withMember = change => { const p = goodPlan(); Object.assign(p.panel[0], change); return check(p); };
+      assert.deepEqual([withMember({}).plan.panel[0].joins, withMember({}).plan.panel[0].joinMinutes], ['start', 0]);
+      const late = withMember({ joins: 'late', joinMinutes: 4.5 });
+      assert.deepEqual([late.problems, late.plan.panel[0].joins, late.plan.panel[0].joinMinutes], [[], 'late', 4.5]);
+      assert.equal(withMember({ joins: 'late', joinMinutes: 0 }).plan.panel[0].joinMinutes, 0.5, 'a late arrival is at least half a minute in');
+      assert.equal(withMember({ joins: 'late', joinMinutes: -3 }).plan.panel[0].joinMinutes, 0.5);
+      assert.equal(withMember({ joins: 'late' }).plan.panel[0].joinMinutes, 0.5, 'a late one with no time is still late');
+      assert.equal(withMember({ joins: 'late', joinMinutes: 900 }).plan.panel[0].joinMinutes, 60);
+      assert.deepEqual([withMember({ joins: 'start', joinMinutes: 7 }).plan.panel[0].joins, withMember({ joins: 'start', joinMinutes: 7 }).plan.panel[0].joinMinutes], ['start', 0], 'from the start means no delay');
+      const odd = withMember({ joins: 'whenever', joinMinutes: 'later' });
+      assert.deepEqual([odd.problems, odd.plan.panel[0].joins], [[], 'start'], 'an unreadable choice is read as from the start, not planned again');
+      const missing = goodPlan(); delete missing.panel[0].joins; delete missing.panel[0].joinMinutes;
+      assert.equal(check(missing).plan.panel[0].joins, 'start');
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      assert.match(prompt, /WHEN COLLEAGUES JOIN\. People sometimes join a call late/u);
+      assert.match(prompt, /it is your call, every time/u);
+      assert.match(prompt, /Never state or assume a usual number of late arrivals or a usual time/u);
+      assert.match(prompt, /Whoever asks the first question is there from the start, and nobody arrives later than a quarter of the way through the call/u);
+    },
+  },
+  {
+    name: 'practice call planner: the prompt and schema quote no specific example a model could copy',
+    run() {
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      const schema = JSON.stringify(PLAN_SCHEMA);
+      // Owner's decision, 2026-11-23: describe the kind of thing, never a sample value.
+      for (const sample of [/moon colony/iu, /lunar/iu, /Apollo/iu, /remote river/iu, /bird/iu, /C and C\+\+/u, /Java or Kotlin/u, /home office/u, /meeting room/u, /Lets people finish/u, /Impatient with long stories/u, /ten minute call/u, /such as the manager hiring/u, /such as the background question/u, /american or british/u]) {
+        assert.doesNotMatch(prompt, sample, `the prompt keeps no ${sample}`);
+        assert.doesNotMatch(schema, sample, `the schema keeps no ${sample}`);
+      }
+      // What the rules need stays: things to avoid, and the measured stability bands.
+      assert.match(prompt, /no "one last thing", "to start with", "before we finish"/u);
+      assert.match(prompt, /toward 0\.45 to 0\.6/u);
     },
   },
 ];

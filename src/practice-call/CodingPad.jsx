@@ -106,30 +106,41 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
           while (alive && paused() && !stopped()) await sleep(200);
           return alive && !stopped();
         };
-        // Worked out again before every key, so an edit by the person in between is respected, not overwritten blindly.
+        // The edit is worked out once and typed through. It is worked out again only when the pad is not what the last
+        // key left (the person edited in between), so their edit is respected, and the cursor never jumps to another
+        // place that would give the same text.
         let previous = '';
+        let plan = null;
+        let expected = null;
         for (;;) {
           if (Date.now() - flushedAt >= PAD_TYPING_FLUSH_MS) { flushRef.current(); flushedAt = Date.now(); }
-          const { at, remove, insert } = padEdit(textRef.current, goal);
-          if (!remove && !insert) return true;
-          if (remove) {
+          if (!plan || textRef.current !== expected || (!plan.remove && !plan.insert)) {
+            plan = padEdit(textRef.current, goal);
+            expected = textRef.current;
+          }
+          if (!plan.remove && !plan.insert) return true;
+          if (plan.remove) {
             if (yielding()) return false;
             if (!(await step(DELETE_DELAY_MS))) return false;
-            const now = textRef.current;
-            const cut = at + remove;
+            if (textRef.current !== expected) continue;
+            const cut = plan.at + plan.remove;
             cursorRef.current = cut - 1;
-            editRef.current(`${now.slice(0, cut - 1)}${now.slice(cut)}`);
+            expected = `${expected.slice(0, cut - 1)}${expected.slice(cut)}`;
+            plan = { ...plan, remove: plan.remove - 1 };
+            editRef.current(expected);
             sendFirst();
             continue;
           }
-          const char = insert[0];
+          const char = plan.insert[0];
           // Giving way: the word being typed is finished, then the hands stop.
           if (yielding() && (!previous || WORD_END.test(previous) || WORD_END.test(char))) return false;
           if (!(await step(keyDelayMs(char, previous) * rate))) return false;
+          if (textRef.current !== expected) continue;
           previous = char;
-          const now = textRef.current;
-          cursorRef.current = at + 1;
-          editRef.current(`${now.slice(0, at)}${char}${now.slice(at)}`);
+          cursorRef.current = plan.at + 1;
+          expected = `${expected.slice(0, plan.at)}${char}${expected.slice(plan.at)}`;
+          plan = { at: plan.at + 1, remove: 0, insert: plan.insert.slice(1) };
+          editRef.current(expected);
           sendFirst();
         }
     };

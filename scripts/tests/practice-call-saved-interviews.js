@@ -34,6 +34,14 @@ async function storeAt(options = {}) {
   return { store, rootDir, tick: (ms = 1000) => { at += ms; } };
 }
 
+test('the list shows the call length the planner chose, and an older interview its question budgets', () => {
+  const view = plan => summarizeSavedInterview(entryFor('posting:a', { planned: { plan, ms: 1 } }));
+  assert.equal(view({ ...PLAN, callMinutes: 20, wrapUpMinutes: 4 }).minutes, 20);
+  assert.equal(view(PLAN).minutes, 12, 'kept before the planner chose a length');
+  // Kept with the old temperament word and no join choice: it still summarises.
+  assert.equal(view({ ...PLAN, lead: { ...PLAN.lead, temperament: 'warm' } }).lead.role, 'Hiring Manager');
+});
+
 test('the caps follow the measured sizes: a few per job, a few dozen in all, a byte budget for photos', () => {
   assert.equal(SAVED_PER_JOB, 5);
   assert.equal(SAVED_TOTAL, 40);
@@ -59,6 +67,9 @@ test('an interview is saved with its visuals, read back whole, listed per job an
   assert.deepEqual({ lead: listed.lead, panel: listed.panel, questionCount: listed.questionCount, problemCount: listed.problemCount, minutes: listed.minutes, timesUsed: listed.timesUsed },
     { lead: { name: 'Nora Lead', role: 'Hiring Manager' }, panel: [{ name: 'Ben Second', role: 'Staff Engineer' }], questionCount: 2, problemCount: 1, minutes: 12, timesUsed: 1 });
   assert.equal('planned' in listed, false, 'the list never carries the plan');
+  // The plan names each person since 2026-11-23; the names on the voices are only for interviews kept before that.
+  const named = summarizeSavedInterview({ ...read, planned: { plan: { ...read.planned.plan, lead: { ...read.planned.plan.lead, name: 'Ingrid Solberg' }, panel: [{ ...read.planned.plan.panel[0], name: ' Tevita  Fonua' }] } } });
+  assert.deepEqual([named.lead.name, named.panel[0].name], ['Ingrid Solberg', 'Tevita Fonua']);
   assert.deepEqual((await store.list('posting:b')).map(item => item.id), [other]);
   tick();
   assert.equal(await store.touch(id), true);

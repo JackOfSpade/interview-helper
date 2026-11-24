@@ -7,7 +7,7 @@ import {
   loadInterviewPreparedAnswerBank, publishInterviewPreparedAnswers, publishInterviewPreparedBrief,
   publishTypedJobBundle, registerInterviewPreparationHandlers, validateInterviewBriefAssessment,
 } from '../../electron/ipc/interviewPreparation.js';
-import { answerBankRecordId, buildInterviewAnswerEvidence, INTERVIEW_ANSWER_QUESTION_CATALOG, inspectInterviewAnswerCards, isInterviewAnswerBank } from '../../electron/ipc/interviewAnswerBank.js';
+import { answerBankRecordId, buildInterviewAnswerEvidence, inspectInterviewAnswerCards, isInterviewAnswerBank } from '../../electron/ipc/interviewAnswerBank.js';
 import { canonicalizeGeneratedUntrustedBoundaryNonces } from '../../electron/ipc/nonApiAi.js';
 import { deriveInterviewResumeConsistency, resumeCoverage } from '../../electron/ipc/interviewResumeCoverage.js';
 
@@ -26,6 +26,33 @@ const assessment = { role: { title: 'Engineer', company: 'Example Studio', locat
   roleThemes: ['Release automation'], companyFacts: [{ fact: COMPANY_FACT, sourceUrl: 'https://example.test/about', sourceDate: 'unknown', evidenceQuote: COMPANY_FACT }],
   recentContext: [], likelyQuestions: ['How did you improve release automation?'], questionsToAsk: [], applicationPositioning: [], warnings: [] };
 
+// The writer's own questions, one per card. Cards 2 and 3 ask why, card 11 is the introduction and card 4
+// a project walkthrough (an ordinary card now). Five are general and seven belong to the posting.
+const INTENTS = [
+  ['posting', 'other', 'What else about your approach to release automation should we hear?', ['Is there anything about your background you would like to add?']],
+  ['posting', 'other', 'Which of your experiences fits this engineer role best?', ['What experience could you bring to this role?']],
+  ['posting', 'motivation', 'What draws you to this role?', ['Why does this position appeal to you?']],
+  ['posting', 'motivation', 'Why would you like to work at Example Studio?', ['What interests you about Example Studio as a company?']],
+  ['general', 'other', 'Walk me through a piece of work you are proud of.', ['Describe one piece of work from start to finish.']],
+  ['general', 'problem', 'Tell me about a time something got hard and how you handled it.', ['What is a difficult situation you worked through?']],
+  ['posting', 'priority', 'How do you decide what to do first when releases collide?', ['How do you handle competing demands on your time?']],
+  ['general', 'collaboration', 'How do you work with people who see a problem differently?', ['Describe your approach to teamwork.']],
+  ['general', 'disagreement', 'Describe a time you disagreed with someone you worked with.', ['How do you handle a conflict with a teammate?']],
+  ['posting', 'leadership', 'How do you help the people around you grow?', ['What does supporting teammates look like for you?']],
+  ['posting', 'problem', 'Walk me through how you would approach a messy release problem.', ['What steps do you take when a system misbehaves?']],
+  ['general', 'intro', 'Can you give me a quick introduction to who you are professionally?', ['Tell us a little about your background.']],
+].map(([set, kind, question, variants]) => ({ set, kind, question, variants }));
+// What the writer returns when Prepare writes one tab only: the General tab alone, or the posting's alone.
+// The same twelve cards, each in the one set asked for; the cards that were the introduction and the why cards
+// become ordinary cards of the posting set, and the General tab holds no why card.
+const PLAIN = { 'What draws you to this role?': 'What would you want an interviewer to know about you?', 'Why would you like to work at Example Studio?': 'What are you hoping to find in your next role?' };
+const INTENTS_POSTING_ONLY = INTENTS.map(intent => ({ ...intent, set: 'posting',
+  ...(intent.kind === 'intro' ? { kind: 'other', question: 'Which part of this engineer role would you want to start with?', variants: ['What would you work on first in this role?'] } : {}) }));
+const INTENTS_GENERAL_ONLY = INTENTS.map(intent => ({ ...intent, set: 'general',
+  ...(intent.kind === 'motivation' ? { kind: 'other', question: PLAIN[intent.question], variants: ['What matters most to you in a team?'] } : {}) }));
+
+// The answer set a fixture's writer returns when only one tab is asked for.
+const ONE_TAB = new WeakMap();
 async function fixture(root, { typed = null } = {}) {
   const directory = path.join(root, 'bundle');
   if (!typed) await fs.promises.mkdir(directory);
@@ -39,24 +66,27 @@ async function fixture(root, { typed = null } = {}) {
   const evidence = projection.filter(item => item.kind === 'career');
   const motivation = projection.find(item => item.kind === 'research' && item.text === COMPANY_FACT);
   const statement = (item, text) => ({ text, evidenceIds: [item.id], quotes: [{ evidenceId: item.id, quote: item.text }] });
-  const intents = [INTERVIEW_ANSWER_QUESTION_CATALOG.at(-1), ...INTERVIEW_ANSWER_QUESTION_CATALOG.slice(1, 12)];
-  intents[11] = INTERVIEW_ANSWER_QUESTION_CATALOG[0];
-  const value = { cards: intents.map((intent, index) => {
-    const topic = TOPICS[index]; const item = evidence[index];
-    const why = index === 2 || index === 3;
-    const headline = why ? `This ${index === 2 ? 'role' : 'company'} interests me because ${COMPANY_FACT}`
-      : `I maintained the ${topic} system and created a ${topic} guide.`;
-    const first = `I tested the ${topic} system against a documented checklist.`;
-    const second = index === 11 ? `This role interests me because ${COMPANY_FACT}` : `I reviewed the ${topic} guide with internal staff.`;
-    const example = `I automated the ${topic} status report for internal staff.`;
-    return { id: `card-${index}`, question: intent.question, variants: [...intent.variants], thinEvidence: true, extensions: [],
-      headline: statement(why ? motivation : item, headline), bullets: [first, second].map((text, bullet) => ({ stage: 'point', ...statement(index === 11 && bullet === 1 ? motivation : item, text) })), example: statement(item, example),
-      consistency: { consistentWithResume: true, resumeQuote: item.text } };
-  }) };
-  for (const card of value.cards) {
-    card.consistency = typed ? { consistentWithResume: false, resumeQuote: '' } : deriveInterviewResumeConsistency([card.headline, ...card.bullets, card.example], evidence, bundle.applicationPositioning.resume);
-    assert(typed || card.consistency?.consistentWithResume, 'each synthetic prepared card has a genuine captured résumé match');
-  }
+  const build = intents => {
+    const made = { cards: intents.map((intent, index) => {
+      const topic = TOPICS[index]; const item = evidence[index];
+      const why = intent.kind === 'motivation'; const intro = intent.kind === 'intro';
+      const headline = why ? `This ${index === 2 ? 'role' : 'company'} interests me because ${COMPANY_FACT}`
+        : `I maintained the ${topic} system and created a ${topic} guide.`;
+      const first = `I tested the ${topic} system against a documented checklist.`;
+      const second = intro ? `This role interests me because ${COMPANY_FACT}` : `I reviewed the ${topic} guide with internal staff.`;
+      const example = `I automated the ${topic} status report for internal staff.`;
+      return { id: `card-${index}`, set: intent.set, kind: intent.kind, question: intent.question, variants: [...intent.variants], thinEvidence: true, extensions: [],
+        headline: statement(why ? motivation : item, headline), bullets: [first, second].map((text, bullet) => ({ stage: 'point', ...statement(intro && bullet === 1 ? motivation : item, text) })), example: statement(item, example),
+        consistency: { consistentWithResume: true, resumeQuote: item.text } };
+    }) };
+    for (const card of made.cards) {
+      card.consistency = typed ? { consistentWithResume: false, resumeQuote: '' } : deriveInterviewResumeConsistency([card.headline, ...card.bullets, card.example], evidence, bundle.applicationPositioning.resume);
+      assert(typed || card.consistency?.consistentWithResume, 'each synthetic prepared card has a genuine captured résumé match');
+    }
+    return made;
+  };
+  const value = build(INTENTS);
+  ONE_TAB.set(value, { posting: build(INTENTS_POSTING_ONLY), general: build(INTENTS_GENERAL_ONLY) });
   return { captured, bundle, brief, value, args: { nodeId: 'interview-node', snapshotId, canonicalJobUrl, bundleArtifactId: captured.artifactId, manualAiRunId: 'interview-run' } };
 }
 
@@ -69,13 +99,16 @@ function promptData(prompt, label) {
   const match = prompt.match(new RegExp(`<untrusted-${label}-[^>]+>\\n([\\s\\S]*?)\\n</untrusted-`));
   return match ? JSON.parse(match[1]) : null;
 }
-function sparseReply(value, prompt) {
+function sparseReply(value, prompt, opts) {
   const targets = promptData(prompt, 'interview-answer-failing-cards');
-  return targets ? { cards: targets.map(({ card }) => structuredClone(value.cards.find(item => item.id === card.id))) } : value;
+  if (targets) return { cards: targets.map(({ card }) => structuredClone(value.cards.find(item => item.id === card.id))) };
+  // The writer is asked for the empty tab alone when only one is empty.
+  const asked = opts?.responseSchema?.properties?.cards?.items?.properties?.set?.enum;
+  return asked?.length === 1 ? ONE_TAB.get(value)?.[asked[0]] || value : value;
 }
 function answerReply(value, prompt, opts) {
   refuseReview(prompt, opts);
-  const reply = sparseReply(value, prompt);
+  const reply = sparseReply(value, prompt, opts);
   opts?.responseValidator?.(reply);
   return reply;
 }
@@ -140,7 +173,7 @@ export default [
           evidenceSegmentIds: ['segment-0099'] });
         const evidence = buildInterviewAnswerEvidence({ snapshot: inputSnapshot, brief, bundle });
         const source = evidence.find(item => item.entityId === 'additional-release');
-        for (const targetIndex of [2, 3, 4, 11]) {
+        for (const targetIndex of [2, 3, 11]) {
           const invalid = structuredClone(value); const target = invalid.cards[targetIndex];
           if (targetIndex === 3) {
             // A thin intro may retain one separately research-cited reason;
@@ -385,12 +418,13 @@ export default [
     },
   },
   {
-    name: 'interview answer preparation: required intro and project survive exhausted repairs with fewer verified claims',
+    name: 'interview answer preparation: the required intro survives exhausted repairs with fewer verified claims, and an ordinary card is dropped',
     run: async () => {
-      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-required-project-'));
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-required-intro-'));
       try {
         const { args, brief, value } = await fixture(root);
         const invalid = structuredClone(value);
+        // Card 11 is the introduction; card 4 is a project walkthrough, an ordinary card that earlier versions also required.
         for (const index of [4, 11]) invalid.cards[index].headline.text += ' with 997 widgets.';
         let generations = 0;
         const { bank } = await buildInterviewPreparedAnswers({ ...args, brief, userDataPath: root, loadSnapshot: async () => snapshot,
@@ -401,18 +435,99 @@ export default [
               opts.responseValidator(reply);
               return reply;
             } });
-        assert(generations === 3 && bank.cards.length === 12 && !bank.droppedQuestions,
-          'both required cards survive two repairs by reusing claims that already passed the host checks, without any review handoff');
+        assert(generations === 3 && bank.cards.length === 11 && JSON.stringify(bank.droppedQuestions) === JSON.stringify([value.cards[4].question]),
+          'the introduction survives two repairs by reusing claims that already passed the host checks, without any review handoff; the project card is dropped like any other');
         const verifiedClaims = value.cards.filter((_, index) => ![4, 11].includes(index))
           .flatMap(card => [card.headline, ...card.bullets, card.example])
           .map(({ text, evidenceIds, quotes }) => JSON.stringify({ text, evidenceIds, quotes }));
-        for (const question of ['Tell me about yourself.', 'Walk me through a project.']) {
-          const card = bank.cards.find(card => card.question === question);
-          assert(card?.thinEvidence && card.bullets.length === 0 && !card.headline.text.includes('997') && card.headline.text === card.example.text, 'retain only a narrower verified claim and a visible thin-evidence warning');
-          assert(verifiedClaims.includes(JSON.stringify(card.headline)), 'each host fallback must exactly preserve a claim that already passed the host checks against its own citations');
-        }
-        assert(isInterviewAnswerBank(bank), 'narrowed required cards pass the sealed-bank guards');
+        const card = bank.cards.find(item => item.kind === 'intro');
+        assert(card?.question === value.cards[11].question && card.set === 'general' && card?.thinEvidence && card.bullets.length === 0
+          && !card.headline.text.includes('997') && card.headline.text === card.example.text, 'retain only a narrower verified claim and a visible thin-evidence warning');
+        assert(verifiedClaims.includes(JSON.stringify(card.headline)), 'the host fallback must exactly preserve a claim that already passed the host checks against its own citations');
+        assert(isInterviewAnswerBank(bank), 'a narrowed required card passes the sealed-bank guards');
         assert(!fs.existsSync(path.join(root, 'interview-helper-answer-banks')) && !fs.existsSync(path.join(root, 'interview-helper-answer-bindings')), 'building narrowed answers never publishes a partial bank');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview answer preparation: an introduction none of whose wording passes the question rule gets one more rewrite of its wording instead of ending the Prepare',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-wordless-intro-'));
+      try {
+        const { args, brief, value } = await fixture(root);
+        const invalid = structuredClone(value);
+        // The introduction's question and every variant hold a figure that could be a result, in the draft and in both repairs.
+        const intro = invalid.cards[11];
+        intro.question = 'How did you save $2 million before this role?'; intro.variants = ['What did you do to raise revenue by 40 percent?'];
+        intro.headline.text += ' with 997 widgets.';
+        const asked = [];
+        const { bank } = await buildInterviewPreparedAnswers({ ...args, brief, userDataPath: root, loadSnapshot: async () => snapshot,
+          callText: async (prompt, opts) => {
+            refuseReview(prompt, opts);
+            const targets = promptData(prompt, 'interview-answer-failing-cards');
+            asked.push(targets ? targets.map(({ card }) => card.id).join() : 'draft');
+            const reply = sparseReply(invalid, prompt);
+            // Only the last request, which is about nothing but this card's wording, is answered with wording that passes.
+            if (asked.length === 4) reply.cards[0] = { ...reply.cards[0], question: value.cards[11].question, variants: [...value.cards[11].variants] };
+            opts.responseValidator(reply);
+            return reply;
+          } });
+        assert(asked.join('|') === 'draft|card-11|card-11|card-11', `one more repair for the introduction alone, after the two rounds: ${asked.join('|')}`);
+        const card = bank.cards.find(item => item.kind === 'intro');
+        assert(card && card.question === value.cards[11].question && card.thinEvidence && !card.headline.text.includes('997'), 'the introduction is kept with its new wording and a narrower claim that already passed');
+        assert(isInterviewAnswerBank(bank), 'the sealed set holds it');
+        // Wording that is refused again leaves nothing to keep, and the Prepare ends as an unsupported required answer always did.
+        let failure = null; let calls = 0;
+        await buildInterviewPreparedAnswers({ ...args, brief, userDataPath: root, loadSnapshot: async () => snapshot,
+          callText: async (prompt, opts) => { calls++; const reply = sparseReply(invalid, prompt); opts.responseValidator(reply); return reply; } }).catch(error => { failure = error; });
+        assert(calls === 4 && failure?.correctionRuleIds?.includes('INTERVIEW_ANSWER_REQUIRED_SAFE_CLAIM'), `a rewrite that is refused again ends the Prepare with the required-answer failure after a single extra call (${calls} calls, ${failure?.correctionRuleIds})`);
+        // A card that is not required gets no such round.
+        const ordinary = structuredClone(value); ordinary.cards[4].question = 'How did you save $2 million before this role?'; ordinary.cards[4].variants = ['What did you do to raise revenue by 40 percent?'];
+        let ordinaryCalls = 0;
+        const ordinaryResult = await buildInterviewPreparedAnswers({ ...args, brief, userDataPath: root, loadSnapshot: async () => snapshot,
+          callText: async (prompt, opts) => { ordinaryCalls++; const reply = sparseReply(ordinary, prompt); opts.responseValidator(reply); return reply; } });
+        assert(ordinaryCalls === 3 && ordinaryResult.bank.cards.length === 11, 'an ordinary card with refused wording is repaired twice and then dropped, with no extra round');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview answer preparation: the writer is asked for the empty tabs only, and a saved answer set is reused only when it holds a card for every empty tab',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-scoped-'));
+      try {
+        const { args, value } = await fixture(root);
+        const handlers = new Map(); const loadSnapshot = async () => snapshot;
+        let empty = []; const asked = []; const prompts = []; const filled = [];
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
+          buildBrief: a => buildInterviewBrief({ ...a, callRaw: async () => research, callText: async (_prompt, opts) => { opts.responseValidator(assessment); return assessment; } }),
+          buildAnswers: a => { asked.push([...(a.sets || [])]); return buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => { prompts.push(prompt); return answerReply(value, prompt, opts); } }); },
+          publishAnswers: a => publishInterviewPreparedAnswers({ ...a, loadSnapshot }),
+          loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
+          emptyQaScopes: async () => [...empty],
+          mapDisclosures: async () => [], fillQa: async a => { filled.push({ scopes: [...a.scopes], cards: a.bank?.cards?.length || 0 }); return { foundation: { cards: [] }, company: { cards: [] } }; },
+          fillApproaches: async () => {}, fillGaps: async () => {}, fillTopics: async () => {}, writeTopics: async () => ({ topics: [], technical: [] }), preparePractice: async () => {} });
+        const run = request => handlers.get('build-interview-brief')({}, request);
+        empty = ['company']; await run({ ...args });
+        assert(asked.length === 1 && asked[0].join() === 'posting' && /write no general card/u.test(prompts[0]) && !prompts[0].includes('ALWAYS include exactly one intro card'), 'only the posting tab is empty: the writer is asked for posting cards, with no introduction');
+        // The saved set is posting-only. General is empty now, so it cannot serve; a new one is written for General alone.
+        empty = ['foundation'];
+        const general = await run({ ...args, reuseExisting: true });
+        assert(!general.reused && asked.length === 2 && asked[1].join() === 'general' && /write no posting card/u.test(prompts[1]), 'a posting-only answer set is not reused for an empty General tab');
+        // The newest saved set is General-only, which cannot serve an empty posting tab either.
+        empty = ['company'];
+        const posting = await run({ ...args, reuseExisting: true });
+        assert(!posting.reused && asked.length === 3 && asked[2].join() === 'posting', 'a General-only answer set is not reused for an empty posting tab');
+        // Both tabs empty: both are written, and that set serves either tab afterwards.
+        empty = ['foundation', 'company']; await run({ ...args });
+        assert(asked[3].join() === 'foundation,company'.replace('foundation', 'general').replace('company', 'posting') && prompts[3].includes('ALWAYS include exactly one intro card'), 'both empty: the full set is asked for');
+        for (const scopes of [['foundation'], ['company']]) {
+          empty = scopes; const before = asked.length;
+          const reused = await run({ ...args, reuseExisting: true });
+          assert(reused.reused === true && asked.length === before, `a set that holds both tabs is reused for an empty ${scopes[0]} tab`);
+          // The empty tab is written from the saved set; it is not left empty under a notice that the saved preparation was used.
+          const last = filled.at(-1);
+          assert(last.scopes.join() === scopes.join() && last.cards >= 8 && !Object.hasOwn(reused, 'bank'), `the empty ${scopes[0]} tab is filled from the saved set (${JSON.stringify(last)})`);
+        }
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },
@@ -578,7 +693,8 @@ export default [
         const callsBefore = aiCalls; order.length = 0;
         const reused = await run({ ...args, reuseExisting: true });
         assert(reused.reused === true && reused.briefRecordId === none.briefRecordId && reused.answerBankAvailable === true && reused.answerCardCount === 12, `reuse returns the finished preparation, got ${JSON.stringify({ ...reused, brief: undefined })}`);
-        assert(aiCalls === callsBefore && order.length === 0, 'reuse makes no AI call and runs no step');
+        // Both tabs are empty here (the stand-in fill writes nothing), so the saved set is what they are written from.
+        assert(aiCalls === callsBefore && order.join() === 'qa,approaches,topics,practice', `reuse makes no AI call and writes the empty tabs from the saved set, got ${order.join()}`);
         const again = await run({ ...args });
         assert(!again.reused && aiCalls > callsBefore, 'Prepare again (reuseExisting false) always runs');
         for (const changed of [{ snapshotId: 'c'.repeat(64) }, { canonicalJobUrl: 'https://jobs.example.test/other' }]) {
@@ -656,6 +772,45 @@ export default [
         const raced = await run({ ...args });
         duringAnswers = null;
         assert(raced.qaKept === true && order.join() === 'qa,practice' && scoped.qa.length === 0, `the tabs are checked again after the answer set, got ${order.join()}`);
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview answer preparation: disclosed questions are matched with the General questions that will exist, and the practice order learns which question is the introduction',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-sets-'));
+      try {
+        const { args, value } = await fixture(root);
+        const handlers = new Map(); const loadSnapshot = async () => snapshot;
+        let empty = ['foundation', 'company']; let disclosure = null; let practice = null;
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
+          buildBrief: a => buildInterviewBrief({ ...a, callRaw: async () => research, callText: async (_prompt, opts) => { opts.responseValidator(assessment); return assessment; } }),
+          buildAnswers: a => buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => answerReply(value, prompt, opts) }),
+          publishAnswers: a => publishInterviewPreparedAnswers({ ...a, loadSnapshot }),
+          loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
+          emptyQaScopes: async () => [...empty],
+          loadStoredQa: async () => ({ foundation: { cards: [{ question: 'What do you want to be asked about first?' }, { question: 'Tell me about yourself.' }] }, company: { cards: [] } }),
+          mapDisclosures: async request => { disclosure = request; return []; },
+          // What the Q&A files hold after the fill: the introduction carries the writer's kind; a hand-typed catalog question has none.
+          fillQa: async () => ({ foundation: { cards: [{ question: value.cards[11].question, kind: 'intro' }, { question: value.cards[4].question, kind: 'other' }] }, company: { cards: [{ question: 'Tell me about yourself.' }, { question: value.cards[2].question }] } }),
+          fillApproaches: async () => {}, fillGaps: async () => {}, fillTopics: async () => {}, writeTopics: async () => ({ topics: [], technical: [] }),
+          preparePractice: async request => { practice = request; } });
+        const run = request => handlers.get('build-interview-brief')({}, request);
+        const general = value.cards.filter(card => card.set === 'general').map(card => card.question);
+        const posting = value.cards.filter(card => card.set === 'posting').map(card => card.question);
+        await run({ ...args });
+        assert(JSON.stringify(disclosure.foundationQuestions) === JSON.stringify(general) && JSON.stringify(disclosure.companyQuestions) === JSON.stringify(posting),
+          'a Prepare that writes General offers the answer set\'s own general and posting questions to the mapping');
+        assert(general.length === 5 && posting.length === 7, 'the fixture has five general and seven posting questions');
+        empty = ['company']; disclosure = null;
+        await run({ ...args, reuseExisting: false });
+        // The writer is asked for the posting tab alone, so it returns posting cards only (twelve of them).
+        assert(disclosure.companyQuestions.length === 12 && disclosure.companyQuestions.join() !== posting.join(), 'the writer is asked for the posting set alone and returns twelve posting questions');
+        assert(JSON.stringify(disclosure.foundationQuestions) === JSON.stringify(['What do you want to be asked about first?', 'Tell me about yourself.'])
+          && ONE_TAB.get(value).posting.cards.every(card => card.set === 'posting'),
+        'with General already written, a reported question is matched with the saved General cards, not with questions that will not be written');
+        assert(practice.opening.length === 2 && practice.opening.includes(value.cards[11].question) && practice.opening.includes('Tell me about yourself.')
+          && practice.questions.length === 4, 'the practice order is told which questions are the introduction: by kind, or by the old wording when a card has no kind');
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },

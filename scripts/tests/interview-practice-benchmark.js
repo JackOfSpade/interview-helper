@@ -508,4 +508,23 @@ export default [
       });
     },
   },
+  {
+    name: 'interview practice benchmark: every scenario states its call length and wrap-up, and scenario g starts wrapping up at 46:00',
+    async run() {
+      const started = [];
+      const createSession = async () => ({
+        async start({ instructions }) { started.push(instructions); },
+        async turn() { return { text: 'Thanks. Next question?', control: null, endCall: false, firstSentenceMs: 1, firstDeltaMs: 1, totalMs: 2, costUsd: 0 }; },
+        async close() {},
+      });
+      await withOutput(async outDir => {
+        await runBenchmark({ outDir, runs: 1, only: 'interviewer', interviewerConfigs: [cfg('haiku')], createSession });
+      });
+      assert.equal(started.length, SCENARIOS.length);
+      for (const scenario of SCENARIOS) assert(Array.isArray(scenario.targetMinutes) && scenario.wrapUpMinutes > 0, `${scenario.name} states its length and wrap-up`);
+      const longContext = started[SCENARIOS.findIndex(scenario => scenario.name.startsWith('g'))];
+      assert(longContext.includes('planned to run 42 to 50 minutes'), 'the builder was given the scenario\'s planned length');
+      assert(longContext.includes('from about 46:00 elapsed'), 'the wrap-up starts at the 46:00 the scenario expects');
+    },
+  },
 ];

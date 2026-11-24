@@ -90,12 +90,19 @@ function closingIndex(transcript, questionIndices) {
   return -1;
 }
 
-/** Whether the closing turn follows something the candidate said, so that it may open with an answer. */
+/**
+ * Whether the closing turn follows a candidate turn that asked something, so that it may open with an answer.
+ * What the candidate asked is read from the text that was sent when the entry has it, else from the transcript.
+ */
 function answersCandidate(transcript, index, questionIndices) {
   const lastQuestion = questionIndices.length ? Math.max(...questionIndices) : -1;
   const before = transcript[index - 1];
-  return index - 1 > lastQuestion && before?.speaker === 'candidate' && !before.acknowledgement;
+  if (!(index - 1 > lastQuestion && before?.speaker === 'candidate' && !before.acknowledgement)) return false;
+  return label(typeof before.sentText === 'string' && before.sentText.trim() ? before.sentText : before.text).includes('?');
 }
+
+// An opening shorter than this, with nothing said by the candidate, is only the connection and is not its own chapter.
+const OPENING_MIN_MS = 3000;
 
 function chapterFor(chapters, atMs) {
   const containing = chapters.find(chapter => chapter.startMs <= atMs && atMs < chapter.endMs);
@@ -124,10 +131,12 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
 
   const chapters = [];
   const firstQuestion = anchors[0]?.startMs ?? closingStart;
-  if (firstQuestion > 0) chapters.push({ title: 'Opening', questionTurnIndex: null, startMs: 0, endMs: firstQuestion, markers: [] });
+  const candidateSpoke = turns.some(turn => turn?.speaker === 'candidate' && (ms(turn.startMs) ?? 0) < firstQuestion);
+  const foldOpening = firstQuestion > 0 && firstQuestion < OPENING_MIN_MS && anchors.length > 0 && !candidateSpoke;
+  if (firstQuestion > 0 && !foldOpening) chapters.push({ title: 'Opening', questionTurnIndex: null, startMs: 0, endMs: firstQuestion, markers: [] });
   anchors.forEach((anchor, position) => {
     const next = anchors[position + 1]?.startMs ?? closingStart;
-    chapters.push({ title: anchor.title, questionTurnIndex: anchor.index, startMs: anchor.startMs, endMs: Math.max(anchor.startMs, next), markers: [] });
+    chapters.push({ title: anchor.title, questionTurnIndex: anchor.index, startMs: position === 0 && foldOpening ? 0 : anchor.startMs, endMs: Math.max(anchor.startMs, next), markers: [] });
   });
   if (closing >= 0 && closingStart > (anchors.at(-1)?.startMs ?? 0)) {
     chapters.push({ title: 'Closing', questionTurnIndex: null, startMs: closingStart, endMs: Math.max(closingStart, total), markers: [] });

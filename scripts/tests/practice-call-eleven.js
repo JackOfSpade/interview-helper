@@ -4,10 +4,9 @@ import {
   createDialogueVoiceFactory, fetchSubscriptionTier, rateForTier, wordsFromAlignment, VOICE_STABILITY, KEEP_ALIVE_MS, PAID_RATE, FREE_RATE,
 } from '../../electron/practiceCall/eleven/dialogueVoice.js';
 import {
-  listConversationalVoices, pickPersonaVoice, accentPoolKey, isEnglishVoice, isStandardPrice, normalizeGender, voiceCharacterOf,
+  listConversationalVoices, pickPersonaVoice, isEnglishVoice, isStandardPrice, normalizeGender, voiceCharacterOf,
 } from '../../electron/practiceCall/eleven/voiceCatalog.js';
 import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
-import { NAME_POOLS, DIVERSE_POOL, NEUTRAL_FIRST_NAMES } from '../../electron/practiceCall/eleven/voiceNames.js';
 import { transcribeVerbatim } from '../../electron/practiceCall/eleven/scribe.js';
 
 const KEY = 'sk-test-key-do-not-leak-123';
@@ -485,17 +484,18 @@ export default [
       assert.equal(indian.voiceName, 'Anika Voice');
       assert.equal(indian.accent, 'indian');
       assert.equal(indian.gender, 'female');
-      assert.equal(indian.name, `${NAME_POOLS.indian.female[0]} ${NAME_POOLS.indian.last[0]}`);
-      assert.equal(NAME_POOLS.indian.female.includes(indian.name.split(' ')[0]), true);
+      assert.equal('name' in indian, false, 'a voice gets no name here: the call planner writes the person\'s');
       const neutral = pickPersonaVoice({ voices, random: () => 0.5, temperament: 'tough' });
       assert.equal(neutral.voiceId, 'v-british');
       assert.equal(neutral.gender, 'neutral');
-      assert.equal(neutral.name.split(' ')[0], DIVERSE_POOL.neutral[4]);
-      assert.equal(neutral.name.split(' ')[1], DIVERSE_POOL.last[4]);
       assert.equal(neutral.temperament, 'tough');
-      assert.equal(accentPoolKey('South African'), 'south african');
-      assert.equal(accentPoolKey('british'), null);
       assert.deepEqual(pickPersonaVoice({ voices, random: () => 0 }), { ...indian });
+      // A temperament is free text (the planner writes its own): whatever is requested passes through as written,
+      // with no list of allowed words, and an empty one means none.
+      const own = pickPersonaVoice({ voices, random: () => 0.5, temperament: '  Exacting  but fair. ' });
+      assert.equal(own.temperament, 'Exacting but fair.');
+      assert.equal(pickPersonaVoice({ voices, random: () => 0.5, temperament: 'warm' }).temperament, 'warm');
+      assert.equal(pickPersonaVoice({ voices, random: () => 0.5, temperament: '   ' }).temperament, null);
     },
   },
   {
@@ -761,10 +761,6 @@ export default [
   {
     name: 'practice call eleven: mandarin, cantonese and taiwanese accents use the chinese pool',
     async run() {
-      assert.equal(accentPoolKey('beijing mandarin'), 'chinese');
-      assert.equal(accentPoolKey('taiwan mandarin'), 'chinese');
-      assert.equal(accentPoolKey('cantonese'), 'chinese');
-      assert.equal(accentPoolKey('South African'), 'south african');
     },
   },
   {
@@ -786,10 +782,10 @@ export default [
     },
   },
   {
-    name: 'practice call eleven: names always fit the chosen voice accent and gender',
+    name: 'practice call eleven: the picked voice keeps its accent and gender for the planner, and carries no name',
     async run() {
       const fixtures = [];
-      for (const key of Object.keys(NAME_POOLS)) {
+      for (const key of ['indian', 'nigerian', 'irish', 'scottish', 'australian', 'south african']) {
         for (const gender of ['female', 'male', 'neutral']) {
           fixtures.push({
             voiceId: `v-${key.replace(/\s+/gu, '-')}-${gender}`, voiceName: `${key} ${gender}`, gender,
@@ -811,18 +807,10 @@ export default [
         };
         const persona = pickPersonaVoice({ voices: fixtures, random });
         const voice = fixtures[step % fixtures.length];
-        const key = accentPoolKey(voice.accent);
-        const pool = key ? NAME_POOLS[key] : DIVERSE_POOL;
-        const gendered = pool[persona.gender];
-        const expectedFirst = persona.gender === 'neutral'
-          ? (pool.neutral?.length ? pool.neutral : NEUTRAL_FIRST_NAMES)
-          : (gendered?.length ? gendered : NEUTRAL_FIRST_NAMES);
         assert.equal(persona.voiceId, voice.voiceId);
         assert.equal(persona.gender, normalizeGender(voice.gender));
-        const firstName = persona.name.split(' ')[0];
-        const lastName = persona.name.slice(firstName.length + 1);
-        assert.equal(expectedFirst.includes(firstName), true, `${persona.voiceId} picked the first name ${persona.name}`);
-        assert.equal(pool.last.includes(lastName), true, `${persona.voiceId} picked the last name ${persona.name}`);
+        assert.equal(persona.accent, voice.accent);
+        assert.equal('name' in persona, false);
         assert.equal(persona.language, 'en');
         assert.equal(persona.temperament, null, 'only a requested temperament is set before Claude chooses');
         seenVoices.add(persona.voiceId);

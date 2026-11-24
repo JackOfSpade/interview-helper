@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { buildInterviewAnswerEvidence, interviewAnswerBankApplicationDigest } from '../../electron/ipc/interviewAnswerBank.js';
+import { legacyQuestionEntry } from '../../electron/ipc/interviewCardKinds.js';
+import { interviewQuestionFailure } from '../../electron/ipc/interviewQuestionText.js';
 
 const data = JSON.parse(fs.readFileSync(new URL('./interview-answer-v5-replay.json', import.meta.url), 'utf8'));
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -49,6 +51,12 @@ export function interviewAnswerV5ReplayFixture() {
     evidence.find(source => source.entityId === researchSourceId).id);
   byKey.set(roleSource.key, evidence.find(source => source.sourceField === 'roleContext').id);
   for (const response of fixture.responses) for (const card of response.cards) {
+    // The recording was made when questions came from a fixed list. The writer now says each card's set and kind;
+    // the recorded wording is read as the wording the writer chose, with the set and kind that list gave it.
+    const entry = legacyQuestionEntry(card.question);
+    card.set = entry.set; card.kind = entry.kind;
+    // Only variants the question check accepts are kept, as when a card is written (interviewQuestionText.js).
+    card.variants = card.variants.filter(item => !interviewQuestionFailure(item, { set: entry.set }));
     for (const claim of [card.headline, ...card.bullets, card.example, ...(card.extensions || [])]) {
       claim.evidenceIds = claim.evidenceIds.map(key => byKey.get(key));
       claim.quotes.forEach(quote => { quote.evidenceId = byKey.get(quote.evidenceId); });

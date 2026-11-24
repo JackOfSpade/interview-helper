@@ -144,9 +144,16 @@ export default [
       const research = context.evidence.find(source => source.kind === 'research');
       const point = { id: 'company-reason', ...statement(research, 'This company interests me because Cedar serves subscription teams.') };
       rejects(point, context, 'INTERVIEW_EXTENSION_RESEARCH');
-      context.card.question = 'Why are you interested in this company?';
+      // The writer's own question and kind make it a why card, whatever its words.
+      Object.assign(context.card, { set: 'posting', kind: 'motivation', question: 'What draws you to this company?' });
       assert(validateInterviewExtensionPoint(point, context).evidenceIds[0] === research.id, 'a why-company extension may add a new separately cited research reason');
+      const free = { ...point, id: 'free', text: 'I am drawn to how Cedar serves subscription teams.' };
+      assert(validateInterviewExtensionPoint(free, context).text === free.text, 'a statement of interest in the writer\'s own words is a research reason too');
       rejects({ ...point, text: 'I served Cedar subscription teams.' }, context, 'INTERVIEW_ANSWER_RESEARCH_AGENCY');
+      rejects({ ...point, text: 'I am drawn to this company because I built subscription teams.' }, context, 'INTERVIEW_ANSWER_RESEARCH_AGENCY');
+      // A card saved in the old wording is still a why card.
+      Object.assign(context.card, { question: 'Why are you interested in this company?' }); delete context.card.kind; delete context.card.set;
+      assert(validateInterviewExtensionPoint(point, context).evidenceIds[0] === research.id, 'a card with no kind is read through the legacy table');
       rejects({ ...point, evidenceIds: [research.id, context.source.id], quotes: [...point.quotes, { evidenceId: context.source.id, quote: context.source.text }] }, context, 'INTERVIEW_EXTENSION_RESEARCH');
       context.card.extensions = [point];
       assert(sanitizeInterviewExtensions(context.card, context.evidence)[0].evidenceIds[0] === research.id, 'a research-backed extension keeps its separate research citation');

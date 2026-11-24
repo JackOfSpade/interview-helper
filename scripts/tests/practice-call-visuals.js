@@ -35,11 +35,11 @@ test('the plan may ask for a visual on a screen part, checked and capped', () =>
   const voices = [{ key: 'V1', name: 'Alex', gender: 'female', age: '', accent: '', description: '' }];
   const pool = [{ number: 1, question: 'Could you live on the moon?', answer: '', timesAsked: 0 }];
   const plan = visual => ({
-    interviewKind: 'A screen.', lead: { voice: 'V1', role: 'Manager', temperament: 'neutral', stability: 0.3, room: 0.2, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }, panel: [],
+    interviewKind: 'A screen.', callMinutes: 10, wrapUpMinutes: 2, lead: { voice: 'V1', name: 'Ingrid Solberg', role: 'Manager', temperament: 'Even and plain.', stability: 0.3, room: 0.2, manner: 'Plain.', interrupting: 'Lets people finish and rarely cuts in.' }, panel: [],
     questions: [{ number: 1, askedBy: 'V1', minutes: 5, probes: [] }, { number: 0, text: 'What draws you to remote sites?', askedBy: 'V1', minutes: 5, probes: [] }],
     problems: [{ ref: 'p1', question: 1, language: '', parts: [{ title: 'Moon base', content: 'Could you live here for a year?', ...(visual ? { visual } : {}) }], solution: 'Open.', edgeCases: [], hints: [] }],
   });
-  const ctx = { pool, voices, targetMinutes: 10 };
+  const ctx = { pool, voices };
   const good = validatePlan(plan({ kind: 'picture', search: '  lunar   surface ', shows: 'How desolate it is.' }), ctx);
   assert.deepEqual(good.problems, []);
   assert.deepEqual(good.plan.problems[0].parts[0].visual, { kind: 'picture', search: 'lunar surface', shows: 'How desolate it is.' });
@@ -52,8 +52,10 @@ test('the plan may ask for a visual on a screen part, checked and capped', () =>
   assert.match(validatePlan(many, ctx).problems.join(' '), new RegExp(`limit is ${MAX_PLAN_VISUALS}`, 'u'));
   const partSchema = PLAN_SCHEMA.properties.problems.items.properties.parts.items;
   assert(partSchema.properties.visual && !partSchema.required.includes('visual'), 'the visual is optional in the schema');
-  const prompt = buildPlanPrompt({ brief: { role: 'r' }, application: {}, pool, voices, targetMinutes: 10 });
-  assert(prompt.includes('Setting the scene is a good reason on its own') && prompt.includes('lunar surface') && prompt.includes('filming a bird on a remote river'), 'a scene-setting photo is asked for');
+  const prompt = buildPlanPrompt({ brief: { role: 'r' }, application: {}, pool, voices });
+  assert(prompt.includes('Setting the scene is a good reason on its own'), 'a scene-setting photo is still asked for');
+  // Owner's decision, 2026-11-23: the planner prompt and schema quote no sample subject or search words to copy.
+  assert(!/moon colony|lunar|filming a bird|remote river/u.test(prompt) && !/lunar|Apollo/u.test(JSON.stringify(PLAN_SCHEMA)), 'no sample picture subject in the prompt or the schema');
   assert(prompt.includes('never add a visual as decoration'), 'code and abstract questions still get none');
   const pick = pickPrompt({ screen: { title: 'The brief', content: 'Dippers on an upland river.' }, shows: 'a dipper', candidates: [{ title: 'Dipper' }] });
   assert(pick.includes('or to set its scene') && pick.includes('even when the text already describes it'), 'the picker keeps a scene-setting photo');

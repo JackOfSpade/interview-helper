@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  addInterviewQaCard, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaFromPreparation, isAnsweredCard, isFoundationQuestion,
-  loadInterviewQa, saveInterviewQaCard,
+  addInterviewQaCard, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaFromPreparation, isAnsweredCard, interviewQaSetOf,
+  loadInterviewQa, saveInterviewQaCard, clearInterviewQaCards,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
 import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
@@ -24,11 +24,38 @@ async function userData(fn) {
 }
 
 export default [
-  { name: 'interview Q&A: foundation questions are the shared set; everything else is company-specific', run() {
-    assert(isFoundationQuestion('Tell me about yourself.') && isFoundationQuestion('tell me about yourself'));
-    assert(!isFoundationQuestion('Why are you interested in this company?'));
+  { name: 'interview Q&A: the writer\'s set decides the tab, and a question saved in the old wording is still placed as it was', run() {
+    assert(interviewQaSetOf({ question: 'Tell me about yourself.' }) === 'foundation' && interviewQaSetOf({ question: 'tell me about yourself' }) === 'foundation');
+    assert(interviewQaSetOf({ question: 'Why are you interested in this company?' }) === 'company');
+    assert(interviewQaSetOf({ question: 'Something nobody has asked before?' }) === 'company', 'a question in neither list is a posting question, as before');
+    assert(interviewQaSetOf({ question: 'Tell me about yourself.', set: 'posting' }) === 'company' && interviewQaSetOf({ question: 'What is your name?', set: 'general' }) === 'foundation', 'the writer\'s own set wins over the wording');
+    for (const question of ['Walk me through a project.', 'What strengths would you bring?', 'Describe a challenge you faced.', 'How do you handle disagreement?', 'Tell me about something that did not go as planned.', 'How do you collaborate with others?']) {
+      assert(interviewQaSetOf({ question }) === 'foundation', `${question} stays General`);
+    }
     assert(!isAnsweredCard({ headline: { text: '' }, bullets: [], example: { text: '  ' } }));
     assert(isAnsweredCard({ headline: { text: '' }, bullets: [{ text: 'x' }], example: { text: '' } }));
+  } },
+  { name: 'interview Q&A: cards that say their set and kind are placed by the set, keep the kind through an edit and show it to the practice', async run() {
+    await userData(async dir => {
+      const own = (id, set, kind, question, headline) => ({ ...card(id, question, headline), set, kind });
+      const qa = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'helper-a', company: 'Discord', bank: bank(
+        own('a', 'general', 'intro', 'Could you start with a quick introduction?', 'I build tools.'),
+        own('b', 'posting', 'motivation', 'What brings you to this company?', 'Discord reaches millions.'),
+        own('c', 'general', 'other', 'What is a piece of work you are proud of?', 'I shipped a tool.'),
+        own('d', 'posting', 'problem', 'How would you approach a flaky voice server?', 'I debug servers.')) });
+      assert.deepEqual(qa.foundation.cards.map(item => item.question), ['Could you start with a quick introduction?', 'What is a piece of work you are proud of?'], 'general cards fill General, whatever their words');
+      assert.deepEqual(qa.company.cards.map(item => item.question), ['What brings you to this company?', 'How would you approach a flaky voice server?']);
+      assert.deepEqual(qa.foundation.cards.map(item => item.kind), ['intro', 'other'], 'the kind reaches the projection that orders the practice');
+      const stored = JSON.parse(await fs.promises.readFile(path.join(dir, 'interview-helper-qa', 'foundation.json'), 'utf8'));
+      assert(stored.cards.every(item => !('set' in item) && typeof item.kind === 'string'), 'the file implies the set; the kind is kept');
+      const intro = qa.foundation.cards[0];
+      const edited = await saveInterviewQaCard({ userDataPath: dir, nodeId: 'helper-a', scope: 'foundation', card: { ...intro, question: 'Please introduce yourself first.', headline: 'My own intro.', bullets: [] } });
+      assert.equal(edited.cards[0].kind, 'intro', 'an edit of the words keeps the kind');
+      const added = await addInterviewQaCard({ userDataPath: dir, nodeId: 'helper-a', scope: 'foundation', card: { question: 'A question I wrote myself?', variants: [], headline: 'Mine.', bullets: [], example: '', extensions: [] } });
+      assert(!('kind' in added.cards.at(-1)), 'a card the person adds has no kind until it is read through its wording');
+      const again = await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'helper-a', bank: bank(own('z', 'general', 'other', 'Another general question for you?', 'x')) });
+      assert.equal(again.foundation.cards.length, 3, 'a tab with cards is still left as it is');
+    });
   } },
   { name: 'interview Q&A: preparation fills foundation (global) and company stores; foundation is shared across helpers', async run() {
     await userData(async dir => {
@@ -236,6 +263,19 @@ export default [
     } });
     assert.deepEqual(ordered, ['Tell me about yourself.', 'Why are you interested in this company?', 'Design a rate limiter.']);
     assert.match(prompts[0], /an introduction first.*closing or reflective questions last/su, 'the plan asks for a natural interview arc');
+    assert.match(prompts[0], /The introduction is index 1: it must come first/u, 'the planner is told which question is the introduction');
+    // The writer's own introduction question: named by `opening`, not by its wording.
+    const own = ['What draws you to Discord?', 'Could you start with an introduction?', 'Design a rate limiter.'];
+    assert.deepEqual(validatePracticeOrder({ order: [1, 0, 2] }, own, { opening: [own[1]] }), [1, 0, 2]);
+    assert.throws(() => validatePracticeOrder({ order: [0, 1, 2] }, own, { opening: [own[1]] }), /order-intro/);
+    assert.deepEqual(validatePracticeOrder({ order: [0, 1, 2] }, own, { opening: [] }), [0, 1, 2], 'with no introduction named, nothing is forced first');
+    assert.deepEqual(validatePracticeOrder({ order: [0, 1, 2] }, own), [0, 1, 2], 'free wording is not recognised as an introduction on its own');
+    assert.throws(() => validatePracticeOrder({ order: [0, 1, 2] }, questions), /order-intro/, 'with no opening given, the old wording is still recognised');
+    const planned = await planInterviewPracticeOrder({ questions: own, opening: [own[1]], company: 'Discord', callText: async (prompt, opts) => {
+      assert.match(prompt, /introduction is index 1/u); assert.throws(() => opts.responseValidator({ order: [0, 1, 2] }), /order-intro/);
+      return { order: [1, 2, 0] };
+    } });
+    assert.deepEqual(planned, [own[1], own[2], own[0]]);
     assert.deepEqual(await planInterviewPracticeOrder({ questions: ['Only one?'], callText: async () => { throw new Error('unused'); } }), ['Only one?']);
   } },
   { name: 'interview Q&A offload: a routed qa-brief is answered by the offload call with the handoff messages', async run() {
@@ -523,5 +563,26 @@ export default [
     assert.deepEqual(samples.map(sample => sample.outcome), ['rejected', 'accepted', 'accepted']);
     assert.match(samples[1].text, /^ORIGINAL\n\nYOUR PREVIOUS REPLY WAS REJECTED BY THE APP/u);
     assert.equal(samples.some(sample => String(sample.tools || '').includes('WebSearch')), false);
+  } },
+  { name: 'interview Q&A: a General card written by Prepare takes its id from its question, so counts kept by id never move to another question', async run() {
+    await userData(async dir => {
+      const own = (id, question, headline) => ({ ...card(id, question, headline), set: 'general', kind: 'other' });
+      await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(own('c1', 'How do you handle disagreement with a peer?', 'First answer.'), own('c2', 'What motivates you at work?', 'Second answer.')) });
+      const first = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).foundation.cards;
+      assert.equal(first.length, 2);
+      assert.ok(first.every(item => !['c1', 'c2'].includes(item.id)), 'the writer\'s numbering is not kept');
+      await clearInterviewQaCards({ userDataPath: dir, nodeId: 'h', scope: 'foundation' });
+      // The same writer ids come back on other questions; the same wording keeps its id whatever the id the writer gave it.
+      await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(own('c1', 'Describe a time you led a project.', 'Third answer.'), own('c9', 'How do you handle disagreement with a peer?', 'Fourth answer.')) });
+      const second = (await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).foundation.cards;
+      const idOf = (cards, question) => cards.find(item => item.question === question)?.id;
+      assert.equal(idOf(second, 'How do you handle disagreement with a peer?'), idOf(first, 'How do you handle disagreement with a peer?'), 'the same wording keeps its id');
+      assert.notEqual(idOf(second, 'Describe a time you led a project.'), idOf(first, 'What motivates you at work?'), 'a different question gets a different id');
+      assert.ok(!first.some(item => item.id === idOf(second, 'Describe a time you led a project.')));
+      // A tab that already holds a card is not written again, so its cards keep the ids they have.
+      const added = (await addInterviewQaCard({ userDataPath: dir, nodeId: 'h', scope: 'foundation', card: card('mine', 'My own question to rehearse?', 'Mine.') })).cards.find(item => item.question === 'My own question to rehearse?');
+      await fillInterviewQaFromPreparation({ userDataPath: dir, nodeId: 'h', bank: bank(own('c3', 'Another general question for you?', 'Fifth answer.')) });
+      assert.ok((await loadInterviewQa({ userDataPath: dir, nodeId: 'h' })).foundation.cards.some(item => item.id === added.id), 'an existing card keeps its id');
+    });
   } },
 ];

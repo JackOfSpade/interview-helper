@@ -19,16 +19,16 @@ import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
 import { isInterviewHelperNodeId, isInterviewHelperSnapshotId, loadInterviewHelperCareerSnapshot } from './interviewHelper.js';
 import {
-  buildInterviewAnswerEvidence, INTERVIEW_ANSWER_BANK_SCHEMA, interviewAnswerBankPrompt,
+  buildInterviewAnswerEvidence, interviewAnswerBankSchema, interviewAnswerBankPrompt,
   validateInterviewAnswerBank, publishInterviewAnswerBank, loadInterviewAnswerBank, answerBankRecordId, pruneInterviewAnswerBindings,
   inspectInterviewAnswerCards, validateInterviewAnswerDraft, mergeInterviewAnswerCardRepair,
   interviewAnswerRepairSchema, interviewAnswerRepairPrompt, INTERVIEW_ANSWER_MIN_CARDS,
-  INTERVIEW_REQUIRED_QUESTIONS,
+  isRequiredInterviewCard,
 } from './interviewAnswerBank.js';
+import { cardKind } from './interviewCardKinds.js';
 import { deriveInterviewResumeConsistency } from './interviewResumeCoverage.js';
 import { sanitizeInterviewExtensions } from './interviewAnswerExtensions.js';
-import { interviewRequiredFallbackCandidates, interviewWhyFallbackCandidates } from './interviewRequiredFallback.js';
-import { isInterviewWhyQuestion } from './interviewQuestionFit.js';
+import { interviewRequiredFallbackCandidates, interviewWhyFallbackCandidates, interviewHasPassingWording } from './interviewRequiredFallback.js';
 import { normalizeInterviewPublicUrl } from '../../src/utils/interviewUrlPrivacy.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { applicationFolderJobUrl, createApplicationFolderRegistry, listApplicationFolders } from './interviewApplicationFolders.js';
@@ -39,10 +39,9 @@ import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
 import { generateInterviewGapAnswers } from './interviewAnswerGap.js';
-import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaFromPreparation, fillInterviewQaGaps, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { addInterviewQaCard, addInterviewQaTopic, bindInterviewQaPosting, clearInterviewQaCards, clearInterviewQaTopics, deleteInterviewQaTopic, fillInterviewQaTopics, interviewQaPostingKey, interviewQaStoreKey, deleteInterviewQaCard, emptyInterviewQaScopes, fillInterviewQaApproaches, fillInterviewQaFromPreparation, fillInterviewQaGaps, interviewQaSetOf, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { generateInterviewTopics } from './interviewQaTopics.js';
 import { createQuestionHistory } from '../practiceCall/questionHistory.js';
-import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import {
   INTERVIEW_ANSWER_BINDING_STORE_DIR,
   INTERVIEW_ARTIFACT_STORE_DIR,
@@ -852,8 +851,8 @@ function validateQaClearTopicsArgs(args) {
   strictKeys(args, ['nodeId'], 'Interview Q&A requires a valid request.');
   if (!isInterviewHelperNodeId(args.nodeId)) throw new TypeError('Interview Q&A requires a valid request.');
 }
-async function defaultPreparePractice({ userDataPath, nodeId, questions, company, callText, signal }) {
-  const ordered = await planInterviewPracticeOrder({ questions, company, callText, signal });
+async function defaultPreparePractice({ userDataPath, nodeId, questions, opening, company, callText, signal }) {
+  const ordered = await planInterviewPracticeOrder({ questions, opening, company, callText, signal });
   throwIfAborted(signal);
   if (!ordered.length) return null;
   return saveInterviewPractice({ userDataPath, nodeId, practice: { order: ordered } });
@@ -1098,7 +1097,7 @@ function acceptedVerdicts({ cards }) {
 /** Writes the answer cards from the career text and the research brief. Research keeps its no-candidate contract. */
 export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonicalJobUrl, bundleArtifactId, signal, userDataPath,
   loadBundle = loadPrivateInterviewPreparationBundle, loadSnapshot = loadInterviewHelperCareerSnapshot, callText,
-  onValidationRound } = {}) {
+  onValidationRound, sets, savedGeneral } = {}) {
   if (typeof callText !== 'function') throw new TypeError('Interview answer preparation needs the AI transport.');
   throwIfAborted(signal);
   if (!isPublishedInterviewBrief(brief) || brief.inputs.careerSnapshotId !== snapshotId
@@ -1111,13 +1110,13 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
     || sha256(stable(bundle.digests)) !== brief.inputs.applicationArtifactDigest) throw new Error('Interview answer inputs are unavailable.');
   const context = { snapshot, brief, bundle, canonicalJobUrl, bundleArtifactId };
   const evidence = buildInterviewAnswerEvidence(context);
-  const basePrompt = interviewAnswerBankPrompt({ brief, bundle, evidence });
+  const basePrompt = interviewAnswerBankPrompt({ brief, bundle, evidence, sets, savedGeneral });
   const draft = await callText(basePrompt, {
-    signal, task: 'interview-answer-bank', responseSchema: INTERVIEW_ANSWER_BANK_SCHEMA,
-    responseValidator: value => validateInterviewAnswerDraft(value, undefined, { requireExtensions: true }),
+    signal, task: 'interview-answer-bank', responseSchema: interviewAnswerBankSchema(sets),
+    responseValidator: value => validateInterviewAnswerDraft(value, undefined, { requireExtensions: true, sets }),
   });
   throwIfAborted(signal);
-  let cards = validateInterviewAnswerDraft(draft, undefined, { requireExtensions: true }).cards;
+  let cards = validateInterviewAnswerDraft(draft, undefined, { requireExtensions: true, sets }).cards;
   const approved = new Map();
   // Reuse only exact claims that passed semantic review against these sealed
   // evidence IDs. A rejected proposition never becomes a host fallback.
@@ -1221,6 +1220,18 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
   // Claim failures are accepted as internal draft data. Only this host loop
   // requests repairs, so the transport cannot rewrite previously passing cards.
   // Every retained claim still needs both mechanical and semantic approval.
+  const inspectAll = () => {
+    let inspected = inspectInterviewAnswerCards(cards, context, { lockedIds, floors: true, sets });
+    // Missing behavioral breadth is an evidence warning, never permission to
+    // add facts. The same factual and semantic guards still apply after this.
+    const thinIds = new Set(inspected.failures.filter(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION_FIT')
+      .map(issue => cards[issue.cardIndex]?.id));
+    if (thinIds.size) {
+      cards = cards.map(card => thinIds.has(card.id) ? { ...card, thinEvidence: true } : card);
+      inspected = inspectInterviewAnswerCards(cards, context, { lockedIds, floors: true, sets });
+    }
+    return inspected.failures.map(failure => ({ ...failure, cardId: cards[failure.cardIndex]?.id }));
+  };
   for (let round = 0; round <= 2; round++) {
     throwIfAborted(signal);
     cards = recoverDraft(cards);
@@ -1231,16 +1242,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       }
       priorBullets.set(card.id, history);
     }
-    let inspected = inspectInterviewAnswerCards(cards, context, { lockedIds });
-    // Missing behavioral breadth is an evidence warning, never permission to
-    // add facts. The same factual and semantic guards still apply after this.
-    const thinIds = new Set(inspected.failures.filter(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION_FIT')
-      .map(issue => cards[issue.cardIndex]?.id));
-    if (thinIds.size) {
-      cards = cards.map(card => thinIds.has(card.id) ? { ...card, thinEvidence: true } : card);
-      inspected = inspectInterviewAnswerCards(cards, context, { lockedIds });
-    }
-    failures = inspected.failures.map(failure => ({ ...failure, cardId: cards[failure.cardIndex]?.id }));
+    failures = inspectAll();
     const invalid = new Set(failures.map(failure => failure.cardId));
     const pending = cards.filter(card => !invalid.has(card.id) && approved.get(card.id) !== stable(card));
     if (pending.length) {
@@ -1253,7 +1255,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
     for (const card of cards) if (!invalid.has(card.id)) lockedIds.add(card.id);
     await report('validation', round, cards, failures);
     if (!failures.length) {
-      const bank = validateInterviewAnswerBank({ cards }, context);
+      const bank = validateInterviewAnswerBank({ cards }, context, { sets });
       await report('final', round, cards, []);
       return { bank };
     }
@@ -1272,6 +1274,26 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       // An exhausted malformed repair leaves the requested cards failing.
       // It cannot discard the already approved part of the bank or reset the
       // bounded round budget. Transport/provider failures still surface.
+      if (error?.code !== 'VALIDATION_FAILED') throw error;
+    }
+  }
+  // A required card (the introduction) none of whose wording passes the question rule has no fallback
+  // to keep, and the whole Prepare would end on it. Its wording alone is asked for once more, through the
+  // same repair step: the writer rewrites a question it was told was refused, as for any other card.
+  const wordless = cards.filter(card => isRequiredInterviewCard(card) && failures.some(issue => issue.cardId === card.id)
+    && !interviewHasPassingWording(card, context));
+  if (wordless.length) {
+    try {
+      const response = await callText(interviewAnswerRepairPrompt({ cards: wordless, failures, evidence, brief, bundle,
+        lockedCards: cards.filter(card => lockedIds.has(card.id)) }), {
+        signal, task: 'interview-answer-bank', claudeStage: 'qa-card-repair', responseSchema: interviewAnswerRepairSchema(wordless),
+        responseValidator: value => validateInterviewAnswerDraft(value, wordless, { requireExtensions: true }),
+      });
+      throwIfAborted(signal);
+      cards = recoverDraft(mergeInterviewAnswerCardRepair(cards, response, wordless));
+      failures = inspectAll();
+    } catch (error) {
+      throwIfAborted(signal);
       if (error?.code !== 'VALIDATION_FAILED') throw error;
     }
   }
@@ -1301,14 +1323,14 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       for (const { bullet } of earlier) {
         if (!approvedClaims.has(claimKey(bullet))) continue;
         const attempt = { ...candidate, bullets: candidate.bullets.map((value, at) => at === index ? bullet : value) };
-        const issues = inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), attempt], context, { lockedIds }).failures;
+        const issues = inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), attempt], context, { lockedIds, sets }).failures;
         // Other duplicate positions may still need restoring, but this one
         // must be fully safe and no new issue may be introduced.
         if (issues.every(issue => issue.rule === 'INTERVIEW_ANSWER_BULLET_DUPLICATE'
           && !issue.path.endsWith(`.bullets[${index}]`))) { candidate = attempt; break; }
       }
     }
-    if (candidate !== card && !inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), candidate], context, { lockedIds }).failures.length) {
+    if (candidate !== card && !inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), candidate], context, { lockedIds, sets }).failures.length) {
       priorDetailRecovery.set(card.id, candidate);
     }
   }
@@ -1317,7 +1339,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
   const replacements = new Map();
   const extensionsAwaitingReview = new Map();
   for (const card of cards.filter(card => omitted.has(card.id))) {
-    const candidates = INTERVIEW_REQUIRED_QUESTIONS.includes(card.question)
+    const candidates = isRequiredInterviewCard(card)
       ? interviewRequiredFallbackCandidates(card, context, { validatedClaims, validatedOnly: true })
       : whyFallbackCandidates(card);
     const supported = candidates.find(candidate => [candidate.headline, ...candidate.bullets, candidate.example]
@@ -1339,12 +1361,12 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
   // fallbacks with every ordinary truth guard, then review them together in a
   // single semantic handoff. No third writing/repair round is permitted.
   const fallbackTargets = cards.filter(card => omitted.has(card.id)
-    && (INTERVIEW_REQUIRED_QUESTIONS.includes(card.question) || isInterviewWhyQuestion(card.question) || priorDetailRecovery.has(card.id)));
+    && (isRequiredInterviewCard(card) || cardKind(card) === 'motivation' || priorDetailRecovery.has(card.id)));
   if (fallbackTargets.length) {
     // Review already-supported replacements first so the bounded candidate
     // batch cannot crowd out their previously unreviewed optional material.
     const fallbackCards = [...extensionsAwaitingReview.values(), ...fallbackTargets.filter(card => !extensionsAwaitingReview.has(card.id))
-      .flatMap(card => (INTERVIEW_REQUIRED_QUESTIONS.includes(card.question)
+      .flatMap(card => (isRequiredInterviewCard(card)
       ? interviewRequiredFallbackCandidates(card, context)
       : (priorDetailRecovery.has(card.id) ? [priorDetailRecovery.get(card.id)]
         : whyFallbackCandidates(card).slice(0, 1)))
@@ -1370,7 +1392,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       cards = recoverResumeConsistency(cards.map(card => replacements.get(card.id) || card));
       for (const id of replacements.keys()) omitted.delete(id);
     }
-    const unsafe = fallbackTargets.filter(card => omitted.has(card.id) && INTERVIEW_REQUIRED_QUESTIONS.includes(card.question));
+    const unsafe = fallbackTargets.filter(card => omitted.has(card.id) && isRequiredInterviewCard(card));
     if (unsafe.length) {
       await report('fallback', 2, cards, failures.filter(issue => omitted.has(issue.cardId)));
       await report('final', 2, cards, failures.filter(issue => omitted.has(issue.cardId)), diagnosticCards(cards, failures.filter(issue => omitted.has(issue.cardId))));
@@ -1390,16 +1412,16 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
   // Recheck coverage and all remaining bank constraints before sealing.
   while (cards.length >= INTERVIEW_ANSWER_MIN_CARDS) {
     throwIfAborted(signal);
-    const remaining = inspectInterviewAnswerCards(cards, context).failures;
+    const remaining = inspectInterviewAnswerCards(cards, context, { sets }).failures;
     finalIssues = remaining.map(issue => ({ ...issue, cardId: cards[issue.cardIndex]?.id }));
     if (!remaining.length) {
-      const bank = validateInterviewAnswerBank({ cards }, context, { droppedQuestions });
+      const bank = validateInterviewAnswerBank({ cards }, context, { droppedQuestions, sets });
       await report('final', 2, cards, [], droppedCards);
       return { bank };
     }
     const invalid = new Set(remaining.map(failure => failure.cardIndex));
     if (invalid.has(null)) break;
-    if (cards.some((card, index) => invalid.has(index) && INTERVIEW_REQUIRED_QUESTIONS.includes(card.question))) break;
+    if (cards.some((card, index) => invalid.has(index) && isRequiredInterviewCard(card))) break;
     droppedCards.push(...diagnosticCards(cards, remaining.map(issue => ({ ...issue, cardId: cards[issue.cardIndex]?.id }))));
     droppedQuestions.push(...cards.filter((_, index) => invalid.has(index)).map(card => card.question));
     cards = cards.filter((_, index) => !invalid.has(index));
@@ -1482,6 +1504,8 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
+  // Reads the saved General and posting cards (files only).
+  loadStoredQa = loadInterviewQa,
   fillApproaches = fillInterviewQaApproaches,
   fillGaps = fillInterviewQaGaps,
   // Which Q&A tabs hold no cards: the only ones a Prepare writes. It reads files only.
@@ -1670,7 +1694,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   };
   // A preparation saved while both Q&A tabs held cards is research only: it has no answer set,
   // so it is reused only while no tab is empty (an empty tab needs answers to be written).
-  const reusePrepared = async (args, { needsAnswers = false } = {}) => {
+  const reusePrepared = async (args, { needsAnswers = false, scopes = [] } = {}) => {
     try {
       const saved = JSON.parse(await fs.promises.readFile(await preparedIndexFile(args), 'utf8'));
       if (saved?.version !== 1 || !ID_RE.test(saved.briefRecordId || '')) return null;
@@ -1679,7 +1703,11 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       if (!brief || brief.inputs.careerSnapshotId !== args.snapshotId || brief.inputs.jobUrlSha256 !== sha256(args.canonicalJobUrl)
         || brief.inputs.applicationArtifactId !== args.bundleArtifactId) return null;
       const bank = await loadAnswers({ brief, briefRecordId: saved.briefRecordId, userDataPath });
-      if (bank?.cards?.length) return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: true, answerCardCount: bank.cards.length, reused: true };
+      // An answer set written for one tab holds nothing for the other: a tab that is empty now needs its own.
+      if (bank?.cards?.length && scopes.every(scope => bank.cards.some(card => interviewQaSetOf(card) === scope))) {
+        return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: true, answerCardCount: bank.cards.length, reused: true, bank };
+      }
+      if (bank?.cards?.length) return null;
       if (needsAnswers) return null;
       return { brief, briefRecordId: saved.briefRecordId, answerBankAvailable: false, answerCardCount: 0, reused: true };
     } catch { return null; }
@@ -1713,20 +1741,29 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     await bindPosting(args);
     const emptyAtStart = await emptyQaScopes({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId });
     throwIfAborted(signal);
+    // A saved answer set that covers an empty tab is the source that tab is written from: it is
+    // reused for the research and the answers, and the steps after the seal run for the empty tabs.
+    let saved = null;
     if (reuseExisting || !emptyAtStart.length) {
-      const existing = await reusePrepared(args, { needsAnswers: emptyAtStart.length > 0 });
+      const existing = await reusePrepared(args, { needsAnswers: emptyAtStart.length > 0, scopes: emptyAtStart });
       throwIfAborted(signal);
-      if (existing) return { ...existing, ...(emptyAtStart.length ? {} : { qaKept: true }) };
+      if (existing && emptyAtStart.length) saved = existing;
+      else if (existing) { const { bank: _bank, ...summary } = existing; return { ...summary, qaKept: true }; }
     }
     try {
       // Claude CLI with the application stage profiles (careerWritingCore).
       const { callText, callRaw } = aiTransport.withActivity?.(interviewActivityKey(args.manualAiRunId), args.nodeId) || aiTransport;
-      const result = await buildBrief({ ...args, callText, callRaw, signal, userDataPath: appInstance.getPath('userData') });
-      throwIfAborted(signal);
-      const published = await publishBrief({ brief: result?.brief, signal, userDataPath: appInstance.getPath('userData') });
-      throwIfAborted(signal);
-      if (!published || !isPublishedInterviewBrief(published.brief) || !ID_RE.test(published.briefRecordId)
-        || interviewPreparedBriefRecordId(published.brief) !== published.briefRecordId) throw new Error('The interview brief could not be prepared safely.');
+      let result = null;
+      let published;
+      if (saved) published = { brief: saved.brief, briefRecordId: saved.briefRecordId };
+      else {
+        result = await buildBrief({ ...args, callText, callRaw, signal, userDataPath: appInstance.getPath('userData') });
+        throwIfAborted(signal);
+        published = await publishBrief({ brief: result?.brief, signal, userDataPath: appInstance.getPath('userData') });
+        throwIfAborted(signal);
+        if (!published || !isPublishedInterviewBrief(published.brief) || !ID_RE.test(published.briefRecordId)
+          || interviewPreparedBriefRecordId(published.brief) !== published.briefRecordId) throw new Error('The interview brief could not be prepared safely.');
+      }
       // General and posting Q&A are written from the sealed bank, and only for a
       // tab that holds no cards: a tab with cards is left exactly as it is.
       let qaWarning = null;
@@ -1738,9 +1775,18 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       // The answer set is only the source the empty tabs are written from. With no empty tab it
       // would be thrown away, so this Prepare is research only and writes no answers.
       let answers = null;
-      let answerSummary = { answerBankAvailable: false, answerCardCount: 0 };
-      if (scopes.length) {
-        answers = await buildAnswers({ ...args, callText, brief: published.brief, signal, userDataPath });
+      let answerSummary = saved ? { answerBankAvailable: true, answerCardCount: saved.answerCardCount } : { answerBankAvailable: false, answerCardCount: 0 };
+      let usedSaved = Boolean(saved);
+      if (scopes.length && saved?.bank && scopes.every(scope => saved.bank.cards.some(card => interviewQaSetOf(card) === scope))) {
+        answers = { bank: saved.bank };
+      } else if (scopes.length) {
+        usedSaved = false;
+        // Only a tab with no cards is written, so the writer is asked for those sets alone.
+        // A write without the General tab is told the General questions already saved, so it does not repeat them.
+        const savedGeneral = scopes.includes('foundation') ? [] : await loadStoredQa({ userDataPath, nodeId: args.nodeId })
+          .then(stored => stored.foundation.cards.map(card => card.question)).catch(() => []);
+        answers = await buildAnswers({ ...args, callText, brief: published.brief, signal, userDataPath, savedGeneral,
+          sets: scopes.map(scope => (scope === 'foundation' ? 'general' : 'posting')) });
         throwIfAborted(signal);
         answerSummary = await publishAnswers({ bank: answers?.bank, brief: published.brief, signal, userDataPath });
         throwIfAborted(signal);
@@ -1762,11 +1808,16 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         throwIfAborted(signal);
       };
       // Reported past questions become cards and links of the posting's set only.
-      if (writesPosting) await optionalStep('disclosure mapping', 'Past interview questions could not be checked this time; prepared answers are ready.', async () => {
-        const bankQuestions = (answers?.bank?.cards || []).map(card => card.question);
-        disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText,
-          foundationQuestions: INTERVIEW_FOUNDATION_QUESTIONS.map(item => item.question),
-          companyQuestions: bankQuestions.filter(question => !isFoundationQuestion(question)) });
+      // A reused preparation has no research text to read reported questions from.
+      if (writesPosting && result) await optionalStep('disclosure mapping', 'Past interview questions could not be checked this time; prepared answers are ready.', async () => {
+        // A reported question is matched with the General questions that will exist: the ones
+        // this Prepare writes, or else the ones already saved (the person may have edited them).
+        const bankCards = answers?.bank?.cards || [];
+        const foundationQuestions = scopes.includes('foundation')
+          ? bankCards.filter(card => interviewQaSetOf(card) === 'foundation').map(card => card.question)
+          : (await loadStoredQa({ userDataPath, nodeId: args.nodeId })).foundation.cards.map(card => card.question);
+        disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText, foundationQuestions,
+          companyQuestions: bankCards.filter(card => interviewQaSetOf(card) === 'company').map(card => card.question) });
       });
       const checkedBank = answers?.bank || null;
       // With no empty tab this writes nothing (there is no bank) and only returns the saved Q&A for the practice step.
@@ -1804,13 +1855,15 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
         // company question, each recorded once with an on-device voice.
         await optionalStep('practice preparation', 'Practice recordings could not be prepared this time.', () => preparePractice({
           userDataPath, nodeId: args.nodeId, signal, callText, company,
-          questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question) }));
+          questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question),
+          // The questions the writer marked as the introduction (an earlier one is read by its wording).
+          opening: [...qa.foundation.cards, ...qa.company.cards].filter(card => cardKind(card) === 'intro').map(card => card.question) }));
       }
       // General Q&A is one set for every interview, and a posting's set is shared by its interviews:
       // whichever interview is on screen must show what this Prepare wrote.
       if (qa && scopes.length) { try { onQaChanged?.({ nodeId: args.nodeId }); } catch { /* a listener cannot fail a finished Prepare */ } }
       await rememberPrepared(args, published.briefRecordId);
-      return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}), ...(scopes.length ? {} : { qaKept: true }) };
+      return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(usedSaved ? { reused: true } : {}), ...(qaWarning ? { qaWarning } : {}), ...(scopes.length ? {} : { qaKept: true }) };
     }
     catch (error) {
       if (signal?.aborted) throw error;

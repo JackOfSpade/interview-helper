@@ -375,8 +375,8 @@ export const presentingTests = [
         let stop = false;
         let run = null;
         await React.act(async () => { run = typerRef.current.typeTo('abcdefghijklmnopqrstuvwxyz'.repeat(3), { stopped: () => stop }); });
-        // The debounce is 400 ms and the periodic send 1000 ms; keys come about 100 ms apart.
-        await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+        // The debounce is 400 ms and the periodic send 1000 ms; keys come about 150 to 400 ms apart.
+        await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 600)); });
         assert(sent.length === 1 && sent[0].length >= 1 && sent[0].length <= 5, `the first keys went out before the debounce or the periodic send: ${JSON.stringify(sent)}`);
         stop = true;
         await React.act(async () => { await run; });
@@ -1594,7 +1594,7 @@ export default [
           const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
           const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
           const heard = async id => { chat = chat.map(item => (item.id === id ? { ...item, voice: 'heard' } : item)); await act(() => pushState?.(current())); };
-          const until = async (check, label) => { for (let i = 0; i < 400; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} sent=${sent.length} pad=${JSON.stringify(pad())} chat=${JSON.stringify(chat.map(c => c.voice))}`); };
+          const until = async (check, label) => { for (let i = 0; i < 1000; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} sent=${sent.length} pad=${JSON.stringify(pad())} chat=${JSON.stringify(chat.map(c => c.voice))}`); };
           const wand = () => byLabel('Suggest a reply');
           try {
             await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));
@@ -1626,7 +1626,7 @@ export default [
             await until(() => pad().length > base.length + 20, 'typing the comment');
             floor = { n: 1, yieldMs: 150, speakerId: 'A' };
             await act(() => pushState?.(current()));
-            await settle(600);
+            await settle(2000); // the word it is on takes about a second at a person's speed
             const gaveWayAt = pad();
             await settle(300);
             strict.equal(pad(), gaveWayAt, 'nothing more is typed once it has given way');
@@ -1652,13 +1652,100 @@ export default [
     },
   },
   {
+    name: 'practice call render: new lines above a line that starts as they do are typed at the end of the line above, with nothing pushed along in front of the cursor',
+    async run() {
+      const { padEdit } = await import('../../src/practice-call/padTyping.js');
+      // call-mwttebvu: an `ensure` clause typed above `end` kept the shared "en" and pushed the "d" along with every key.
+      const before = 'do\n\t\t\tloop\n\t\t\tend\n\t\tend\n\nend';
+      const after = 'do\n\t\t\tloop\n\t\t\tend\n\t\tensure\n\t\t\tin_array: a.has (Result)\n\t\tend\n\nend';
+      const edit = padEdit(before, after);
+      strict.equal(edit.remove, 0);
+      strict.equal(edit.insert, '\n\t\tensure\n\t\t\tin_array: a.has (Result)');
+      strict.equal(before.slice(0, edit.at), 'do\n\t\t\tloop\n\t\t\tend', 'the cursor goes to the end of the line above');
+      strict.equal(`${before.slice(0, edit.at)}${edit.insert}${before.slice(edit.at)}`, after);
+      // Every place tried gives the same text; an edit that has only one place is left where it is.
+      const cases = [['', 'abc'], ['abc', 'abcd'], ['x = 1', 'x = 11'], ['foo\n', 'foo\nbar\n'], ['a\n\nend', 'a\n\tb\n\nend'], ['end', 'ensured'], ['one two', 'one three two'],
+        ['if x:\n    pass\n', 'if x:\n    pass\nif y:\n    pass\n'], ['aaaa', 'aaaaaa'], ['abc', 'axc'], ['abcd', 'ab'], ['same', 'same']];
+      for (const [from, to] of cases) {
+        const { at, remove, insert } = padEdit(from, to);
+        strict.equal(`${from.slice(0, at)}${insert}${from.slice(at + remove)}`, to, `${JSON.stringify(from)} to ${JSON.stringify(to)}`);
+      }
+      strict.deepEqual(padEdit('abc', 'abcd'), { at: 3, remove: 0, insert: 'd' }, 'text added at the end is typed at the end');
+      strict.deepEqual(padEdit('x = 1', 'x = 11'), { at: 5, remove: 0, insert: '1' });
+      strict.deepEqual(padEdit('one two', 'one three two'), { at: 4, remove: 0, insert: 'three ' }, 'a word goes in before the next word, not inside it ("one t|wo")');
+      strict.deepEqual(padEdit('foo\nend', 'foo\nbar\nend'), { at: 3, remove: 0, insert: '\nbar' }, 'a new line is opened from the end of the line above');
+      strict.deepEqual(padEdit('abc', 'axc'), { at: 1, remove: 1, insert: 'x' }, 'a replacement is left as it was');
+
+      // Through the pad itself: at every key the rest of the cursor's line is empty, and the pad ends as the target.
+      const { JSDOM } = await import('jsdom');
+      const dom = new JSDOM('<!doctype html><div id="root"></div>', { pretendToBeVisual: true });
+      const saved = {};
+      const realChannel = globalThis.MessageChannel;
+      const channels = [];
+      globalThis.MessageChannel = class { constructor() { const channel = new realChannel(); channels.push(channel); return channel; } };
+      const names = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Event', 'KeyboardEvent', 'MouseEvent'];
+      for (const name of names) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value: dom.window[name], configurable: true, writable: true }); }
+      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+      let bundle = null;
+      try {
+        bundle = await loadServerBundle();
+        const { React, createRoot, CodingPad } = bundle.module;
+        const typerRef = { current: null };
+        const root = createRoot(dom.window.document.getElementById('root'));
+        await React.act(async () => root.render(React.createElement(CodingPad, { initialText: before, typerRef })));
+        const area = dom.window.document.querySelector('textarea');
+        const seen = new Set();
+        let done = false;
+        let run = null;
+        await React.act(async () => { run = typerRef.current.typeTo(after, { pace: 0.05 }).then(result => { done = true; return result; }); });
+        while (!done) {
+          await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 2)); });
+          seen.add(area.value);
+        }
+        strict.equal(await run, true);
+        strict.equal(area.value, after);
+        assert(seen.size > 10, `the keys were seen one by one: ${seen.size}`);
+        const head = before.slice(0, edit.at);
+        const tail = before.slice(edit.at);
+        assert(tail.startsWith('\n'), 'the cursor sits at the end of a line');
+        for (const text of seen) {
+          assert(text.startsWith(head) && text.endsWith(tail), `only the new lines change: ${JSON.stringify(text)}`);
+          const typed = text.slice(head.length, text.length - tail.length);
+          assert(edit.insert.startsWith(typed), `the new lines are typed in order where the cursor is, nothing pushed along: ${JSON.stringify(typed)}`);
+        }
+        await React.act(async () => root.unmount());
+      } finally {
+        for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
+        delete globalThis.IS_REACT_ACT_ENVIRONMENT;
+        globalThis.MessageChannel = realChannel;
+        for (const channel of channels) { channel.port1.close(); channel.port2.close(); }
+        dom.window.close();
+        if (bundle) await bundle.dispose();
+      }
+    },
+  },
+  {
     name: 'practice call render: the typing estimate counts deletions and keys, and is zero when the pad already reads the target',
     async run() {
       const { padTypingMs } = await import('../../src/practice-call/padTyping.js');
       strict.equal(padTypingMs('abc', 'abc'), 0);
       const typed = padTypingMs('', 'x = 1\n');
-      assert(typed > 300 && typed < 1200, `six keys take a few hundred ms: ${typed}`);
+      assert(typed > 700 && typed < 2500, `six keys take about a second or two: ${typed}`);
       assert(padTypingMs('abcd', 'ab') > 0 && padTypingMs('abcd', 'ab') < typed, 'two deletions are quick');
+    },
+  },
+  {
+    name: 'practice call render: the hands write code at a person\'s speed, about five to seven characters a second, unevenly (call-mwttebvu)',
+    async run() {
+      const { keyDelayMs, padTypingMs } = await import('../../src/practice-call/padTyping.js');
+      const code = 'def has(self, item):\n    for x in self.items:\n        if x == item:\n            return True\n    return False\n';
+      const perSecond = code.length / (padTypingMs('', code) / 1000);
+      assert(perSecond >= 4.5 && perSecond <= 7, `characters a second: ${perSecond.toFixed(2)}`);
+      assert(keyDelayMs('x', '\n', () => 0.5) > keyDelayMs('x', 'x', () => 0.5), 'a beat before a new line\'s content');
+      assert(keyDelayMs('x', ' ', () => 0.5) > keyDelayMs('y', 'x', () => 0.5), 'a smaller beat at the start of a word');
+      assert(keyDelayMs('(', 'x', () => 0.5) > keyDelayMs('y', 'x', () => 0.5), 'brackets are a little slower');
+      assert(keyDelayMs(' ', ' ', () => 0.5) < 50, 'indentation is quick');
+      strict.equal(keyDelayMs('a', 'b', () => 0.3), keyDelayMs('a', 'b', () => 0.3), 'deterministic for a random');
     },
   },
   {
@@ -1669,7 +1756,7 @@ export default [
       strict.equal(typingPace('four words are said', 0), 1, 'nothing to type');
       strict.equal(typingPace('four words are said', 4 * SPEECH_MS_PER_WORD), 1, 'equal lengths need no change');
       strict.equal(typingPace('ten words take about four seconds to say out loud', 3200), 1.25, 'the hands slow to a longer line');
-      strict.equal(typingPace('two words', 40000), 0.75, 'a long piece is hurried only a little');
+      strict.equal(typingPace('two words', 40000), 1, 'the hands are never hurried past a person\'s speed');
       strict.equal(typingPace('a very long line '.repeat(20), 500), 1.8, 'and never slowed to a crawl');
     },
   },
@@ -1744,7 +1831,7 @@ export default [
           let pushState = null;
           let chat = [{ from: 'interviewer', text: 'Write it in the pad.', atMs: 1000 }];
           const current = () => ({ phase: 'in-call', persona: PERSONA, chat, floor: null, paused: false, pad: { open: true, lang: 'python', text: '' } });
-          const code = `x = ${'1 + '.repeat(12)}1\n`;
+          const code = `x = ${'1 + '.repeat(5)}1\n`;
           let plan = [{ say: 'First piece.', code, together: false }, { say: 'Second piece.', code: `${code}y = 2\n`, together: false }];
           window.practiceCallAPI = {
             getState: async () => current(),
@@ -1762,7 +1849,7 @@ export default [
           const settle = (ms = 5) => act(() => new Promise(resolve => setTimeout(resolve, ms)));
           const pad = () => window.document.querySelector('textarea[aria-label="Code"]').value;
           const voice = async (id, value) => { chat = chat.map(item => (item.id === id ? { ...item, voice: value } : item)); await act(() => pushState?.(current())); };
-          const until = async (check, label) => { for (let i = 0; i < 600; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} pad=${JSON.stringify(pad())}`); };
+          const until = async (check, label) => { for (let i = 0; i < 1500; i += 1) { if (check()) return; await settle(10); } strict.fail(`timed out: ${label} pad=${JSON.stringify(pad())}`); };
           const work = () => logged.filter(line => /\] work /u.test(line)).map(line => line.replace(/^\[[^\]]*\] work /u, ''));
           try {
             await act(() => root.render(bundle.module.React.createElement(bundle.module.PracticeCallApp)));

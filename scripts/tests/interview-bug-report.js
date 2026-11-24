@@ -328,7 +328,7 @@ const tests = [
           calls: [
             { callId: 'call-1', dir: '/Users/someone/Library/Application Support/Interview Helper/practice-calls/call-1', startedAt: Date.parse('2026-11-20T10:00:00.000Z'), bytes: debugText.length, text: debugText, hasAudio: true,
               transcript: [{ speaker: 'interviewer', speakerId: 'A', text: 'SECRET QUESTION?', startMs: 1500, endMs: 4000 }, { speaker: 'candidate', text: 'SECRET ANSWER', startMs: 5000, endMs: 5000, typed: true }],
-              record: { durationMs: 300_000, reason: 'candidate', transcriptEntries: 12, candidateTurns: 6, interviewers: 2, pickedQuestions: 5, askedQuestions: 4, answeredQuestions: 3, feedbackSkipped: false, timings: { setupLeadMs: 4200 } },
+              record: { durationMs: 300_000, reason: 'candidate', transcriptEntries: 12, candidateTurns: 6, interviewers: 2, pickedQuestions: 5, askedQuestions: 4, answeredQuestions: 3, feedbackSkipped: false, timings: { precheckMs: 2100, answers: [{ startMs: 1, endMs: 2 }], setupLeadMs: 140704, finalizeMs: 9000 } },
               analysis: { status: 'failed', error: 'feedback.planned marks card 2 ("SECRET OTHER QUESTION") as not asked', chapters: 0, hasFeedback: false } },
             { callId: 'call-0', startedAt: null, bytes: 0, text: null, record: null, analysis: null },
           ],
@@ -341,7 +341,8 @@ const tests = [
         '- Debug logs on disk: 2 · 4,096 bytes',
         '### Call 1 (newest): started 2026-11-20T10:00:00.000Z (300s ago)',
         'length 300s · ended candidate · 12 transcript entries (6 the candidate\'s) · 2 interviewer(s) · questions picked 5, asked 4, answered 3 · feedback skipped no · recording kept',
-        '- Timings: setupLeadMs 4200',
+        // call-mwttebvu: plain labels in seconds, never the raw stored keys.
+        '- Timings: setup before the ring 2s · recording trimmed before the answer (includes the ready and ringing screens) 141s · wrap-up 9s',
         '- Review: failed · 0 chapter(s) · feedback no · error: feedback.planned marks card 2 ("SECRET OTHER QUESTION") as not asked',
         '- Folder: `/Users/someone/Library/Application Support/Interview Helper/practice-calls/call-1`',
         '#### Transcript (2)',

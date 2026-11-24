@@ -7,17 +7,18 @@ import {
   buildInterviewAnswerEvidence,
   interviewAnswerBankApplicationDigest,
   interviewAnswerBankPrompt,
-  INTERVIEW_ANSWER_QUESTION_CATALOG,
   isInterviewAnswerBank,
   loadInterviewAnswerBank,
   publishInterviewAnswerBank,
   validateInterviewAnswerBank,
   inspectInterviewAnswerCards, mergeInterviewAnswerCardRepair, interviewAnswerRepairPrompt,
   validateInterviewAnswerDraft,
-  INTERVIEW_ANSWER_BANK_SCHEMA, interviewAnswerRepairSchema,
+  INTERVIEW_ANSWER_BANK_SCHEMA, INTERVIEW_ANSWER_MIN_CARDS, interviewAnswerRepairSchema, interviewAnswerBankSchema, interviewAnswerSets,
 } from '../../electron/ipc/interviewAnswerBank.js';
 import crypto from 'node:crypto';
 import { resumeCoverage } from '../../electron/ipc/interviewResumeCoverage.js';
+import { INTERVIEW_LEGACY_QUESTION_CATALOG as CATALOG } from '../../src/utils/interviewAnswerQuestions.js';
+import { cardKind } from '../../electron/ipc/interviewCardKinds.js';
 import { validateResponseSchema } from '../../electron/ipc/schemaValidation.js';
 
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -56,7 +57,7 @@ function statement(evidence, firstPerson = false) {
   return { text: firstPerson ? `I ${evidence.text[0].toLowerCase()}${evidence.text.slice(1)}` : evidence.text,
     evidenceIds: [evidence.id], quotes: [{ evidenceId: evidence.id, quote: evidence.text }] };
 }
-function responseFixture(context) {
+function legacyResponseFixture(context) {
   const evidence = buildInterviewAnswerEvidence(context);
   const career = evidence.find(item => item.entityId === 'achievement-1');
   const claim = (source, value) => ({ ...statement(source), text: value });
@@ -69,8 +70,8 @@ function responseFixture(context) {
       `I reviewed the ${topic} guide with the staff.`,
     ] : ['I interviewed staff about the onboarding setup requirements.', 'I created a setup research guide for the onboarding project.'];
     return {
-      id: `card-${index + 1}`, question: INTERVIEW_ANSWER_QUESTION_CATALOG[index || 23].question,
-      variants: [...INTERVIEW_ANSWER_QUESTION_CATALOG[index || 23].variants], thinEvidence: true,
+      id: `card-${index + 1}`, question: CATALOG[index || 23].question,
+      variants: [...CATALOG[index || 23].variants], thinEvidence: true,
       headline: claim(source, headline), bullets: bullets.map(value => ({ stage: 'point', ...claim(source, value) })),
       example: claim(source, index ? `I automated the ${topic} status reports for the ${topic} system.` : 'I reviewed onboarding feedback with staff about the setup guide.'), consistency: index ? { consistentWithResume: false, resumeQuote: '' } : { consistentWithResume: true, resumeQuote: career.text },
     };
@@ -78,11 +79,36 @@ function responseFixture(context) {
   const research = evidence.find(item => item.kind === 'research');
   for (const index of [2, 3]) cards[index].headline = claim(research, `This ${index === 2 ? 'role' : 'company'} interests me because Cedar serves research teams with a shared library.`);
   const intro = cards[7];
-  intro.question = INTERVIEW_ANSWER_QUESTION_CATALOG[0].question;
-  intro.variants = [...INTERVIEW_ANSWER_QUESTION_CATALOG[0].variants];
+  intro.question = CATALOG[0].question;
+  intro.variants = [...CATALOG[0].variants];
   intro.bullets = [{ stage: 'point', ...claim(evidence.find(item => item.entityId === 'achievement-3'), 'I built a reporting dashboard at Birch Works for the support team.') },
     { stage: 'point', ...claim(research, 'This role interests me because Cedar serves research teams with a shared library.') }];
   return { cards };
+}
+// Questions in the writer's own words, one per fixture card: the set, the kind and the wording the
+// current writer returns. The legacy fixture above is what earlier versions sealed.
+const OWN_WORDING = [
+  ['posting', 'other', 'What else would help us understand how you approach onboarding research?', ['Is there anything about your research work you want us to hear?', 'What should we know about how you work with research teams?']],
+  ['posting', 'other', 'Which of your experiences fits this product manager role best?', ['What experience could you bring to this role?', 'Which parts of your background apply here?']],
+  ['posting', 'motivation', 'What draws you to this role?', ['Why does this position appeal to you?', 'What made you apply for it?']],
+  ['posting', 'motivation', 'Why would you like to join Cedar?', ['What interests you about Cedar as a company?', 'Why this company over others?']],
+  ['general', 'other', 'Walk me through a piece of work you are proud of.', ['Pick one piece of work and tell me how it unfolded.', 'Describe one piece of work from start to finish.']],
+  ['general', 'problem', 'Tell me about a time something got hard and how you handled it.', ['What is a difficult situation you worked through?', 'Describe a moment when a task became harder than expected.']],
+  ['posting', 'priority', 'How do you decide what to do first when everything is urgent?', ['How do you handle competing demands on your time?', 'What does your process look like when priorities collide?']],
+  ['general', 'intro', 'Can you give me a quick introduction to who you are professionally?', ['Tell us a little about your background.', 'How would you describe your career so far?']],
+  ['general', 'disagreement', 'Describe a time you disagreed with someone you worked with.', ['What do you do when a colleague pushes back on your idea?', 'How do you handle a conflict with a teammate?']],
+  ['posting', 'leadership', 'How do you help the people around you grow?', ['What does supporting teammates look like for you?', 'Tell me about a time you coached someone.']],
+  ['posting', 'problem', 'Walk me through how you would approach a messy onboarding problem.', ['How do you break down a technical problem you have not seen before?', 'What steps do you take when a system misbehaves?']],
+  ['posting', 'process', 'Tell me about a process you made better.', ['How do you improve the way a team works?', 'What does a good before-and-after process change look like to you?']],
+];
+function responseFixture(context) {
+  const legacy = legacyResponseFixture(context);
+  return { cards: legacy.cards.map((card, index) => {
+    const [set, kind, question, variants] = OWN_WORDING[index];
+    // The fields in the order the writer returns them.
+    const { id, headline, bullets, example, extensions, consistency, thinEvidence } = card;
+    return { id, set, kind, question, variants: [...variants], headline, bullets, example, ...(extensions ? { extensions } : {}), consistency, thinEvidence };
+  }) };
 }
 function rejects(response, context, message) {
   let rejection;
@@ -186,8 +212,7 @@ export default [
       const earlier = evidence.find(item => item.entityId === 'achievement-3');
       const research = evidence.find(item => item.kind === 'research');
       const cited = (source, text) => ({ ...statement(source), text });
-      const intent = INTERVIEW_ANSWER_QUESTION_CATALOG[0];
-      const card = { ...responseFixture(context).cards[7], question: intent.question, variants: [...intent.variants],
+      const card = { ...responseFixture(context).cards[7],
         headline: cited(recent, replay.initial.headline),
         bullets: [{ stage: 'point', ...cited(earlier, replay.initial.earlier) }, { stage: 'point', ...cited(research, replay.whyResearchHeadline) }],
         example: cited(recent, 'I automated the deployment status reports for the deployment system.'),
@@ -208,7 +233,7 @@ export default [
       companyVoice.brief.companyFacts[0].fact = 'We build shared research tools for teams.';
       const voiceSource = buildInterviewAnswerEvidence(companyVoice).find(item => item.kind === 'research' && item.sourceField === 'companyFacts');
       const voicedIntro = structuredClone(card);
-      voicedIntro.bullets[1] = { stage: 'point', ...cited(voiceSource, 'This role interests me because we build shared research tools for teams.') };
+      voicedIntro.bullets[1] = { stage: 'point', ...cited(voiceSource, 'This role interests me because we built shared research tools for teams.') };
       assert(inspectInterviewAnswerCards([voicedIntro], companyVoice).failures.some(issue => issue.rule === 'INTERVIEW_ANSWER_RESEARCH_AGENCY'),
         'an interest frame cannot turn a company speaker’s we into candidate agency in the introduction');
     },
@@ -233,10 +258,9 @@ export default [
     name: 'interview answer bank: missing behavioral shape requires thin evidence on the actual card',
     run: () => {
       const context = contextFixture();
-      for (const question of ['Tell me about a result from your work.', 'How do you prioritize your work?', 'Tell me about improving a process.', 'How do you understand customer needs?']) {
-        const intent = INTERVIEW_ANSWER_QUESTION_CATALOG.find(item => item.question === question);
+      for (const kind of ['outcome', 'priority', 'process', 'customer-need']) {
         const card = structuredClone(responseFixture(context).cards[1]);
-        card.question = intent.question; card.variants = [...intent.variants]; card.thinEvidence = false;
+        card.kind = kind; card.thinEvidence = false;
         assert(inspectInterviewAnswerCards([card], context).failures.some(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION_FIT'), 'a deliverable cannot pass as an outcome, priority, change or discovery action');
         card.thinEvidence = true;
         assert(!inspectInterviewAnswerCards([card], context).failures.some(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION_FIT'), 'a narrow supported answer may retain a consistent thin-evidence warning');
@@ -250,8 +274,9 @@ export default [
       context.snapshot.profile.roles[0].endDate = 'June 2025';
       context.snapshot.profile.roles[1].endDate = 'January 2022';
       const value = responseFixture(context);
-      value.cards[7].question = INTERVIEW_ANSWER_QUESTION_CATALOG[23].question;
-      value.cards[7].variants = [...INTERVIEW_ANSWER_QUESTION_CATALOG[23].variants];
+      // The introduction moves from card 7 to card 0; card 7 becomes an ordinary posting card.
+      const introWording = { set: value.cards[7].set, kind: value.cards[7].kind, question: value.cards[7].question, variants: value.cards[7].variants };
+      Object.assign(value.cards[7], { set: 'posting', kind: 'other', question: 'What else should we know about your background in onboarding?', variants: ['Is there more you would like us to hear?'] });
       const original = buildInterviewAnswerEvidence(context).find(item => item.entityId === 'synthetic-6');
       value.cards[7].bullets = ['I tested the automation checklist for the automation system.', 'I reviewed the automation guide with the staff.']
         .map(text => ({ stage: 'point', ...statement(original), text }));
@@ -260,8 +285,7 @@ export default [
       const earlier = evidence.find(item => item.entityId === 'achievement-3');
       const research = evidence.find(item => item.kind === 'research');
       const cited = (source, text) => ({ ...statement(source), text });
-      value.cards[0] = { ...value.cards[0], question: INTERVIEW_ANSWER_QUESTION_CATALOG[0].question,
-        variants: [...INTERVIEW_ANSWER_QUESTION_CATALOG[0].variants], thinEvidence: false,
+      value.cards[0] = { ...value.cards[0], ...introWording, thinEvidence: false,
         headline: cited(own, 'I led onboarding research at Aster Labs and reduced setup time by 25%.'),
         bullets: [{ stage: 'point', ...cited(earlier, 'I built a reporting dashboard at Birch Works for the support team.') },
           { stage: 'point', ...cited(research, 'This role interests me because Cedar serves research teams with a shared library.') }],
@@ -283,11 +307,14 @@ export default [
       reversed.cards[0].headline = cited(earlier, 'I built a reporting dashboard at Birch Works for the support team.');
       reversed.cards[0].bullets[0] = { stage: 'point', ...cited(own, 'I created a setup research guide for the onboarding project.') };
       assert(rejects(reversed, context, 'intro chronology').correctionRuleIds.includes('INTERVIEW_ANSWER_INTRO_ORDER'), 'last role precedes earlier roles when dates are documented');
-      const noProject = structuredClone(value); noProject.cards = noProject.cards.filter(card => card.question !== 'Walk me through a project.');
-      assert(rejects(noProject, context, 'project is mandatory').correctionRuleIds.includes('INTERVIEW_ANSWER_PROJECT_REQUIRED'), 'project coverage is enforced at sealing');
-      const noProjectDraft = structuredClone(value); noProjectDraft.cards[4].question = INTERVIEW_ANSWER_QUESTION_CATALOG[12].question;
-      let error; try { validateInterviewAnswerDraft(noProjectDraft); } catch (caught) { error = caught; }
-      assert(error?.correctionRuleIds.includes('INTERVIEW_ANSWER_PROJECT_REQUIRED'), 'initial generation cannot omit the project walkthrough');
+      // The introduction is the one required card; a project walkthrough is not.
+      const noProject = structuredClone(value); noProject.cards = noProject.cards.filter(card => card.question !== 'Walk me through a piece of work you are proud of.');
+      assert(isInterviewAnswerBank(validateInterviewAnswerBank(noProject, context), context), 'a set without a project walkthrough still seals');
+      const noIntro = structuredClone(value); noIntro.cards[0].kind = 'other';
+      noIntro.cards[0].set = 'posting';
+      assert(rejects(noIntro, context, 'introduction is mandatory').correctionRuleIds.includes('INTERVIEW_ANSWER_INTRO_REQUIRED'), 'the introduction is enforced at sealing');
+      let error; try { validateInterviewAnswerDraft(noIntro); } catch (caught) { error = caught; }
+      assert(error?.correctionRuleIds.includes('INTERVIEW_ANSWER_INTRO_REQUIRED'), 'initial generation cannot omit the introduction');
     },
   },
   {
@@ -329,10 +356,16 @@ export default [
       const merged = mergeInterviewAnswerCardRepair(value.cards, { cards: replacement.reverse() }, targets);
       assert(JSON.stringify(merged[0]) === JSON.stringify(replacement[1]) && JSON.stringify(merged[1]) === JSON.stringify(value.cards[1]), 'merge by bound identity without rewriting passing cards');
       for (const cards of [targets.slice(1), [targets[0], targets[0]], [...targets, value.cards[4]],
-        [{ ...targets[0], question: value.cards[2].question }, targets[1]], [{ ...targets[0], id: 'wrong' }, targets[1]]]) {
+        [{ ...targets[0], kind: 'outcome' }, targets[1]], [{ ...targets[0], set: 'general' }, targets[1]], [{ ...targets[0], id: 'wrong' }, targets[1]]]) {
         let error; try { mergeInterviewAnswerCardRepair(value.cards, { cards }, targets); } catch (caught) { error = caught; }
-        assert(error?.correctionDetails?.length, 'every incomplete, unexpected or rebound sparse patch must reject');
+        assert(error?.correctionDetails?.length, 'every incomplete, unexpected or rebound (ID, set or kind) sparse patch must reject');
       }
+      // A rejected question has to be rewritable, so the repair may change its words.
+      const reworded = [{ ...targets[0], question: 'What would you like us to understand about your research approach?' }, targets[1]];
+      assert(mergeInterviewAnswerCardRepair(value.cards, { cards: reworded }, targets)[0].question === reworded[0].question, 'a repair may rewrite its card question');
+      const taken = mergeInterviewAnswerCardRepair(value.cards, { cards: [{ ...targets[0], question: value.cards[2].question }, targets[1]] }, targets);
+      assert(inspectInterviewAnswerCards(taken, context, { lockedIds: new Set(value.cards.slice(1).map(card => card.id)) }).failures
+        .some(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION' && issue.cardIndex === 0), 'a rewritten question that repeats another card is caught by inspection, on the repaired card');
       const duplicateQuestion = structuredClone(value); duplicateQuestion.cards[1].question = duplicateQuestion.cards[0].question;
       let duplicateError; try { validateInterviewAnswerDraft(duplicateQuestion); } catch (error) { duplicateError = error; }
       assert(duplicateError?.correctionDetails?.some(line => line.includes(duplicateQuestion.cards[0].question)), 'duplicate initial question identities must reject before becoming impossible immutable repairs');
@@ -397,10 +430,18 @@ export default [
       const bank = validateInterviewAnswerBank({ cards: value.cards.slice(0, 8) }, context, { droppedQuestions });
       assert(isInterviewAnswerBank(bank, context) && bank.cards.length === 8 && bank.droppedQuestions.length === 4, 'eight fully valid cards can seal with recorded omissions');
       rejects({ cards: value.cards.slice(0, 7) }, context, 'seven cards must never seal');
-      for (const dropped of [[bank.cards[0].question], ['An invented question?'], [droppedQuestions[0], droppedQuestions[0]]]) {
-        assert(!isInterviewAnswerBank({ ...bank, droppedQuestions: dropped }), 'omission metadata must contain unique catalog questions absent from the retained bank');
+      for (const dropped of [[bank.cards[0].question], [droppedQuestions[0], droppedQuestions[0]], [7]]) {
+        assert(!isInterviewAnswerBank({ ...bank, droppedQuestions: dropped }), 'omission metadata must be unique bounded text absent from the retained bank');
       }
+      // The writer's own questions are the omissions now, so no catalog membership is asked of them.
+      assert(isInterviewAnswerBank({ ...bank, droppedQuestions: ['A question that was written and dropped?'] }), 'an omitted question is any bounded text');
       assert(!isInterviewAnswerBank({ ...bank, inputs: { ...bank.inputs, careerSnapshotId: '9'.repeat(64) } }, context), 'degradation never relaxes the snapshot binding');
+      // Cards dropped for failing a truth rule cannot also fail the writer for the split of its sets.
+      const thinGeneral = responseFixture(context); const dropped = thinGeneral.cards.filter(card => [4, 5, 8].includes(Number(card.id.slice(5)) - 1));
+      thinGeneral.cards = thinGeneral.cards.filter(card => !dropped.includes(card));
+      assert(thinGeneral.cards.filter(card => card.set === 'general').length === 1, 'the survivors have one general card');
+      assert(rejects(thinGeneral, context, 'no omissions recorded').correctionRuleIds.includes('INTERVIEW_ANSWER_SET_FLOOR'), 'a writer that returns a lopsided set is refused');
+      assert(isInterviewAnswerBank(validateInterviewAnswerBank(thinGeneral, context, { droppedQuestions: dropped.map(card => card.question) }), context), 'the survivors of dropped cards are sealed with their omissions recorded');
     },
   },
   {
@@ -444,8 +485,12 @@ export default [
         response => { response.cards[0].bullets.push({ stage: 'result', text: 'The team saved $2 million.', evidenceIds: [], quotes: [] }); },
         response => { response.cards[0].headline.text = 'I was promoted after this work.'; },
         response => { response.cards[0].question = 'Why did you increase Imaginary revenue by 500% in 2026?'; },
-        response => { response.cards[0].variants = ['I was CEO of Imaginary Corp.']; },
-        response => { response.cards[0].variants = [...INTERVIEW_ANSWER_QUESTION_CATALOG[1].variants]; },
+        response => { response.cards[0].variants = ['How did you become the CEO of Birch Works?']; },
+        response => { response.cards[0].variants = [response.cards[0].question]; },
+        response => { response.cards[1].question = response.cards[0].question; },
+        response => { response.cards[0].kind = 'invented'; },
+        response => { delete response.cards[0].kind; },
+        response => { response.cards[7].set = 'posting'; },
         response => { response.cards[0].bullets[0].stage = 'result'; },
         response => { response.cards[0].bullets[0] = { stage: 'point', ...response.cards[0].headline }; },
         response => { response.cards[0].bullets[0].text = 'They interviewed staff about the onboarding setup requirements.'; },
@@ -464,7 +509,7 @@ export default [
       labeledResponse.cards[0].consistency = { consistentWithResume: false, resumeQuote: '' };
       const relationRejection = rejects(labeledResponse, labeledContext, 'same-role evidence does not prove that separate stories have a causal action/result relationship');
       assert(relationRejection.correctionRuleIds.includes('INTERVIEW_ANSWER_STAR_RELATION'), 'STAR relationship check must specifically reject mixed entities');
-      return { rejected: 13 };
+      return { rejected: 17 };
     },
   },
   {
@@ -622,6 +667,123 @@ export default [
     },
   },
   {
+    name: 'interview answer bank: the writer is offered no catalog and no fixed wording, only sets, kinds and descriptions',
+    run: () => {
+      const context = contextFixture(); const evidence = buildInterviewAnswerEvidence(context);
+      const prompt = interviewAnswerBankPrompt({ ...context, evidence });
+      const card = responseFixture(context).cards[1];
+      const repair = interviewAnswerRepairPrompt({ ...context, evidence, cards: [card], failures: [{ rule: 'INTERVIEW_ANSWER_QUESTION', path: 'cards[0].question', instruction: 'x', cardId: card.id }] });
+      for (const entry of CATALOG) for (const wording of [entry.question, ...entry.variants]) {
+        assert(!prompt.includes(wording) && !repair.includes(wording), `the earlier fixed question ${JSON.stringify(wording)} is never offered to the writer`);
+      }
+      assert(!/interests me because/iu.test(prompt) && !/interests me because/iu.test(repair), 'no opening for an interest line is quoted to the writer');
+      for (const word of ['"posting"', '"general"', 'KINDS:', 'motivation', 'customer-need', 'exactly one intro card']) assert(prompt.includes(word), `the prompt names ${word}`);
+      assert(!prompt.includes('HOST QUESTION CATALOG') && !repair.includes('repair-catalog'), 'the catalog blocks are gone from both prompts');
+      assert(prompt.includes('Shape: a sentence cited to research only') && !prompt.includes('research: Sample Co builds alert tools'), 'the interest rule is described, not shown as a sentence to copy');
+      const ranked = JSON.parse(/HOST RANKED SELECTION[^\n]*\n(.+)/u.exec(prompt)[1]);
+      assert(ranked.every(item => typeof item.kind === 'string' && !('question' in item)) && !ranked.some(item => ['intro', 'motivation'].includes(item.kind)), 'evidence is ranked per kind of answer, not per question');
+      assert(!/React|TypeScript|full-stack|ETL/u.test(prompt.split('HOST RANKED SELECTION')[0]), 'no technology or field is named as preferred evidence');
+    },
+  },
+  {
+    name: 'interview answer bank: schema asks for a set and a kind, and a repair keeps them while freeing the wording',
+    run: () => {
+      const schema = INTERVIEW_ANSWER_BANK_SCHEMA.properties.cards.items;
+      assert(schema.required.includes('set') && schema.required.includes('kind') && schema.properties.set.enum.join() === 'general,posting'
+        && schema.properties.kind.enum.includes('intro') && schema.properties.kind.enum.includes('other'), 'every card says its set and its kind');
+      assert(schema.properties.question.maxLength === 200 && schema.properties.variants.maxItems === 4, 'a question is one line; variants are at most four');
+      const value = responseFixture(contextFixture());
+      value.cards.forEach(card => { card.extensions = []; });
+      const targets = [value.cards[0], value.cards[8]];
+      const repair = interviewAnswerRepairSchema(targets);
+      const item = repair.properties.cards.items.properties;
+      assert(item.set.enum.join() === 'posting,general' && item.kind.enum.join() === 'other,disagreement' && !item.question.enum, 'a repair is bound to its cards\' set and kind, not to their words');
+      assert(validateResponseSchema({ cards: [{ ...targets[0], question: 'A different way to ask the same thing?' }, targets[1]] }, repair).length === 0, 'a reworded question satisfies the repair schema');
+    },
+  },
+  {
+    name: 'interview answer bank: a question and its variants must be plain questions a stranger could ask, when a set is written',
+    run: () => {
+      const context = contextFixture();
+      const bad = {
+        'a figure the listing does not state': 'How did you cut setup time by 40 percent?',
+        'an employer from the career text': 'What did you build at Birch Works?',
+        'a sum of money': 'How did you save $2 million on onboarding?',
+        'a second sentence': 'Tell me about onboarding. Then tell me about research.',
+        'too short': 'Why?',
+      };
+      for (const [reason, question] of Object.entries(bad)) {
+        const value = responseFixture(context); value.cards[1].question = question;
+        assert(rejects(value, context, reason).correctionRuleIds.includes('INTERVIEW_ANSWER_QUESTION'), `a question with ${reason} is rejected`);
+        const variant = responseFixture(context); variant.cards[1].variants = [question];
+        assert(rejects(variant, context, reason).correctionRuleIds.includes('INTERVIEW_ANSWER_VARIANTS'), `a variant with ${reason} is rejected`);
+      }
+      const posting = responseFixture(context); posting.cards[1].question = 'How would you run discovery for the onboarding research team at Cedar?';
+      assert(isInterviewAnswerBank(validateInterviewAnswerBank(posting, context), context), 'a posting question may name what the brief names (the company)');
+      const general = responseFixture(context); general.cards[4].question = 'How would you run discovery for the onboarding research team at Birch Works?';
+      assert(rejects(general, context, 'a general question names nothing').correctionRuleIds.includes('INTERVIEW_ANSWER_QUESTION'), 'a question shared by every interview may not name an employer from the career text');
+      const repairInfo = inspectInterviewAnswerCards(responseFixture(Object.assign(contextFixture(), {})).cards.map((card, index) => (index === 1 ? { ...card, question: bad['a figure the listing does not state'] } : card)), context)
+        .failures.find(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION');
+      assert(repairInfo && repairInfo.cardIndex === 1 && /40/u.test(repairInfo.instruction) && /stranger could ask/u.test(repairInfo.instruction), 'the rejection names the words and reaches the repair rounds as a card failure');
+    },
+  },
+  {
+    name: 'interview answer bank: a stored bank is never re-judged by the question rule or the set floors, only a written one is',
+    run: async () => {
+      const context = contextFixture();
+      const bank = validateInterviewAnswerBank(responseFixture(context), context);
+      assert(bank.cards.every(card => ['general', 'posting'].includes(card.set) && typeof card.kind === 'string'), 'a sealed card keeps its set and kind');
+      // The listing is not stored with the bank: a figure that only the listing could license must still load.
+      const stored = structuredClone(bank); stored.cards[1].question = 'How would you handle 40 onboarding sessions at once?';
+      assert(isInterviewAnswerBank(stored) && isInterviewAnswerBank(stored, context), 'reload checks structure and truth, never the writer-time wording rule');
+      const written = responseFixture(context); written.cards[1].question = stored.cards[1].question;
+      rejects(written, context, 'the same wording is refused when a set is written');
+      const lopsided = responseFixture(context);
+      for (const card of lopsided.cards) if (card.set === 'posting' && card.kind !== 'motivation') card.set = 'general';
+      assert(rejects(lopsided, context, 'two posting cards').correctionRuleIds.includes('INTERVIEW_ANSWER_SET_FLOOR'), 'a written set keeps at least three cards in each tab');
+      let draftRules; try { validateInterviewAnswerDraft(lopsided, undefined, { requireExtensions: false }); } catch (error) { draftRules = error.correctionRuleIds; }
+      assert(draftRules?.includes('INTERVIEW_ANSWER_SET_FLOOR'), 'the writer is told at the draft stage');
+      const sealedLopsided = structuredClone(bank); sealedLopsided.cards.forEach(card => { if (card.set === 'posting' && card.kind !== 'motivation') card.set = 'general'; });
+      assert(isInterviewAnswerBank(sealedLopsided), 'a stored bank with an uneven split reloads');
+      const wrongIntro = structuredClone(bank); wrongIntro.cards[7].set = 'posting';
+      assert(!isInterviewAnswerBank(wrongIntro), 'the introduction cannot move out of the General set, stored or written');
+      const twoIntros = structuredClone(bank); twoIntros.cards[8].kind = 'intro';
+      assert(!isInterviewAnswerBank(twoIntros), 'one introduction only');
+      const half = structuredClone(bank); delete half.cards[3].set;
+      assert(!isInterviewAnswerBank(half), 'a card says both its set and kind or neither');
+    },
+  },
+  {
+    name: 'interview answer bank: a bank sealed by an earlier version (catalog wording, no set or kind) still seals, reloads and keeps its rules',
+    run: async () => {
+      const context = contextFixture(); const legacy = legacyResponseFixture(context);
+      const bank = validateInterviewAnswerBank(legacy, context);
+      assert(isInterviewAnswerBank(bank, context) && bank.cards.every(card => !('set' in card) && !('kind' in card)), 'a legacy bank validates as written');
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-bank-legacy-'));
+      try {
+        const sealed = await publishInterviewAnswerBank({ bank, userDataPath: root });
+        assert((await loadInterviewAnswerBank({ ...sealed, userDataPath: root, ...context }))?.cards.length === 12, 'a legacy sealed set reloads against its sources');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+      for (const [reason, mutate] of [
+        ['a question outside the catalog', value => { value.cards[0].question = 'What did you do at Imaginary Corp?'; }],
+        ['variants of another question', value => { value.cards[0].variants = [...CATALOG[1].variants]; }],
+        ['a repeated question', value => { value.cards[1].question = value.cards[0].question; }],
+      ]) {
+        const value = legacyResponseFixture(context); mutate(value);
+        rejects(value, context, reason);
+      }
+      const noIntro = legacyResponseFixture(context); noIntro.cards = noIntro.cards.filter(card => card.question !== CATALOG[0].question);
+      assert(rejects(noIntro, context, 'legacy intro').correctionRuleIds.includes('INTERVIEW_ANSWER_INTRO_REQUIRED'), 'a legacy set still needs its introduction');
+      const lopsided = legacyResponseFixture(context);
+      assert(isInterviewAnswerBank(validateInterviewAnswerBank(lopsided, context)), 'no set floors apply to a legacy-shaped set');
+      // The legacy project walkthrough keeps its narrow-required form; kinds read through the legacy table.
+      assert(cardKind(bank.cards[4]) === 'other' && cardKind(bank.cards[7]) === 'intro' && cardKind(bank.cards[2]) === 'motivation', 'a legacy card is read through the legacy table');
+      const narrowProject = structuredClone(legacyResponseFixture(context).cards[4]);
+      narrowProject.thinEvidence = true; narrowProject.bullets = [narrowProject.bullets[0]]; narrowProject.headline.text = narrowProject.bullets[0].text;
+      assert(!inspectInterviewAnswerCards([narrowProject], context).failures.some(issue => issue.rule === 'INTERVIEW_ANSWER_BULLETS'), 'a narrowed legacy project card keeps loading');
+    },
+  },
+  {
     name: 'interview answer bank: private atomic content-addressed persistence revalidates bindings and rejects tampering',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-answer-bank-'));
@@ -679,6 +841,94 @@ export default [
         assert(await publishInterviewAnswerBank({ bank, userDataPath: root }).then(() => false, () => true) && replaced, 'publication must independently reopen and verify its just-linked artifact');
         return { bounded: true, replaced: true };
       } finally { fs.promises.open = originalOpen; fs.promises.link = originalLink; await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview answer bank: the declared kind is not free: "other" cannot carry a question that asks for a shape the host checks',
+    run: () => {
+      const context = contextFixture();
+      const ask = (kind, question, variants) => {
+        const value = responseFixture(context); value.cards[1].kind = kind; value.cards[1].question = question;
+        if (variants) value.cards[1].variants = variants;
+        return value;
+      };
+      const conflict = 'Tell me about a conflict with a coworker that you worked through.';
+      const stuck = rejects(ask('other', conflict), context, 'kind other on a conflict question');
+      assert(stuck.correctionRuleIds.includes('INTERVIEW_ANSWER_CARD_KIND') && /disagreement/u.test(JSON.stringify(stuck.correctionDetails)), 'a conflict question declared as other is refused and the answer says which shape it asks for');
+      for (const [question, shape] of [['How do you prioritize competing demands on a team?', 'priority'], ['Which tradeoff did you weigh when you chose a tool?', 'decision'], ['How do you respond to feedback on your drafts?', 'feedback']]) {
+        assert(/(?:INTERVIEW_ANSWER_CARD_KIND)/u.test(rejects(ask('other', question), context, shape).correctionRuleIds.join()), `${shape} wording on an "other" card is refused`);
+      }
+      // The same wording in a variant is no way around it.
+      assert(rejects(ask('other', 'Which of your experiences fits this role best?', ['Describe a conflict you resolved.']), context, 'variant').correctionRuleIds.includes('INTERVIEW_ANSWER_CARD_KIND'), 'a variant that asks for a shape is read too');
+      // Declaring the real kind removes the refusal (the kind's own answer-shape check then applies as before).
+      let rules = []; try { validateInterviewAnswerBank(ask('disagreement', conflict), context); } catch (error) { rules = error.correctionRuleIds || []; }
+      assert(!rules.includes('INTERVIEW_ANSWER_CARD_KIND'), 'declaring the kind the question asks for is not refused for its kind');
+      // A plain "other" question is untouched, and a stored card is never re-judged by wording.
+      assert(isInterviewAnswerBank(validateInterviewAnswerBank(responseFixture(context), context), context), 'ordinary other cards pass');
+      const bank = validateInterviewAnswerBank(responseFixture(context), context);
+      const stored = structuredClone(bank); stored.cards[1].question = conflict;
+      assert(isInterviewAnswerBank(stored) && isInterviewAnswerBank(stored, context), 'a sealed card keeps the kind it was sealed with');
+      const fresh = inspectInterviewAnswerCards(ask('other', conflict).cards, context).failures;
+      assert(fresh.some(issue => issue.rule === 'INTERVIEW_ANSWER_CARD_KIND' && issue.cardIndex === 1), 'the sparse repair loop sees it as a card failure');
+    },
+  },
+  {
+    name: 'interview answer bank: Prepare asks for the tabs it writes: no general cards, floor or introduction when General is already saved, and the reverse',
+    run: () => {
+      const context = contextFixture(); const evidence = buildInterviewAnswerEvidence(context);
+      const promptFor = sets => interviewAnswerBankPrompt({ ...context, bundle: { ...context.bundle, listingText: 'Product Manager at Cedar.' }, evidence, ...(sets ? { sets } : {}) });
+      const both = promptFor(); const posting = promptFor(['posting']); const general = promptFor(['general']);
+      assert(interviewAnswerSets(['general', 'posting']).join() === 'general,posting' && interviewAnswerSets(undefined).join() === 'general,posting' && interviewAnswerSets([]).join() === 'general,posting' && interviewAnswerSets(['nope']).join() === 'general,posting', 'with no tab named both are written');
+      assert(both.includes('ALWAYS include exactly one intro card') && both.includes('at least 3 in each set') && both.includes('Prepare 12–20'), 'the full prompt is unchanged in what it asks for');
+      assert(!posting.includes('ALWAYS include exactly one intro card') && posting.includes('Write no introduction') && posting.includes('write no general card') && posting.includes('Prepare 12–20')
+        && !posting.includes('intro (asks the person to introduce themselves') && !posting.includes('at least 3 in each set'), 'a posting-only prompt asks for posting cards and no introduction');
+      assert(general.includes('ALWAYS include exactly one intro card') && general.includes('write no posting card') && general.includes('Prepare 12–16')
+        && !general.includes('motivation (asks why') && !general.includes('at least 3 in each set'), 'a general-only prompt asks for general cards, with the introduction, and no why card');
+      assert(interviewAnswerBankSchema() === INTERVIEW_ANSWER_BANK_SCHEMA, 'both tabs use the unchanged schema');
+      const postingSchema = interviewAnswerBankSchema(['posting']).properties.cards; const generalSchema = interviewAnswerBankSchema(['general']).properties.cards;
+      assert(postingSchema.items.properties.set.enum.join() === 'posting' && postingSchema.minItems === 12 && postingSchema.maxItems === 20, 'the writer may only return posting cards');
+      assert(generalSchema.items.properties.set.enum.join() === 'general' && generalSchema.minItems === 12 && generalSchema.maxItems === 16, 'the General tab alone is a shorter list');
+      assert(interviewAnswerRepairSchema([{ id: 'card-1', set: 'posting', kind: 'other', question: 'x' }]).properties.cards.items.properties.set.enum.join() === 'posting', 'a repair keeps its card set');
+      const rulesOf = (run) => { try { run(); return []; } catch (error) { return error.correctionRuleIds || [error.message]; } };
+      const asPosting = value => ({ cards: value.cards.map(card => ({ ...card, set: 'posting', ...(card.kind === 'intro' ? { kind: 'other' } : {}) })) });
+      const onlyPosting = asPosting(responseFixture(context));
+      assert(rulesOf(() => validateInterviewAnswerDraft(onlyPosting, undefined, { sets: ['posting'] })).length === 0, 'twelve posting cards with no introduction are a complete draft when only the posting tab is written');
+      const draftRules = rulesOf(() => validateInterviewAnswerDraft(onlyPosting, undefined, {}));
+      assert(draftRules.includes('INTERVIEW_ANSWER_INTRO_REQUIRED') && draftRules.includes('INTERVIEW_ANSWER_SET_FLOOR'), 'with both tabs written the same draft misses its introduction and its general cards');
+      assert(rulesOf(() => validateInterviewAnswerDraft(responseFixture(context), undefined, { sets: ['posting'] })).includes('INTERVIEW_ANSWER_CARD_KIND'), 'a general card in a posting-only draft is refused');
+      const onlyGeneral = { cards: responseFixture(context).cards.map(card => ({ ...card, set: 'general', ...(card.kind === 'motivation' ? { kind: 'other' } : {}) })) };
+      assert(rulesOf(() => validateInterviewAnswerDraft(onlyGeneral, undefined, { sets: ['general'] })).length === 0, 'twelve general cards, one of them the introduction, are a complete General draft');
+      assert(rulesOf(() => validateInterviewAnswerDraft({ cards: onlyGeneral.cards.slice(0, 7) }, undefined, { sets: ['general'] })).includes('INTERVIEW_ANSWER_CARD_COUNT'), 'a General draft below its range is refused');
+      assert(rulesOf(() => validateInterviewAnswerDraft({ cards: onlyGeneral.cards.filter(card => card.kind !== 'intro').concat(onlyGeneral.cards.slice(0, 1).map(card => ({ ...card, id: 'extra-card' }))) }, undefined, { sets: ['general'] })).includes('INTERVIEW_ANSWER_INTRO_REQUIRED'), 'the General tab keeps its introduction');
+      // The host's own checks read the same sets.
+      const floors = (cards, sets) => inspectInterviewAnswerCards(cards, context, { floors: true, sets }).failures.map(issue => issue.rule);
+      assert(!floors(onlyPosting.cards, ['posting']).some(rule => /INTRO_REQUIRED|SET_FLOOR/u.test(rule)), 'no introduction and no general floor for a posting-only write');
+      assert(floors(onlyPosting.cards, undefined).includes('INTERVIEW_ANSWER_INTRO_REQUIRED') && floors(onlyPosting.cards, undefined).includes('INTERVIEW_ANSWER_SET_FLOOR'), 'with no tab named the same cards fail both');
+      assert(floors(responseFixture(context).cards, ['posting']).includes('INTERVIEW_ANSWER_CARD_KIND'), 'a general card among posting-only cards is a card failure');
+      const bank = validateInterviewAnswerBank(onlyPosting, context, { sets: ['posting'] });
+      assert(isInterviewAnswerBank(bank, context) && bank.cards.every(card => card.set === 'posting'), 'a posting-only answer set seals and reloads without an introduction');
+      assert(rulesOf(() => validateInterviewAnswerBank(onlyPosting, context)).includes('INTERVIEW_ANSWER_INTRO_REQUIRED'), 'a bank for both tabs still needs its introduction');
+      const noIntro = structuredClone(validateInterviewAnswerBank(responseFixture(context), context));
+      noIntro.cards = noIntro.cards.filter(card => card.kind !== 'intro');
+      assert(!isInterviewAnswerBank(noIntro), 'a stored bank that holds general cards still needs its introduction');
+    },
+  },
+  {
+    name: 'interview answer bank: every write asks for more cards than the floor, and a posting-only write is told the General questions already saved',
+    run: () => {
+      const context = contextFixture(); const evidence = buildInterviewAnswerEvidence(context);
+      for (const sets of [['general'], ['posting'], ['general', 'posting']]) {
+        const range = interviewAnswerBankSchema(sets).properties.cards;
+        assert(range.minItems - INTERVIEW_ANSWER_MIN_CARDS >= 4, `${sets.join('+')} asks for at least four more than the sealed-set floor, so a few dropped cards never fail the Prepare`);
+      }
+      const saved = ['What do you do when priorities collide?', 'How do you like to receive feedback?'];
+      const promptFor = (sets, savedGeneral) => interviewAnswerBankPrompt({ ...context, bundle: { ...context.bundle, listingText: 'Product Manager at Cedar.' }, evidence, sets, savedGeneral });
+      const posting = promptFor(['posting'], saved);
+      assert(posting.includes('do not repeat or reword any of them') && saved.every(question => posting.includes(question)), 'the saved General questions are given as data');
+      assert(posting.includes('interview-answer-saved-general-questions'), 'and wrapped as untrusted data');
+      assert(!promptFor(['posting']).includes('saved-general-questions') && !promptFor(['posting'], []).includes('do not repeat or reword'), 'nothing to avoid, nothing said');
+      assert(!promptFor(['general'], saved).includes('saved-general-questions') && !promptFor(undefined, saved).includes('saved-general-questions'), 'a write that includes General has no saved General questions to avoid');
+      assert(/takes no particular job, manager, team, employer or field for granted/u.test(posting) && /length of time/u.test(posting), 'the rules the General check applies are stated in the prompt');
     },
   },
 ];

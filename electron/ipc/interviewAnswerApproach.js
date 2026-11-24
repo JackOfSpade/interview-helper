@@ -3,7 +3,7 @@
  *
  * Questions such as "How do you work under pressure?" ask for a way of
  * working, not for one past event. For those the Q&A card holds two or three
- * short imperative reminders ("Split work into small tasks") that the person
+ * short imperative reminders (a verb and a few words naming a way of working) that the person
  * illustrates with a real example of their own while speaking.
  *
  * A reminder is general good practice, never a statement about the person: the
@@ -37,7 +37,7 @@ export function interviewApproachPrompt(units) {
   return `For each interview QUESTION below, decide whether it asks HOW the candidate works (a habit, method or attitude, for example handling pressure, disagreement, feedback, priorities, ambiguity, change, mistakes, teamwork or planning) or asks for something else (their background, one named project, a result, why this role or company, facts about their experience).
 For a HOW question return 2–${APPROACH_MAX_REMINDERS} reminders. For any other question return an empty reminders list.
 A REMINDER is widely accepted good practice for answering that question, written so the candidate can glance at it mid-interview and then tell a real example of their own. Use what interviewers are known to look for in a strong answer to that question.
-REMINDER FORMAT: an instruction starting with a verb, 2–${APPROACH_MAX_WORDS} words, at most ${APPROACH_MAX_CHARS} characters, no final period. Example of the form only: "Split work into small tasks". Each reminder of one card is a different idea, most useful first.
+REMINDER FORMAT: an instruction starting with a verb, 2–${APPROACH_MAX_WORDS} words, at most ${APPROACH_MAX_CHARS} characters, no final period. Choose each for this question; do not reuse stock phrases. Each reminder of one card is a different idea, most useful first.
 NEVER describe the candidate: no "I", "we", "my" or "our", no past-tense account of something done, no employer, product, person or technology name, and no number. A reminder states a way of working that anyone could follow; the candidate supplies what actually happened.
 EXAMPLE LINE: each question lists the candidate's already prepared answer lines with an id. When one of those lines is a real instance of a reminder, put that line's id in exampleLine; otherwise use an empty string. Use a line id at most once per card, never invent an id, and never restate the line in the reminder.
 Return JSON {cards:[{id,reminders:[{text,exampleLine}]}]} with exactly one entry for every question id.

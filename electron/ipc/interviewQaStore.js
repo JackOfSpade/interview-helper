@@ -20,7 +20,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
+import { INTERVIEW_CARD_KIND_NAMES, legacyQuestionEntry } from './interviewCardKinds.js';
 
  const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
 const STORE_VERSION = 1;
@@ -42,8 +42,18 @@ const ORIGINS = new Set(['catalog', 'disclosed', 'posting', 'research', 'user'])
 const hasControl = value => [...value].some(character => { const code = character.codePointAt(0); return (code < 32 && code !== 9 && code !== 10 && code !== 13) || code === 127; });
 
 export const normalizeQuestion = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const FOUNDATION_KEYS = new Set(INTERVIEW_FOUNDATION_QUESTIONS.map(item => normalizeQuestion(item.question)));
-export const isFoundationQuestion = question => FOUNDATION_KEYS.has(normalizeQuestion(question));
+/**
+ * Which tab a prepared card belongs to: `foundation` (the General tab, shared by
+ * every interview) or `company` (the posting's tab). The answer writer says so
+ * itself (`set`). A card written by an earlier version says nothing, and its
+ * question is looked up in the legacy table; a question that is not in it is a
+ * posting question, as it always was.
+ */
+export function interviewQaSetOf(card) {
+  if (card?.set === 'general') return 'foundation';
+  if (card?.set === 'posting') return 'company';
+  return legacyQuestionEntry(card?.question)?.set === 'general' ? 'foundation' : 'company';
+}
 
 const text = (value, max) => typeof value === 'string' && value.length <= max && !hasControl(value);
 const statementText = statement => (typeof statement === 'string' ? statement : statement?.text || '').trim();
@@ -224,6 +234,8 @@ async function locked(userDataPath, scope, nodeId, task) {
     source: card.source && typeof card.source.url === 'string' ? { url: card.source.url, date: String(card.source.date || 'unknown'), quote: String(card.source.quote || '') } : null,
     author: card.author === 'user' ? 'user' : 'generated',
     status: cardStatus(card),
+    // The kind of answer the question asks for, when the writer said (it orders the practice).
+    ...(INTERVIEW_CARD_KIND_NAMES.includes(card.kind) ? { kind: card.kind } : {}),
     thinEvidence: card.thinEvidence === true,
     // An honest-gap answer: the career text does not show what the question asks about.
     gap: card.gap === true && isAnsweredCard(card),
@@ -295,7 +307,8 @@ export async function saveInterviewQaCard({ userDataPath, nodeId, scope, card })
     // No reminders before and none now means "not written yet", so the next
     // Prepare may still write them; an emptied list stays empty.
     if (!edited.approach.length && !Array.isArray(previous.approach)) delete edited.approach;
-    store.cards[index] = { ...edited, origin: previous.origin || 'catalog', source: previous.source || null };
+    // The kind of answer the question asks for survives an edit of its words.
+    store.cards[index] = { ...edited, ...(INTERVIEW_CARD_KIND_NAMES.includes(previous.kind) ? { kind: previous.kind } : {}), origin: previous.origin || 'catalog', source: previous.source || null };
     await writeStore(userDataPath, scope, nodeId, store);
     return section(store, scope);
   });
@@ -346,9 +359,16 @@ export async function clearInterviewQaCards({ userDataPath, nodeId, scope }) {
 
 // ------------------------------------------------------- empty tabs only --
 
+// The tab a card is stored in says its set, so the writer's `set` is not kept; its kind is.
 function generatedCard(card, { origin = 'catalog', source = null } = {}) {
-  return { ...structuredClone(card), origin, source, author: 'generated', updatedAt: new Date().toISOString() };
+  const { set: _set, ...rest } = structuredClone(card);
+  return { ...rest, origin, source, author: 'generated', updatedAt: new Date().toISOString() };
 }
+
+// The writer numbers its cards from one again with every set it writes. General practice counts are kept by card id,
+// so a General card written by Prepare takes an id from its own question: the same wording keeps its counts after the
+// tab is cleared and written again, and a different question never inherits another's.
+const generalCardId = question => `g-${crypto.createHash('sha256').update(normalizeQuestion(question)).digest('hex').slice(0, 12)}`;
 
 function companyKey(value) { return normalizeQuestion(String(value || '').replace(/\b(?:incorporated|inc|llc|ltd|limited|corp|corporation|co|company|gmbh|plc)\b\.?/giu, ' ')); }
 const isCompanyPlaceholder = value => /^unknown(?: company)?$/iu.test(String(value || '').trim());
@@ -421,8 +441,8 @@ function fillCards(store, incoming) {
 export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, bank, company = '', disclosureMapping = [], scopes = QA_SCOPES }) {
   const wanted = new Set(scopesOf(scopes));
   const generated = (bank?.cards || []).filter(isAnsweredCard);
-  const foundationIncoming = generated.filter(card => isFoundationQuestion(card.question)).map(card => generatedCard(card));
-  const companyIncoming = generated.filter(card => !isFoundationQuestion(card.question)).map(card => generatedCard(card));
+  const foundationIncoming = generated.filter(card => interviewQaSetOf(card) === 'foundation').map(card => generatedCard({ ...card, id: generalCardId(card.question) }));
+  const companyIncoming = generated.filter(card => interviewQaSetOf(card) === 'company').map(card => generatedCard(card));
   const links = [];
   for (const item of disclosureMapping) {
     const source = { url: item.sourceUrl, date: item.sourceDate || 'unknown', quote: item.evidenceQuote || '' };

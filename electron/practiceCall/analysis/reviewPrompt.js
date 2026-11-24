@@ -231,11 +231,13 @@ function formatToneTimeline(samples, onClock = clock) {
 
 /** The metrics block for the prompt: every recording time in its lists (answers, cut-ins, interruptions) as active-clock mm:ss, not raw recording milliseconds. */
 const METRIC_TIMES = Object.freeze({ atMs: 'at', startMs: 'start', endMs: 'end', interviewerEndMs: 'interviewerEnd' });
-function metricsOnClock(metrics, onClock) {
+function metricsOnClock(metrics, onClock, transcript = []) {
   if (!metrics || typeof metrics !== 'object') return metrics;
+  // An answer made only of voiced lines is marked, so its voice-bound numbers are not read as the candidate's.
+  const voicedAnswer = entry => Array.isArray(entry?.turnIndexes) && entry.turnIndexes.length > 0 && entry.turnIndexes.every(index => transcript[index]?.voiced === true);
   const timed = items => (Array.isArray(items) ? items.map(entry => {
     if (!entry || typeof entry !== 'object') return entry;
-    const copy = {};
+    const copy = voicedAnswer(entry) ? { voicedAnswer: true } : {};
     for (const [key, value] of Object.entries(entry)) {
       if (METRIC_TIMES[key] && Number.isFinite(value)) copy[METRIC_TIMES[key]] = onClock(value);
       else copy[key] = value;
@@ -245,6 +247,31 @@ function metricsOnClock(metrics, onClock) {
   const copy = { ...metrics };
   for (const key of ['answers', 'typedAnswers', 'interviewerCutIns', 'candidateInterruptions']) if (key in copy) copy[key] = timed(copy[key]);
   return copy;
+}
+
+// Pad changes closer together than this are one stretch of typing. The record holds the pad only when it was sent
+// (every second or so while keys come, but 6 to 9 s apart across a thinking beat in call-mwttebvu), so a shorter gap
+// split one stretch of typing into points.
+const TYPING_GAP_MS = 10000;
+
+/** The stretches the candidate was typing in the pad, from when its text changed, on the active clock. */
+export function typingSpans(snapshots, onClock = clock) {
+  const times = [];
+  let last = '';
+  for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
+    const at = Number(snapshot?.atMs);
+    if (!Number.isFinite(at)) continue;
+    const text = String(snapshot?.text ?? '');
+    if (text !== last) times.push(at);
+    last = text;
+  }
+  const spans = [];
+  for (const at of times.sort((a, b) => a - b)) {
+    const tail = spans.at(-1);
+    if (tail && at - tail.endMs <= TYPING_GAP_MS) tail.endMs = at;
+    else spans.push({ startMs: at, endMs: at });
+  }
+  return spans.map(span => (span.endMs - span.startMs < 1000 ? onClock(span.startMs) : `${onClock(span.startMs)}-${onClock(span.endMs)}`));
 }
 
 function formatMetrics(metrics) {
@@ -290,7 +317,12 @@ const PICKED_RULE = [
 
 // Only on a call that has such a turn: a line that ended on a statement rather than a question.
 const STATEMENT_RULE = '- An interviewer turn marked (asked nothing; left room for a reaction) ended on a statement, not a question. The candidate was not required to answer it: never fault them for a silence after it or for the interviewer picking the conversation up again, and never count that silence as slow responding. A reaction to it, when they gave one, is judged like any other answer.';
-const PANEL_RULE = '- Panel: more than one interviewer was on this call. Say how the candidate handled that (addressing the right person, coping with a hand-over between interviewers or with a colleague who joined late), but only when the transcript shows it. Do not comment on it otherwise, and do not fault the candidate for how the interviewers dealt with each other.';
+const PANEL_RULE = '- Panel: more than one interviewer was on this call. Praise or fault for how the candidate dealt with a joiner, a hand-over or the panel is given only when a candidate line shows it, and then you name what they said (a greeting, a name used, a question put to one interviewer). A colleague who joined or a hand-over that the candidate said nothing about is not praised ("welcomed", "handled smoothly") and not faulted: say nothing about it. Do not fault the candidate for how the interviewers dealt with each other.';
+
+// How the candidate talked while writing is only known from when the pad changed; without those spans it is not commented on.
+const PAD_TALK_RULE = '- Talking while typing: how the candidate talked while writing is judged only from the typing spans listed with the pad, set against the times of their speech in the transcript. When no typing spans are listed, say nothing about whether they narrated while typing. Never advise narrating while typing, or talking only after finishing, from the final pad text alone.';
+const HEDGED_POINT_RULE = '- A point you can only state conditionally ("if the pad was quiet", "if they had...") is never a priority and not worth a line: leave it out, or state it only when the data settles it.';
+const VOICED_RULE = '- Voiced answers: an answer marked voicedAnswer in the metrics was spoken in a generated voice. Its pace, pauses, pitch, loudness and tone belong to that voice, not to the candidate: never coach them and never make them a priority (do not say to slow down or speed up, or that the answer sounded flat or less confident). Judge such an answer for its content.';
 
 const TYPED_ONLY_NOTE = [
   'The candidate answered only by typing in the chat; every candidate turn below is typed text, and no spoken answer was recorded. This is how the call went, not a technical failure.',
@@ -393,7 +425,7 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const unprepared = unpreparedText(callRecord);
   const picked = pickedCards(callRecord, plan);
   const sections = [
-    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', transcript.some(turn => turn?.statement === true && turn.speaker !== 'candidate') ? STATEMENT_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : ''].filter(Boolean).join('\n'),
+    [RULES, SCOPE_RULES, picked ? PICKED_RULE : '', interviewers.length ? PANEL_RULE : '', transcript.some(turn => turn?.statement === true && turn.speaker !== 'candidate') ? STATEMENT_RULE : '', screens.length || hasPad ? SCREEN_PAD_RULE : '', hasPad ? PAD_TALK_RULE : '', HEDGED_POINT_RULE, transcript.some(turn => turn?.voiced === true) ? VOICED_RULE : ''].filter(Boolean).join('\n'),
     '--- CALL ---', header,
     ...(typedOnly ? ['--- HOW THE CANDIDATE ANSWERED ---', TYPED_ONLY_NOTE] : []),
     ...(picked
@@ -401,9 +433,10 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
       : ['--- PLAN (prepared answers the candidate could draw on; the interviewers did not see them) ---', formatPlan(plan)]),
     ...(unprepared ? ['--- THE UNPREPARED QUESTION ---', UNPREPARED_NOTE(unprepared)] : []),
     '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers, at),
-    ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at))]),
+    ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at, transcript))]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
-    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP))] : []),
+    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP)),
+      `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at).join(', ') || '(no typing times were recorded)'}`] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),
       '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples, at),

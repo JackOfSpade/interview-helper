@@ -2,7 +2,7 @@ import React from 'react';
 
 /** Keep provenance visible even when a card has no prepared answer. */
 export function InterviewQaBadges({ card, details = false }) {
-  const originLabel = { disclosed: 'Disclosed', posting: 'From posting', research: 'From research', catalog: 'Standard', user: 'Your card' }[card.origin];
+  const originLabel = { disclosed: 'Disclosed', posting: 'From posting', research: 'From research', catalog: 'Generated', user: 'Your card' }[card.origin];
   const url = /^https?:\/\//i.test(card.source?.url || '') ? card.source.url : null;
   return <div className="interview-qa-badges flex flex-wrap items-center gap-2 text-[10px] text-white/60">
     {originLabel && (url ? <a className="qa-origin rounded border border-current px-1 underline" href={url} target="_blank" rel="noreferrer">{originLabel}</a> : <span className="qa-origin rounded border border-current px-1">{originLabel}</span>)}

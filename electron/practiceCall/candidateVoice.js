@@ -74,12 +74,13 @@ export function candidateTagPrompt({ text, sentences: given = null, transcript =
     'Choose delivery tags so it sounds like a prepared, confident, likeable candidate speaking naturally on a call, not someone reading aloud. You only name the tags; the line itself is never re-typed.',
     '',
     'Rules:',
-    '- A tag is a short, plain, lower-case description of how the voice sounds, in square brackets, for example [warmly], [engaged], [thoughtful], [confident], [matter-of-fact], [brightening], [earnest], [light laugh], [slightly slower]. Write the one each moment calls for. It is placed right before the sentence you number.',
-    '- Choose them from what the line says and where the conversation is: friendly for small talk, steady and confident for an experience story, a lift for a result they are proud of, thoughtful for a hard question, a light laugh only when something is actually funny.',
+    // No sample tags here: a sample is copied. Every tag in the call of 2026-11-23 was one the prompt had listed.
+    '- A tag is a short, plain, lower-case direction in square brackets for how the next words are said: a feeling, an energy, a pace or a small human sound. It is placed right before the sentence you number. Write your own, in your own words, for what that sentence needs.',
+    '- Choose each from what the sentence says and where it sits in the conversation: what was just asked, what the candidate is describing, and how the moment would feel to the person speaking. Tags may differ from sentence to sentence and from line to line; do not settle on a favourite. A small human sound only when the moment really calls for it.',
     // The batch holds several lines, so "the whole line" read as the whole batch and left most lines plain (call of 2026-11-22).
     `- Most sentences need no tag. ${Array.isArray(given) ? 'Usually one or two tags in each line (a line of several sentences usually has one), at most one per sentence.' : 'Usually one or two tags in the whole line, at most one per sentence.'} A very short line often needs none.`,
     '- Keep every sound professional: never a sigh, groan, gasp or yawn. Describe only the voice, never an action, a gesture or a sound effect.',
-    '- Output one tagged sentence per line, as the sentence number, a colon and the tag, for example "1: [warmly]". Nothing else: no sentence text, no explanation. If no sentence needs a tag, output "none".',
+    '- Output one tagged sentence per line, as <sentence number>: [<tag>], the number, a colon and the tag in square brackets. Nothing else: no sentence text, no explanation. If no sentence needs a tag, output "none".',
     '',
     '<conversation-so-far>',
     lines.length ? lines.join('\n') : '(nothing yet)',

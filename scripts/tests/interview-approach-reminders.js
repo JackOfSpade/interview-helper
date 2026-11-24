@@ -31,6 +31,12 @@ export default [
       assert.notEqual(approachReminderFailure(refused), null, `${JSON.stringify(refused)} must be refused`);
     }
   } },
+  { name: 'interview approach: the prompt quotes no sample reminder and keeps its format rules', run() {
+    const prompt = interviewApproachPrompt([{ id: 'a', question: 'How do you work under pressure?', lines: [] }]);
+    assert(!prompt.includes('Split work into small tasks') && !prompt.includes('Example of the form'), 'no sample reminder to copy');
+    assert(/an instruction starting with a verb, 2–8 words, at most 70 characters, no final period/u.test(prompt) && /NEVER describe the candidate/u.test(prompt)
+      && prompt.includes('Return JSON {cards:[{id,reminders:[{text,exampleLine}]}]}'), 'the rules and the output format stay');
+  } },
   { name: 'interview approach: the model may only point at an existing prepared line as the example', async run() {
     const units = [{ id: 'a', question: 'How do you work under pressure?', lines: [{ id: 'headline[0]', text: HEADLINE }, { id: 'example[0]', text: 'We tested it.' }] },
       { id: 'b', question: 'Walk me through a project.', lines: [] }, { id: 'c', question: 'How do you handle disagreement?', lines: [] }];
