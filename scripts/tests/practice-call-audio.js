@@ -541,6 +541,17 @@ export default [
     },
   },
   {
+    name: 'practice call audio: a silence inside one generated line is a pause, the gap between two lines is not',
+    run() {
+      const prosody = { 0: [[6000, 9000], [10500, 12000], [15000, 17000]].map(([startMs, endMs]) => ({ startMs, endMs, speechMs: endMs - startMs, pauses: [] })) };
+      const entry = { speaker: 'candidate', generated: true, voiced: true, text: 'one two three four', startMs: 6000, endMs: 17000,
+        lineSpans: [{ startMs: 5900, endMs: 12300 }, { startMs: 14900, endMs: 17200 }] };
+      const [answer] = callMetrics({ transcript: [entry], candidateProsodyByTurn: prosody }).answers;
+      assert.equal(answer.pauseCount, 1, 'the 1.5 s inside the first line');
+      assert.equal(answer.activeMs, 8000, 'only the 3 s between the lines comes off the clock');
+    },
+  },
+  {
     name: 'practice call audio: pace leaves out the delivery gap between two generated lines but keeps the same gap in a live answer',
     run() {
       const transcript = [

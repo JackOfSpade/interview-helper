@@ -296,7 +296,7 @@ const NOTE_LIMIT = 300;
 function problemNote(problem, { withContent = true } = {}) {
   const parts = Array.isArray(problem?.parts) ? problem.parts : [];
   const titles = parts.map(part => String(part?.title ?? '').trim()).filter(Boolean).join(' / ');
-  const first = String(parts[0]?.content ?? '').replace(/\s+/gu, ' ').trim();
+  const first = String(parts[0]?.content ?? '').replace(/\*\*(?=\S)(.+?\S|\S)\*\*(?=\s|[.,:;!?)]|$)/gu, '$1').replace(/\s+/gu, ' ').trim();
   if (!(withContent && titles && first)) return titles;
   const note = `${titles}: ${first}`;
   if (note.length <= NOTE_LIMIT) return note;
@@ -420,6 +420,8 @@ export function stampInjectedLines(transcript, spans) {
       ...entry,
       voiced: entry.voiced ?? true,
       generated: entry.generated ?? true,
+      // Where each line sat, so a pause inside one line is told apart from the aid's gap between two.
+      lineSpans: spansHere.map(span => ({ startMs: span.startMs, endMs: span.endMs })),
       ...(sent && entry.sentText === undefined ? { sentText: sent } : {}),
     };
   });
@@ -657,6 +659,7 @@ export function createPracticeCallService(deps = {}) {
     if (everyone.every(other => Number.isFinite(self.leftAt[other]))) everyoneLeft(self, atMs, false);
     else showParticipants(self);
     publish();
+    dbg('participant-left', { id, atMs });
     emitEvent({ type: 'participant-left', id, name: presenterNameOf(self, id), atMs });
   }
   /** The last interviewer is gone (or the line dropped): the notice, the full-stage candidate tile and the closed chat follow from this. */
@@ -852,6 +855,7 @@ export function createPracticeCallService(deps = {}) {
     // A session restarted later reads the panel from self.panel, so it sees this colleague as on the call.
     showParticipants(self);
     publish();
+    dbg('participant-joined', { id: entry.id, name: entry.name, atMs: entry.joinedAtMs });
     emitEvent({ type: 'participant-joined', id: entry.id, name: entry.name });
     try { self.engine?.participantJoined?.(entry.id); } catch { /* the engine may be stopping */ }
   }
@@ -1579,9 +1583,10 @@ export function createPracticeCallService(deps = {}) {
     const attempts = Array.isArray(result.attempts) ? result.attempts : [];
     const ms = Number.isFinite(result.ms) ? Math.round(result.ms) : Math.round(clock.now() - startedAt);
     const plan = result.plan;
-    dbg('plan-attempts', { attempts });
+    dbg('plan-attempts', { failed: attempts });
+    dbg('plan-full', { plan }); // the whole plan: probes, solutions and screens can be checked from the log alone
     note(`plan ${JSON.stringify({
-      ms, attempts: attempts.length, kind: plan.interviewKind, callMinutes: plan.callMinutes, wrapUpMinutes: plan.wrapUpMinutes, lead: { voice: plan.lead?.voice, name: plan.lead?.name, role: plan.lead?.role },
+      ms, failedAttempts: attempts.length, kind: plan.interviewKind, callMinutes: plan.callMinutes, wrapUpMinutes: plan.wrapUpMinutes, lead: { voice: plan.lead?.voice, name: plan.lead?.name, role: plan.lead?.role },
       // The one question that is not from the pool, as the planner wrote it.
       unprepared: (plan.questions || []).filter(question => question.number === 0).map(question => ({ text: question.text, askedBy: question.askedBy, minutes: question.minutes })),
       panel: (plan.panel || []).map(member => ({ voice: member.voice, name: member.name, role: member.role, joins: member.joins, joinMinutes: member.joinMinutes })),
@@ -1988,7 +1993,7 @@ export function createPracticeCallService(deps = {}) {
       joinDraws = held.joinDraws;
       dbg('plan-repeated', { savedInterviewId: self.repeat.id, questions: (planned.plan.questions || []).map(question => question.number) });
       note(`plan repeated ${JSON.stringify({ kind: planned.plan.interviewKind, questions: (planned.plan.questions || []).length, problems: (planned.plan.problems || []).map(problem => problem.ref) })}`);
-      mark(self, 'plan', { planMs: 0, attempts: 0, repeated: true });
+      mark(self, 'plan', { planMs: 0, failedAttempts: 0, repeated: true });
     } else {
       // The interviewer voice comes only from the shared library: the account's own voices
       // are never candidates and nothing here falls back to them. ElevenLabs' built-in default
@@ -2048,7 +2053,7 @@ export function createPracticeCallService(deps = {}) {
       }
       if (self.candidateVoiceIds) note(`candidate voices chosen ${JSON.stringify(Object.fromEntries(Object.entries(self.candidateVoiceIds).map(([gender, voice]) => [gender, voice.name])))}`);
       targetMinutes = deps.targetMinutes ?? targetMinutesOf(planned.plan);
-      mark(self, 'plan', { planMs: planned.ms, attempts: planned.attempts.length });
+      mark(self, 'plan', { planMs: planned.ms, failedAttempts: planned.attempts.length });
     }
     setSetupStep('voice');
     const settled = await settlePlan(self, { planned, drawnVoices, tools, voiceFactory, tier, temperament, joinDraws });

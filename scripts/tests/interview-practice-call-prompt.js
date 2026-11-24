@@ -1262,6 +1262,8 @@ export default [
       const message = formatTurnMessage({ elapsedMs: 61000, candidateText: 'hello', joined: ['Mei', 'Sam'] });
       assert.equal(message, "[elapsed 01:01] [Mei has joined the call and is listening. They have not been introduced yet.] [Sam has joined the call and is listening. They have not been introduced yet.] Candidate: 'hello'");
       assert.equal(formatTurnMessage({ elapsedMs: 61000, candidateText: 'hello', joined: [] }), formatTurnMessage({ elapsedMs: 61000, candidateText: 'hello' }));
+      assert(formatTurnMessage({ elapsedMs: 180000, candidateText: 'hello', joined: [{ name: 'Mei', agoMs: 61000 }] }).includes('[Mei has joined the call and is listening. They came in about 61 seconds ago and have heard everything since. They have not been introduced yet.]'));
+      assert(!formatTurnMessage({ elapsedMs: 1, candidateText: 'hello', joined: [{ name: 'Mei', agoMs: 3000 }] }).includes('seconds ago'));
       assert(formatTurnMessage({ elapsedMs: 0, pausedAck: 'Right', joined: ['Mei'] }).includes('Mei has joined'));
     },
   },
@@ -1648,8 +1650,9 @@ export default [
       const prompt = buildInterviewerInstructions({ persona, brief, plan });
       assert.match(prompt, /NEVER invent company facts, numbers/u, 'the ban on inventing stays');
       assert.match(prompt, /your own team's size, say\) but the brief holds no figure, do not refuse to talk about it and do not give a number/u);
-      assert.match(prompt, /still being shaped around the project or changes with the phase/u);
-      assert.match(prompt, /the recruiter can give the current picture/u);
+      assert.match(prompt, /speak to the part you can in general terms/u);
+      assert.match(prompt, /at most once in a call/u);
+      assert(!prompt.includes('still being shaped'), 'no set reason to give for holding back');
     },
   },
   {

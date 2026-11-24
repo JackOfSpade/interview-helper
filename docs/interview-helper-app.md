@@ -387,6 +387,17 @@ Unit-tested only, not yet seen in a call.
 
 **Both voices are judged alike and named (2026-11-23, owner's request).** An answer in the AI voice and one in the candidate's own voice get the same standard, delivery included. This replaces the earlier rule that an AI-voice answer was judged for content only. On a call that used the AI voice the review prompt marks each spoken candidate turn and each answer's metrics "AI voice", "own voice" or both, the delivery summary says which answers were which, and the replay labels each part ("Answered in: AI voice"). Pitch and loudness are still compared within one voice, and the wand's own waits are still left out of the numbers.
 
+**Fixes from the call of 2026-11-24 (call-mwua5djj, AECOM archaeologist screen).** The call ran to its goodbye, its recording and its feedback. Unit-tested only, except that the two timing constants were checked against this call's log; no prompt change was measured in a live run.
+- *A look started too early.* After a whole voice line the look waited only for the newest recogniser segment to be final; the line's last sentence had no segment yet, so a reaction and a reply were written and thrown away (2.7 s to the first sound instead of about 1.9). It now waits until a segment reaches the line's end (`lineHeardToItsEnd`), still at most `injectFinalWaitMs`.
+- *A cut-in reported as none.* An answer cut at a breath with a tenth unsaid was recorded `cutWhileSpeaking: false`, and feedback said there were no cut-ins. A voice line with a tenth or more of its words left is now still speaking (`injectedMoreToSay`).
+- *"…isolate. ST".* The broken-off start of a cut line's next word no longer joins the candidate's entry (`brokenOffWord`).
+- *Pace and pauses.* Silences inside one wand line were taken off the clock as if between two lines. Entries carry `lineSpans`, and only the gap between lines is left out; older records are measured as before.
+- *Late joiner.* The note says how long ago they came in, so someone who sat through an answer is not introduced as just arrived and told about it.
+- *Cut-ins, deflections and review.* A cut-in is written to still make sense after the candidate finishes the thought. The deflection rule no longer supplies a reason to give (it contradicted "never explain"); a referral is made at most once, and a specialist talks about their own field. The review looks for a term in the candidate's lines before saying they used or missed it.
+- *Planner.* An exercise's data is checked against itself (the key named one unbagged find of several, judged by an undefined APE, and put a test unit on top of a shovel test), and a question's minutes cover reading, the answer and follow-ups (four questions were planned in ten minutes; three were reached).
+- *Logs.* `plan-full`, `participant-joined` and `participant-left` are logged; the plan's `attempts` is `failedAttempts`. Question-history notes drop bold marks.
+- *Left as it is:* a quick reaction that says it sees or follows: that prompt is measured and has a size limit, so it needs a measured change.
+
 **Fixes from the call of 2026-11-23 (call-mwu3jble, IBM HLASM screen).**
 - *The answer reached the watcher several times over.* A line still being spoken was matched to each recognised sentence as a new object, so it was repeated once per sentence. The cut-in look's "Most recent" also now uses the words sent, like the rest of its message.
 - *The replay showed the pad 5 s before the problem.* A pad taken back for a share coming up left its record mark behind.

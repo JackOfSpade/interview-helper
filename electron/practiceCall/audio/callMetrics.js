@@ -169,12 +169,15 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     // Each recogniser segment is measured alone, so the silence between two segments of one answer is a pause no
     // segment saw. It counts unless the call was paused through it or an interviewer spoke in it.
     const ordered = prosody.filter(item => finite(item.startMs) && finite(item.endMs)).sort((a, b) => a.startMs - b.startMs);
+    const lineSpans = answer.turnIndexes.flatMap(index => (Array.isArray(entries[index]?.lineSpans) ? entries[index].lineSpans : []));
+    const withinOneLine = (fromMs, toMs) => lineSpans.some(span => span.startMs <= fromMs && span.endMs >= toMs);
     let deliveryGapMs = 0; // the aid's delivery time between its own lines, which is not the candidate's time on the clock
     for (let i = 1; i < ordered.length; i += 1) {
       const fromMs = ordered[i - 1].endMs;
       const toMs = ordered[i].startMs;
       if (toMs - fromMs < PAUSE_MIN_MS) continue;
-      if (generatedItems.has(ordered[i - 1]) && generatedItems.has(ordered[i])) {
+      // A silence inside one line is the voice's own pause: it counts as anyone's would.
+      if (generatedItems.has(ordered[i - 1]) && generatedItems.has(ordered[i]) && !withinOneLine(fromMs, toMs)) {
         deliveryGapMs += toMs - fromMs - pausedOverlapMs(pauseSpans, fromMs, toMs);
         continue;
       }

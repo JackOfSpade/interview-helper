@@ -170,6 +170,8 @@ const ACK_TAIL_ESTIMATE_MS = 150;
 const JOIN_GAP_MIN_MS = 60;
 const LEADING_TAGS = /^(?:\s*\[[^\]]*\])+\s*/u;
 const INJECT_END_MS = 1500;
+const INJECT_FINAL_REACH_MS = 800; // a final ending this close to a line's end holds the line's last words
+const INJECT_CUT_TAIL_MS = 1000; // a word that began this near a line's cut can be the line's own next word, broken off
 const INJECT_FINAL_POLL_MS = 80; // a candidate-voice line that finished this near a vad end is what that end was
 const RECENT_REACTIONS = 4; // spoken quick reactions kept for the opener message
 const SUPERSEDE_COVER = 0.9; // share of a volatile result's range a newer result must cover to replace it
@@ -487,8 +489,8 @@ export function createPracticeCallEngine({
     return `${entry.channel === 'chat' && !entry.voiced ? 'Candidate (typed in chat)' : 'Candidate'}: '${entry.text}'`;
   };
 
-  function candidateText(fromMs = turnStartMs) {
-    return [...segments.values()].filter(item => item.startMs >= fromMs)
+  function candidateText(fromMs = turnStartMs, keep = () => true) {
+    return [...segments.values()].filter(item => item.startMs >= fromMs && keep(item))
       .sort((a, b) => a.startMs - b.startMs).map(item => item.text.trim()).filter(Boolean).join(' ');
   }
 
@@ -716,6 +718,28 @@ export function createPracticeCallEngine({
     return !!newest?.final;
   }
 
+  /**
+   * The recogniser has settled the last words of the voice line just heard whole. The newest segment being final is not
+   * enough: in call-mwua5djj the last sentence (2.2 s) had no segment at all yet when the line ended, so the final before
+   * it passed for the last one and the look was thrown away when the real one came.
+   */
+  function lineHeardToItsEnd() {
+    if (!newestSegmentFinal()) return false;
+    const lineEndMs = injectedHeard.at(-1)?.endMs;
+    if (!Number.isFinite(lineEndMs)) return true;
+    const ends = [...segments.values()].filter(item => item.startMs >= turnStartMs).map(item => item.endMs);
+    return ends.some(endMs => !Number.isFinite(endMs) || endMs >= lineEndMs - INJECT_FINAL_REACH_MS);
+  }
+
+  /** The injected line being spoken still has a tenth or more of its words to say, or more lines wait behind it. */
+  function injectedMoreToSay() {
+    const line = injecting;
+    if (!line || !line.started || line.ending) return false;
+    if (injectQueue.length) return true;
+    const sent = tokens(stripAudioTags(line.text)).length;
+    return sent > 0 && line.words.length > 0 && tokens(stripAudioTags(heardFor(line, livePosition(line)))).length / sent < 0.9;
+  }
+
   async function restart(kind, pending = []) {
     emit({ type: 'session-restart', kind });
     try {
@@ -798,7 +822,7 @@ export function createPracticeCallEngine({
     setPhase('speculating');
     reply.used = { acks: pendingAcks.length, interruption: pendingInterruption, notSpoken, cutOff: cutOffNote, joined: greeting ? 0 : joinedQueue.length, absent: greeting ? 0 : absentQueue.length, unknown: greeting ? false : unknownPending, unknownScreens: greeting ? [] : unknownScreens.slice() };
     // The connect message carries no markers: names stay queued for the first real turn.
-    const joined = greeting ? [] : joinedQueue.slice();
+    const joined = greeting ? [] : joinedQueue.map(({ name, atMs }) => ({ name, agoMs: Math.max(0, elapsed() - atMs) }));
     const prefix = cutOffNote ?? '';
     reply.mainPrefix = prefix;
     const heldTurn = audioHint && !greeting; // Smart Turn hold: the voice gate is re-armed with the held schedule below
@@ -2079,7 +2103,9 @@ export function createPracticeCallEngine({
     if (reply.liveLook && !reply.silent && candidateText()) {
       reply.candidates = [{ speaker: 'candidate', text: candidateText(), ...candidateSpan(), interrupted: true, cutOffBy: 'interviewer',
         // Why, and whether the candidate was still talking: an answer that had essentially finished is not one the interviewer had to stop.
-        ...(reply.cutInInfo?.reason ? { cutInReason: reply.cutInInfo.reason } : {}), cutWhileSpeaking: speaking && !paused }];
+        // A voice line at a breath between two of its sentences is not finished while it has more to say (call-mwua5djj: cut with
+        // a tenth of the answer unsaid and reported as no cut-in).
+        ...(reply.cutInInfo?.reason ? { cutInReason: reply.cutInInfo.reason } : {}), cutWhileSpeaking: !paused && (speaking || injectedMoreToSay()) }];
     }
     // Commit is the one point where a reply is certain to be delivered: a speculative reply thrown away
     // (resumed, respeculated, listen) or one the voice never spoke never gets here, so it counts nothing.
@@ -2731,7 +2757,7 @@ export function createPracticeCallEngine({
     // 1 s in call-mwqscir3). A look started before it was built on the cut-short text and thrown away when the final
     // came, which added a second or two of dead air. The look waits for that final, a little while at most.
     const sinceLine = injectFinishedAt === null ? null : now() - injectFinishedAt;
-    if (sinceLine !== null && sinceLine < th.injectFinalWaitMs && !newestSegmentFinal()) {
+    if (sinceLine !== null && sinceLine < th.injectFinalWaitMs && !lineHeardToItsEnd()) {
       arm('spec', Math.min(INJECT_FINAL_POLL_MS, th.injectFinalWaitMs - sinceLine), onSpeculate);
       return;
     }
@@ -3150,10 +3176,21 @@ export function createPracticeCallEngine({
     return null;
   }
 
+  /**
+   * The start of the word a cut voice line was about to say, heard as a word of its own ("ST" of "STP 4" in
+   * call-mwua5djj): it is no part of what was said. Anything else heard then is the candidate's own.
+   */
+  function brokenOffWord(item) {
+    const key = value => String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    const said = key(item.text);
+    return said !== '' && tokens(item.text).length === 1 && injectedHeard.some(line => line.next && key(line.next).startsWith(said)
+      && item.startMs >= line.endMs - INJECT_CUT_TAIL_MS && item.startMs <= line.endMs + INJECTED_MATCH_LATE_MS);
+  }
+
   /** The trailing words join the candidate's cut-off entry; the next turn starts after them. */
   function syncLiveCut() {
     if (!liveCut) return;
-    const text = candidateText(liveCut.fromMs);
+    const text = candidateText(liveCut.fromMs, item => !brokenOffWord(item));
     if (text) {
       liveCut.entry.text = text;
       liveCut.entry.endMs = Math.max(liveCut.entry.endMs, candidateSpan(liveCut.fromMs).endMs);
@@ -3846,7 +3883,7 @@ export function createPracticeCallEngine({
     const whole = positionMs === Infinity || (!utterance.extraTexts.length && tokens(heard).length >= tokens(stripAudioTags(utterance.text)).length && tokens(heard).length > 0);
     const heardWords = whole ? stripAudioTags(utterance.text) : heard;
     if (utterance.started && Number.isFinite(utterance.startMs) && heardWords.trim()) {
-      injectedHeard.push({ startMs: utterance.startMs, endMs: Math.max(utterance.startMs, helperTimelineMs()), text: heardWords.replace(/\s+/gu, ' ').trim() });
+      injectedHeard.push({ startMs: utterance.startMs, endMs: Math.max(utterance.startMs, helperTimelineMs()), text: heardWords.replace(/\s+/gu, ' ').trim(), ...(whole ? {} : { next: tokens(stripAudioTags(utterance.text))[tokens(heard).length] ?? '' }) });
       if (injectedHeard.length > INJECTED_HEARD_MAX) injectedHeard = injectedHeard.slice(-INJECTED_HEARD_MAX);
     }
     emit({
@@ -4130,7 +4167,7 @@ export function createPracticeCallEngine({
       if (!member || phase === 'ended') return;
       if (member.present) return;
       member.present = true;
-      joinedQueue.push(member.name);
+      joinedQueue.push({ name: member.name, atMs: elapsed() });
     },
     hangUp() { end('candidate'); },
     state: () => ({ phase, transcript: transcript.map(entry => ({ ...entry })), elapsedMs: elapsed(), paused, pausedMs: currentPauseMs(), askedQuestions: [...askedQuestions], askedTexts: askedTextsNow(), answeredQuestions: answeredNow(),

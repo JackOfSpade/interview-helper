@@ -5877,7 +5877,7 @@ test('presence: candidate turns, check-ins and pad progress carry it, and it cha
   rig.engine.typed('after the join');
   await flush();
   const last = rig.options.at(-1);
-  assert.deepEqual(last.joined, ['Mei'], 'the existing note about the arrival still appears');
+  assert.deepEqual(last.joined, [{ name: 'Mei', agoMs: 0 }], 'the existing note about the arrival still appears');
   assert.equal(last.presence, undefined, 'nobody is missing any more');
 });
 
@@ -7257,6 +7257,79 @@ test('watcher: a cut-in is stale by time as well as words, so a fast voice is no
   const entry = rig.engine.state().transcript.find(item => item.speaker === 'candidate');
   assert.equal(entry.cutInReason, 'probe');
   assert.equal(entry.cutWhileSpeaking, true);
+});
+
+async function playingInjected(text, options = {}) {
+  const lines = [];
+  const candidateVoice = {
+    open({ utteranceId, text: sent }) {
+      const line = { utteranceId, text: sent };
+      line.done = new Promise(resolve => { line.finish = resolve; });
+      lines.push(line);
+      return { sampleRate: 24000, onAudio: callback => { line.audioCb = callback; }, onWords: callback => { line.wordsCb = callback; }, cancel() {}, done: line.done };
+    },
+  };
+  const rig = watchRig({ candidateVoice, inject: true, thresholds: { watchTimeoutMs: 5000 }, ...options });
+  await greet(rig);
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = lines[0];
+  line.audioCb(Buffer.alloc(48000 * 8));
+  line.wordsCb(text.split(' ').map((word, index) => ({ word, startMs: index * 300, endMs: index * 300 + 280 })));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  return { rig, line, from: rig.clock.now() };
+}
+
+test('call-mwua5djj: a voice line cut at a breath with more to say was cut while speaking, and its broken-off next word is not in the entry', async () => {
+  const text = 'One two three four five six seven eight nine ten. Positives are pit two. STP 4 stays negative until the bag is checked against the log.';
+  const { rig, line, from } = await playingInjected(text);
+  rig.h.vad(true);
+  rig.h.transcript('One two three four five six seven eight nine ten. Positives are pit two.', 's1', from, true, from + 4180);
+  await rig.clock.advance(3100);
+  rig.h.inject(line.utteranceId, 'position', 4300);
+  await watchSays(rig, 'cut:A:probe');
+  rig.h.vad(false); // the breath between two sentences of the line
+  rig.sessions.main.answer('What about pit one?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  assert(rig.opsOf('play').some(item => item.id === rig.streams.at(-1).utteranceId), 'the cut-in plays');
+  const entry = () => rig.engine.state().transcript.find(item => item.speaker === 'candidate');
+  assert.equal(entry().cutWhileSpeaking, true);
+  rig.h.playback(rig.streams.at(-1).utteranceId, 'started');
+  rig.h.vad(true);
+  await rig.clock.advance(900);
+  rig.h.inject(line.utteranceId, 'cancelled', 4300);
+  const cutAt = rig.clock.now();
+  rig.h.transcript('ST', 's2', cutAt - 400, false, cutAt);
+  await flush();
+  assert.match(entry().text, /pit two\.$/u, entry().text);
+  rig.h.transcript('wait, sorry', 's3', cutAt + 200, false, cutAt + 600);
+  await flush();
+  assert.match(entry().text, /pit two\. wait, sorry$/u, 'the candidate\'s own words still join the entry');
+});
+
+test('call-mwua5djj: the look after a whole voice line waits for the recogniser to reach the line\'s end, not only for a final', async () => {
+  const text = 'Two fragments are not enough to define a site. So I would move on.';
+  const { rig, line, from } = await playingInjected(text);
+  const main = mainCalls(rig).length;
+  rig.h.vad(true);
+  rig.h.transcript('Two fragments are not enough to define a site.', 's1', from, true, from + 2600);
+  await rig.clock.advance(4200);
+  rig.h.vad(false);
+  rig.h.inject(line.utteranceId, 'finished', 4200);
+  await rig.clock.advance(700);
+  const opener = () => rig.sessions.opener.calls.length;
+  const before = opener();
+  assert.equal(mainCalls(rig).length, main);
+  assert.equal(rig.of('discarded').length, 0);
+  rig.h.transcript('So I would move on.', 's2', from + 2900, true, from + 4100);
+  await rig.clock.advance(200);
+  assert.equal(opener(), before + 1, 'one look, once the last words are in');
+  assert(rig.sessions.opener.calls.at(-1).message.includes('So I would move on.'));
+  assert.equal(rig.of('discarded').length, 0);
 });
 
 test('watcher: a stale cut-in found at the breath is dropped and the breath is checked', async () => {

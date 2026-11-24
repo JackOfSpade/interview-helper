@@ -4666,7 +4666,7 @@ test('plan: the setup is saved with the record and logged as it happens', async 
   assert.equal(info.some(line => line.includes('voices drawn') && line.includes('nameStart') && line.includes('V3')), true, 'the drawn voices are logged');
   const planned = info.find(line => line.includes('plan {'));
   assert.ok(planned, 'the plan summary is logged');
-  assert.equal(planned.includes('"ms":4321') && planned.includes('"attempts":2') && planned.includes('"problems":["p1"]'), true);
+  assert.equal(planned.includes('"ms":4321') && planned.includes('"failedAttempts":2') && planned.includes('"problems":["p1"]'), true);
 });
 
 test('plan: the log falls back to warn when the logger has no info', async () => {
@@ -5767,11 +5767,11 @@ test('a line the AI voice spoke through the microphone is stamped voiced and gen
     { speaker: 'candidate', text: 'straddles', startMs: 19000, endMs: 30000 },
   ];
   const stamped = stampInjectedLines(transcript, spans);
-  assert.deepEqual(stamped[1], { ...transcript[1], voiced: true, generated: true, sentText: 'Plan two words.' });
+  assert.deepEqual(stamped[1], { ...transcript[1], voiced: true, generated: true, sentText: 'Plan two words.', lineSpans: [{ startMs: 10000, endMs: 20000 }] });
   assert.equal(stamped[0], transcript[0]);
   assert.equal(stamped[2], transcript[2], 'live speech is untouched');
   assert.equal(stamped[3], transcript[3], 'a line that was not generated is not stamped');
-  assert.deepEqual(stamped[4], { ...transcript[4], generated: true, sentText: 'cut line' }, 'a cut line is stamped with the part that was heard as its sent text, and voiced stays as it was');
+  assert.deepEqual(stamped[4], { ...transcript[4], generated: true, sentText: 'cut line', lineSpans: [{ startMs: 60000, endMs: 70000 }] }, 'a cut line is stamped with the part that was heard as its sent text, and voiced stays as it was');
   assert.equal(stamped[5], transcript[5], 'an entry mostly outside the span is not the line');
   assert.equal(stampInjectedLines(transcript, []), transcript);
   // Two entries inside one span: the sent text belongs to neither.
@@ -5790,7 +5790,7 @@ test('one recognised entry that joins several AI-voice lines (a worked exercise 
   ];
   const entry = { speaker: 'candidate', text: 'first I restate it then the graph done', startMs: 10200, endMs: 74800 };
   const [stamped] = stampInjectedLines([entry], spans);
-  assert.deepEqual(stamped, { ...entry, voiced: true, generated: true, sentText: 'First I restate it. Then the graph. Done.' });
+  assert.deepEqual(stamped, { ...entry, voiced: true, generated: true, sentText: 'First I restate it. Then the graph. Done.', lineSpans: spans.map(({ startMs, endMs }) => ({ startMs, endMs })) });
   const [mostlyLive] = stampInjectedLines([{ speaker: 'candidate', text: 'x', startMs: 0, endMs: 100000 }], spans);
   assert.equal(mostlyLive.generated, undefined, 'lines covering less than half of a long entry do not make it generated');
 });
