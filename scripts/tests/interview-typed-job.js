@@ -247,12 +247,49 @@ export default [
     },
   },
   {
+    name: 'typed job: a target missing its company or its role is chosen by the research, and no role at all is refused',
+    async run() {
+      for (const missing of [{ company: '' }, { role: '' }]) {
+        const { callText, calls } = fakeCall({
+          'typed-job-intake': intakeTarget({ inferred: false, ...missing }),
+          'typed-job-research': research({ role: 'Firmware Engineer', basis: 'Closest real job.' }),
+          'typed-job-listing': { title: '', location: '', listingText: LISTING },
+        });
+        const text = 'a role where you code in binary, at any company';
+        const out = await resolveTypedJob({ text, callText, readPage: pageReader({}) });
+        assert.deepEqual([out.job.title, out.job.company, out.notes[0]], ['Firmware Engineer', 'Acme Widgets Inc', 'Closest real job.']);
+        assert.ok(calls[1].prompt.includes(text) && /left for you to choose/.test(calls[1].prompt));
+        assert.match(calls[1].prompt, /comes closest[\s\S]*not a reason to set identityUncertain/);
+        assert.match(calls[0].prompt, /any company[\s\S]*nothing needs asking/);
+      }
+      const none = fakeCall({ 'typed-job-intake': intakeTarget({ role: '' }), 'typed-job-research': research() });
+      await rejects(resolveTypedJob({ text: 'Acme', callText: none.callText, readPage: pageReader({}) }), 'typed-job-unclear');
+      assert.equal(none.calls.length, 2, 'no listing is written without a role');
+    },
+  },
+  {
+    name: 'typed job: typed specifics reach the research and the posting judge, and a posting without them gives way to a listing with them',
+    async run() {
+      const open = 'https://acme.example.test/careers/firmware';
+      const { callText, calls } = fakeCall({
+        'typed-job-intake': intakeTarget({ inferred: true, specifics: 'coding in binary' }),
+        'typed-job-research': research({ openPostingUrl: open }),
+        'typed-job-posting': posting({ matchesExpected: false }),
+        'typed-job-listing': { title: '', location: '', listingText: LISTING },
+      });
+      const out = await resolveTypedJob({ text: 'code in binary anywhere', callText, readPage: pageReader({ [open]: okPage(open) }) });
+      assert.equal(out.kind, 'generated');
+      for (const call of calls.slice(1, 3)) assert.ok(call.prompt.includes('"specifics":"coding in binary"'), call.claudeStage);
+      assert.match(calls[2].prompt, /must really involve them/);
+      assert.match(calls[3].prompt, /never water them down/);
+    },
+  },
+  {
     name: 'typed job: unclear text carries the intake question and spends no research',
     async run() {
       for (const intake of [
         { kind: 'unclear', url: '', company: '', role: '', location: '', ask: 'Which company, and which role?' },
-        intakeTarget({ role: '' }),
-        intakeTarget({ company: '' }),
+        intakeTarget({ company: '', role: '' }),
       ]) {
         const { callText, calls } = fakeCall({ 'typed-job-intake': intake });
         await assert.rejects(resolveTypedJob({ text: 'hmm', callText, readPage: pageReader({}) }), error => {
