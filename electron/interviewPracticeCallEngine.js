@@ -1952,7 +1952,7 @@ export function createPracticeCallEngine({
     // release it into whatever is said next. Once speech has resumed it is about something said before, so it is dropped
     // and the watcher asked again; if they have not spoken on, it goes the "now" way (at the next breath).
     const sentenceOver = info.when === 'sentence-end' && !reply.sentenceHeld && reply.judgedEndsSentence;
-    if (sentenceOver && !paused && tokens(candidateText()).length > reply.judgedWords) {
+    if (sentenceOver && !paused && tokens(asHeard(candidateText())).length > reply.judgedWords) {
       emit({ type: 'cut-in', state: 'stale', ...info, dropped: 'sentence-over', wordsSinceSnapshot: wordsSinceLook(reply) });
       discardPending(true, 'stale-cut-in');
       if (watcherOn && answerSince !== null) { disarm('watch'); runWatch('stale'); }
@@ -3097,7 +3097,7 @@ export function createPracticeCallEngine({
         wordsSinceSnapshot: Math.max(0, tokens(candidateText()).length - snapshotWords), trigger, ...(ready ? {} : { ignored: true }),
       });
       if (!ready) { watch.again = false; if (answerSince === answerAt) armWatch(); return; }
-      if (decision.decision === 'cut-in') { watch.again = false; startWatchedLook(decision, question.askedBy, text); return; }
+      if (decision.decision === 'cut-in') { watch.again = false; startWatchedLook(decision, question.askedBy, heardText); return; }
       // A breath came while this one ran: the check it owed starts as soon as this one returns. A failed or timed-out
       // check never chains straight into another one (review 2026-11-21: a slow watcher ran back to back): the
       // periodic schedule decides when the next one goes.
@@ -3136,7 +3136,8 @@ export function createPracticeCallEngine({
       text, channel: 'voice', immediate: true, cutInCheck: true, liveLook: true, candidates: [], watched: true,
       mostRecent: lastSentenceOf(asHeard(text)), cutInBy: { id, ...(name ? { name } : {}), reason: decision.reason ?? undefined, when: decision.when === 'sentence-end' ? 'sentence-end' : 'now' },
     });
-    // What the watcher judged: when that already ended a sentence, the moment it meant for "sentence-end" has passed.
+    // What the watcher judged (the words it was shown: for an injected line the recogniser can still be a sentence behind
+    // them, and its text ended the sentence before): when that already ended a sentence, the moment it meant for "sentence-end" has passed.
     if (current === reply && judgedText !== undefined) { reply.judgedWords = tokens(judgedText).length; reply.judgedEndsSentence = endsSentence(judgedText); }
     if (current !== reply) { if (!speaking && candidateSpoke) scheduleTurnEnd(lastVadEndMs); return; } // the voice would not open
     if (speaking) return;

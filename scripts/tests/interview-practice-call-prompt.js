@@ -257,7 +257,7 @@ const base = [
       assert.match(OPENER_BLOCK, /Never praise a question or how an answer was put, and never assure the candidate that you hear or understand them/u);
       // Measured 2026-11-23 (docs/ai-model-selection.md): these rules halved reactions that agree to answer or tell the candidate to go ahead.
       assert.match(OPENER_BLOCK, /an agreement to do what they asked, or a word of permission or instruction to the candidate/u);
-      assert.match(OPENER_BLOCK, /Any other question or request, alone or along with anything else in the line[^.]*: only a small sound of taking it up, never a word that agrees, accepts or confirms/u);
+      assert.match(OPENER_BLOCK, /Any other question or request, alone or along with anything else in the line[^.]*: only the brief sound of someone starting to think, never a word that agrees, accepts, concedes or confirms/u);
       assert.match(OPENER_BLOCK, /A plan they are about to carry out[^.]*: a sound of attention only, never a go-ahead/u);
       assert.match(OPENER_BLOCK, /never tell the candidate what to do/u);
       // Unmeasured (2026-11-24): the sample sounds and reactions were replaced by descriptions of the kind of sound; the
@@ -1089,6 +1089,11 @@ export default [
       assert.deepEqual(whole.pushed[0].sentences, []);
       assert.equal(whole.ended.control, 'pass');
       assert.equal(feed(['  <pass/>']).ended.control, 'pass');
+      // Seen live from the acknowledgement model: the control in square brackets is never a delivery tag.
+      assert.equal(feed(['[listen/]']).ended.control, 'listen');
+      assert.equal(feed(['[', 'lis', 'ten', '/]']).ended.control, 'listen');
+      assert.equal(feed(['[pass]']).ended.control, 'pass');
+      assert.notEqual(feed(['[listening] Mm.']).ended.control, 'listen');
       const split = feed(['<pa', 'ss', '/>']);
       assert.equal(split.pushed[0].control, null);
       assert.equal(split.pushed[1].control, null);

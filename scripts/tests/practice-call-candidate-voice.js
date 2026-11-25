@@ -1337,6 +1337,38 @@ test('injected: a cut-in already stale when it is ready is dropped, never held t
   assert(!rig.of('cut-in').some(event => event.until === 'sentence-end'), 'not held to the sentence end');
 });
 
+test('injected: a recogniser one sentence behind what the watcher was shown never makes a sentence-end cut-in late', async () => {
+  // call-mwvd9one: shown "...Flipping the sign bit and subtracting" while the recogniser still ended "...low 6 bits.", so the cut-in was dropped mid-sentence as sentence-over.
+  const candidateVoice = fakeCandidateVoice();
+  const watchParse = text => (String(text ?? '').startsWith('cut') ? { decision: 'cut-in', who: 'A', reason: 'probe', when: 'sentence-end' } : { decision: 'listen', who: null, reason: null });
+  const rig = makeRig({ autoOpener: true, candidateVoice, inject: true, watcher: true, formatWatch: options => JSON.stringify(options), parseWatch: watchParse,
+    thresholds: { cutInFirstMs: 3000, watchEveryMs: 1000, watchTimeoutMs: 500, cutInHoldMs: 800, cutInStaleWords: 50, cutInYieldMs: 2500 } });
+  await greet(rig);
+  const text = 'We moved every job. Then we split that one queue by region and the retries became cheap after we measured them.';
+  rig.engine.typed(text, { chatId: 'm1' });
+  await flush();
+  const line = candidateVoice.lines[0];
+  line.audioCb(Buffer.alloc(48000 * 12));
+  line.wordsCb(timed(text));
+  line.finish();
+  await flush();
+  rig.h.inject(line.utteranceId, 'started');
+  await flush();
+  micHears(rig, 'We moved every job.');
+  await rig.clock.advance(3100);
+  const watch = rig.sessions.watcher.calls.at(-1);
+  assert.match(JSON.parse(watch.message).mostRecent, /^Then we/u, 'shown the sentence being said');
+  watch.settled = true;
+  watch.resolve({ text: 'cut' });
+  await flush();
+  rig.h.inject(line.utteranceId, 'position', 3300);
+  micHears(rig, 'We moved every job. Then we split that one'); // the recogniser catches up, mid-sentence
+  rig.sessions.main.answer('Sorry, how many regions?');
+  rig.streams.at(-1).audio(3200);
+  await flush();
+  assert.deepEqual(rig.of('cut-in').map(event => [event.state, event.until, event.dropped]), [['held', 'sentence-end', undefined]]);
+});
+
 test('injected: a wand line sent while the playing line is still being cut for the pause is made, held and played on the resume', async () => {
   const { rig, voice } = await injectRig();
   rig.engine.typed(LONG, { chatId: 'm1' });
