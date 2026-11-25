@@ -636,7 +636,10 @@ export function createPracticeCallEngine({
    */
   function discardSilent(reply, kind) {
     if (current !== reply) return;
-    if (reply.padProgress) markPadReceived(reply); // watched in silence: it left no trace, but it did see the text
+    // Watched in silence: it left no trace, but it did see the text. A line the main session itself answered with <listen/>
+    // showed it the pad too (call-mwvfxv2u: the same pad went out again as a progress look under a second later); the
+    // quick reaction's own <listen/> did not, as it never gets the pad.
+    if (reply.padProgress || (kind === 'listen' && reply.mainListen)) markPadReceived(reply);
     // The main has been told once that its previous reply was not spoken: a <listen/> is not a lost reply, so the note is
     // not repeated on every later look (found 2026-11-21: 11 looks in a row carried it).
     if (notSpoken && reply.used?.notSpoken) notSpoken = false;

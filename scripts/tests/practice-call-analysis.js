@@ -407,6 +407,9 @@ export default [
       assert.match(text, /Never claim anything about code that is not in the pad/u);
       assert.match(text, /What the screen states \(input ranges, types, start state\) is a given/u);
       assert.match(text, /Say when the interviewer ended or moved on from an exercise and which parts the candidate had not reached/u);
+      const two = build({ ...record, pad: { snapshots: [{ atMs: 1, text: '' }, { atMs: 2, text: 'one()' }, { atMs: 3, text: '', sheet: 2 }, { atMs: 4, text: 'two' }, { atMs: 5, text: 'two()' }, { atMs: 6, text: 'two()', closed: true }] } });
+      assert.match(two, /Each exercise had its own pad/u);
+      assert.equal(two.includes('one()') && two.includes('two()'), true, 'the final text of each exercise');
       const big = build({ ...record, screens: [{ atMs: 0, title: 'Big', content: 'x'.repeat(7000) }], pad: { snapshots: [{ atMs: 1, text: 'y'.repeat(13000) }] } });
       assert.equal(big.includes('x'.repeat(6001)), false);
       assert.equal(big.includes('x'.repeat(6000)), true);

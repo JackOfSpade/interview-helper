@@ -118,7 +118,7 @@ export default function PracticeCallApp() {
       sendChat: (text, options) => invoke('sendChat', text, options),
       setTyping: value => invoke('setTyping', value),
       setPaused: value => invoke('setPaused', value),
-      updatePad: text => invoke('updatePad', text),
+      updatePad: (text, sheet) => invoke('updatePad', text, sheet),
       // Without it the pad shows no Language dropdown (missing from this list in the call of 2026-11-22).
       ...(typeof readApi()?.setPadLanguage === 'function' ? { setPadLanguage: name => invoke('setPadLanguage', name) } : {}),
       openMicrophoneSettings: () => invoke('openMicrophoneSettings'),

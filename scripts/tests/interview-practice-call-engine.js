@@ -3910,6 +3910,33 @@ test('pad progress: a spoken turn carrying the pad restarts the 25 s clock', asy
   assert.equal(idleTurns(rig).length, 1, 'about 25 s after the turn');
 });
 
+test('pad progress: a spoken line the main answered with listen showed it the pad, so no look repeats it at once (call-mwvfxv2u)', async () => {
+  const rig = padRig({ thresholds: { silencePromptMs: 1000000 } });
+  await greet(rig);
+  await deliver(rig, 'Write it in the pad.[[pad-open:python]]');
+  for (let t = 0; t < 24000; t += 2000) { rig.engine.setPadText(`PADCODE_L_${t}`); await rig.clock.advance(2000); }
+  rig.engine.setPadText('PADCODE_L');
+  await speak(rig, 'so first I will', 'a'); // still typing: no quick reaction, the main session gets the line and the pad
+  await rig.clock.advance(600);
+  assert(rig.options.some(option => option.padText === 'PADCODE_L' && option.padProgress === undefined), 'the line carried the pad');
+  await listenReply(rig);
+  assert.equal(rig.of('pad-sent').length, 1);
+  await rig.clock.advance(3000);
+  assert.equal(idleTurns(rig).length, 0);
+});
+
+test('pad progress: a listen from the quick reaction never showed the pad to the main session, so it still goes out', async () => {
+  const rig = padRig({ createParser: patienceParser, thresholds: { silencePromptMs: 1000000 } });
+  await greet(rig);
+  rig.engine.setPadText('PADCODE_O');
+  await rig.clock.advance(4000);
+  await speak(rig, 'so first I will', 'a');
+  await rig.clock.advance(600);
+  rig.sessions.opener.answer('<listen/>', { chunks: ['<listen/>'] });
+  await flush();
+  assert.equal(rig.of('pad-sent').length, 0);
+});
+
 test('pad progress: held while the interviewer speaks, typing does not cut the comment, and at most one goes out afterwards', async () => {
   const rig = padRig({ thresholds: { silencePromptMs: 1000000 } });
   await greet(rig);

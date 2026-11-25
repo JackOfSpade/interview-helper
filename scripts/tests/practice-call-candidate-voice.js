@@ -414,10 +414,10 @@ test('the voice speaks the setting\'s gender, falls back to the other one, and s
   } });
   let wanted = 'male';
   const voice = createCandidateVoice({ factories: { female: factory('female'), male: factory('male') }, gender: () => wanted, tagText: async () => '1: [confident]' });
-  const line = voice.open({ utteranceId: 'u1', text: 'Yes, I did.' });
+  const line = voice.open({ utteranceId: 'u1', text: 'Yes, I did that work myself on the last two projects.' });
   assert.equal(line.gender, 'male');
   await line.done;
-  assert.deepEqual(made[0].sent, ['[confident] Yes, I did.']);
+  assert.deepEqual(made[0].sent, ['[confident] Yes, I did that work myself on the last two projects.']);
   wanted = 'female';
   assert.equal(voice.open({ utteranceId: 'u2', text: 'Sure.' }).gender, 'female', 'a change applies to the next line');
   const onlyFemale = createCandidateVoice({ factories: { female: factory('female') }, gender: () => 'male' });
@@ -440,9 +440,11 @@ test('lines prepared ahead are tagged in one call and spoken with those tags; an
   await voice.open({ utteranceId: 'u1', text: 'First I set up the window. Then' }).done;
   await voice.open({ utteranceId: 'u2', text: 'Then I shrink it.' }).done;
   assert.equal(asked.length, 1, 'the prepared tags were used');
-  await voice.open({ utteranceId: 'u3', text: 'Something else.' }).done;
+  await voice.open({ utteranceId: 'u2b', text: 'Thanks, Tejas. Have a good rest of your day.' }).done;
+  assert.equal(asked.length, 1, 'a goodbye is said as written, not held for tags (call-mwvfxv2u: 4 s for 9 words)');
+  await voice.open({ utteranceId: 'u3', text: 'Something else that nobody had prepared ahead of time this time round.' }).done;
   assert.equal(asked.length, 2, 'a line nobody prepared is tagged as before');
-  assert.deepEqual(sent, ['[thoughtful] First I set up the window. Then', '[confident] Then I shrink it.', '[thoughtful] Something else.']);
+  assert.deepEqual(sent, ['[thoughtful] First I set up the window. Then', '[confident] Then I shrink it.', 'Thanks, Tejas. Have a good rest of your day.', '[thoughtful] Something else that nobody had prepared ahead of time this time round.']);
 });
 
 test('the line event says how many tags landed, and a prepared batch shows its reply, so an untagged line is told from a failed call', async () => {
@@ -454,7 +456,7 @@ test('the line event says how many tags landed, and a prepared batch shows its r
     await flush();
     await voice.open({ utteranceId: 'a', text: 'One. Two.' }).done;
     await voice.open({ utteranceId: 'b', text: 'Three.' }).done;
-    await voice.open({ utteranceId: 'c', text: 'Unprepared.' }).done;
+    await voice.open({ utteranceId: 'c', text: 'This one was not prepared ahead and is long enough for tags.' }).done;
     return events;
   };
   const ok = await run(async () => '1: [warm]\n2: [lift]');

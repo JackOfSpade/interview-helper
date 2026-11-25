@@ -4005,7 +4005,7 @@ test('the record holds screens and pad snapshots on the call clock, closed at re
   service.sendChat('done');
   service.sendChat('again');
   service.updatePad('def f(): return 1');
-  box.emit({ type: 'pad-sent', atMs: 9000 });
+  box.emit({ type: 'pad-sent', atMs: 9000, text: 'def f(' }); // older than the pad is now
   box.emit({ type: 'pad', open: false, atMs: 9500 });
   now = 19000;
   await service.hangUp();
@@ -4131,6 +4131,70 @@ test('an exercise on given code opens the pad with it, once, marked as given and
   const { pad } = await live.deps.store.readRecord('call-1');
   assert.equal(pad.snapshots.find(item => item.starter)?.text, starter);
   assert.equal(pad.snapshots.filter(item => item.starter).length, 1);
+});
+
+test('each exercise has its own pad: another problem turns it over, going back brings the work back (call-mwvfxv2u)', async () => {
+  const seeded = [];
+  const box = padEngine([]);
+  const clock = timerClock();
+  const planner = fakePlanner();
+  const problem = (ref, question, extra = {}) => ({ ref, question, language: '', parts: [{ title: ref, content: `${ref} part 1` }, { title: `${ref} b`, content: `${ref} part 2` }], solution: 'S', edgeCases: [], hints: [], ...extra });
+  const live = await liveCall({ deps: { clock, trimStart: async () => {}, engineFactory: options => ({ ...box.factory(options), seedPadText: value => seeded.push(value) }), planCall: async inputs => {
+    const made = await planner(inputs);
+    const number = made.plan.questions.find(question => question.number > 0).number;
+    return { ...made, plan: { ...made.plan, problems: [problem('p1', number), problem('p2', 0), problem('p3', 0, { starter: 'given()' })] } };
+  } } });
+  await live.service.start(ARGS);
+  await live.service.answer();
+  const { service } = live;
+  const pad = () => service.getState().pad;
+  const show = (title, content, delayMs = 0) => box.emit({ type: 'screen', title, content, speakerId: 'A', delayMs });
+  show('p2', 'p2 part 1');
+  box.emit({ type: 'pad', open: true });
+  service.updatePad('first()', pad().sheet || 0);
+  clock.advance(60000);
+  show('p2 b', 'p2 part 2');
+  box.emit({ type: 'pad', open: true });
+  assert.equal(pad().text, 'first()', 'another part of the same problem keeps the work');
+  clock.advance(60000);
+  show('Corrected', 'a corrected screen of the same exercise');
+  assert.equal(pad().text, 'first()', 'a screen without the pad opened again keeps it');
+  clock.advance(60000);
+  show('p1', 'p1 part 1');
+  box.emit({ type: 'pad', open: true });
+  assert.equal(pad().text, '');
+  assert.equal(pad().seed.text, '', 'the window is told to clear it');
+  service.updatePad('first() late', 0);
+  assert.equal(pad().text, '', 'keys sent before the window knew are the last exercise\'s');
+  service.updatePad('second()', pad().sheet);
+  clock.advance(60000);
+  show('p2', 'p2 part 1');
+  assert.equal(pad().text, 'first()', 'going back brings the work back');
+  clock.advance(60000);
+  box.emit({ type: 'pad', open: false });
+  show('p3', 'p3 part 1', 3000);
+  box.emit({ type: 'pad', open: true });
+  clock.advance(3000);
+  assert.equal(pad().text, 'given()');
+  service.updatePad('given() third()', pad().sheet);
+  clock.advance(60000);
+  show('Mine', 'an exercise of the interviewer\'s own');
+  box.emit({ type: 'pad', open: true });
+  assert.equal(pad().text, '');
+  service.updatePad('own()', pad().sheet);
+  box.emit({ type: 'screen-stop' });
+  box.emit({ type: 'pad', open: false });
+  box.emit({ type: 'pad', open: true });
+  assert.equal(pad().text, 'own()', 'opened again with nothing new asked or shown');
+  box.emit({ type: 'question-asked', number: 99 });
+  box.emit({ type: 'pad', open: false });
+  box.emit({ type: 'pad', open: true });
+  assert.equal(pad().text, '', 'a pad-only exercise after another question was asked');
+  await service.hangUp();
+  const { pad: record } = await live.deps.store.readRecord('call-1');
+  const turned = record.snapshots.filter(item => item.sheet).map(item => [item.sheet, item.text, item.starter === true]);
+  assert.deepEqual(turned, [[2, '', false], [1, 'first()', false], [3, 'given()', true], [4, '', false], [5, '', false]]);
+  for (const text of ['first()', 'second()', 'given() third()', 'own()']) assert.ok(record.snapshots.some(item => item.text === text), text);
 });
 
 test('a pad taken back for a share coming up is recorded when it really appears (call-mwu3jble)', async () => {

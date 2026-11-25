@@ -184,7 +184,7 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'send-chat'](text, options) { return service.sendChat(text, { generated: options?.generated === true }); },
     async [WINDOW_PREFIX + 'set-typing'](typing) { return service.setTyping(typing); },
     async [WINDOW_PREFIX + 'set-paused'](paused) { return service.setPaused(paused); },
-    async [WINDOW_PREFIX + 'update-pad'](text) { return service.updatePad(text); },
+    async [WINDOW_PREFIX + 'update-pad'](text, sheet) { return service.updatePad(text, sheet); },
     async [WINDOW_PREFIX + 'set-pad-language'](name) { return typeof service.setPadLanguage === 'function' ? service.setPadLanguage(name) : service.getState(); },
     async [WINDOW_PREFIX + 'draft-answer']() { return typeof service.draftAnswer === 'function' ? service.draftAnswer() : { error: 'Suggestions are not available.' }; },
     async [WINDOW_PREFIX + 'get-prepared-cards']() { return service.getPreparedCards(); },

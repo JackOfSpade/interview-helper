@@ -726,6 +726,15 @@ export function createPracticeCallService(deps = {}) {
     if (problems.some(problem => !String(problem?.language ?? '').trim() && (problem?.languages || []).some(name => padLanguageKey(name) === said))) return '';
     return required.find(name => padLanguageKey(name) === said) ?? (required.length === 1 ? required[0] : '');
   }
+  /** The prepared problem whose part is on screen, else null. */
+  function shownProblem(self) {
+    const problems = self?.settledPlan?.problems;
+    if (!state.screen || !Array.isArray(problems)) return null;
+    // The screen shows a part as it was prepared (a picture's lead line above the text, the title cut to the screen's
+    // limit), which can differ from the plan's own wording, so both are tried.
+    const isShown = part => !!part && String(part.title ?? '').slice(0, 120) === state.screen.title && part.content === state.screen.content;
+    return problems.find(problem => [...(self.prepared?.[problem?.ref]?.parts || []), ...(problem?.parts || [])].some(isShown)) ?? null;
+  }
   /**
    * The languages the pad offers the candidate: those of the prepared problem on screen when it allows several (the
    * role is hired for more than one), by the names the planner wrote; else none, and the pad shows no language at
@@ -739,10 +748,7 @@ export function createPracticeCallService(deps = {}) {
   function padOptions(self) {
     const problems = self?.settledPlan?.problems;
     if (!Array.isArray(problems) || !problems.length) return [];
-    // The screen shows a part as it was prepared (a picture's lead line above the text, the title cut to the screen's
-    // limit), which can differ from the plan's own wording, so both are tried.
-    const isShown = part => !!part && String(part.title ?? '').slice(0, 120) === state.screen.title && part.content === state.screen.content;
-    const shown = state.screen ? problems.find(problem => [...(self.prepared?.[problem?.ref]?.parts || []), ...(problem?.parts || [])].some(isShown)) : null;
+    const shown = shownProblem(self);
     if (shown) { self.padProblemRef = shown.ref; self.padMovedOn = false; }
     // A screen of the interviewer's own starts another exercise when the pad is closed, or when they opened the pad
     // again for it in the same reply (the tag may come just before or just after the screen).
@@ -770,27 +776,93 @@ export function createPracticeCallService(deps = {}) {
    * order). What an earlier exercise left is recorded first. The seed's id tells the window to take the text over.
    */
   function seedPad(self, atMs) {
-    const problem = state.pad.open && self?.padProblemRef ? (self.settledPlan?.problems || []).find(item => item?.ref === self.padProblemRef) : null;
-    const starter = typeof problem?.starter === 'string' ? problem.starter.slice(0, PAD_MAX) : '';
-    if (!starter.trim()) return;
-    const seeded = (self.seededPads ||= new Set());
-    if (seeded.has(problem.ref)) return;
-    seeded.add(problem.ref);
+    const starter = state.pad.open && self?.padProblemRef ? takeStarter(self, self.padProblemRef) : '';
+    if (!starter) return;
     if (self.padRecord?.snapshots.length) snapshotPad(self, undefined, atMs);
-    state.pad = { ...state.pad, text: starter, seed: { id: seeded.size, text: starter } };
-    try { self.engine?.seedPadText?.(starter); } catch { /* engine already ended */ }
+    replacePadText(self, starter);
     if (!self.padRecord) return;
     snapshotPad(self, starter, atMs);
     const mark = self.padRecord.snapshots.at(-1);
     if (mark?.text === starter) mark.starter = true;
   }
+  /** The given code of a prepared problem, once: '' when it has none or it was already put in a pad. */
+  function takeStarter(self, ref) {
+    const problem = (self.settledPlan?.problems || []).find(item => item?.ref === ref);
+    const starter = typeof problem?.starter === 'string' ? problem.starter.slice(0, PAD_MAX) : '';
+    if (!starter.trim()) return '';
+    const seeded = (self.seededPads ||= new Set());
+    if (seeded.has(ref)) return '';
+    seeded.add(ref);
+    return starter;
+  }
+  /** Text the candidate did not type takes the pad over. `sheet` numbers it, so an edit the window sent before it knew is told apart. */
+  function replacePadText(self, text) {
+    self.padSheetNo = (self.padSheetNo || 0) + 1;
+    state.pad = { ...state.pad, text, sheet: self.padSheetNo, seed: { id: self.padSheetNo, text } };
+    try { self.engine?.seedPadText?.(text); } catch { /* engine already ended */ }
+  }
+  /**
+   * Another exercise gets its own pad, as in a real coding interview: empty, or with its given code; going back to a
+   * prepared problem brings back what was written for it (call-mwvfxv2u: the second problem came up beside the first
+   * one's finished code). What counts as another exercise: a different prepared problem on screen; a screen of the
+   * interviewer's own that came with a pad open; or a pad opened with nothing shown after another planned question was
+   * asked. A part, follow-up or corrected screen of the same exercise, and a pad opened again for it, keep the work.
+   * `opening` is a pad event ({ wasOpen }); without it a screen has just been shown.
+   */
+  function turnPad(self, opening, atMs) {
+    if (!self || !state.pad.open) return;
+    const now = clock.now();
+    const shown = shownProblem(self);
+    const screenId = state.screen ? `${state.screen.title}\n${state.screen.content}` : '';
+    const asked = self.padAsked || 0;
+    const sheet = self.padSheet;
+    if (!sheet) {
+      self.padSheetCount = 1;
+      self.padSheet = { number: 1, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+      return;
+    }
+    let turn = false;
+    if (shown) {
+      turn = shown.ref !== sheet.key;
+      // A pad opened a moment ahead of its own problem, with nothing shown until now: the same exercise.
+      if (turn && sheet.key === null && !sheet.screens.size && sheet.asked === asked) { sheet.key = shown.ref; turn = false; }
+    } else if (state.screen) {
+      const cameTogether = opening ? now - (self.padScreenAt ?? -Infinity) < SAME_REPLY_MS : now - (self.padOpenedAt ?? -Infinity) < SAME_REPLY_MS;
+      turn = opening && !opening.wasOpen ? !sheet.screens.has(screenId) : cameTogether;
+    } else turn = !!opening && sheet.asked !== asked;
+    if (!turn) { if (screenId) sheet.screens.add(screenId); return; }
+    const sheets = (self.padSheets ||= new Map());
+    if (sheet.key) sheets.set(sheet.key, { number: sheet.number, text: state.pad.text });
+    const kept = shown ? sheets.get(shown.ref) : null;
+    const number = kept?.number ?? (self.padSheetCount += 1);
+    const starter = kept || !shown ? '' : takeStarter(self, shown.ref);
+    const text = kept?.text ?? starter;
+    // Nothing was written and nothing is given: the empty pad simply belongs to the new exercise.
+    if (!state.pad.text && !text) {
+      if (sheet.key) sheets.delete(sheet.key);
+      self.padSheet = { ...sheet, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+      return;
+    }
+    self.padSheet = { number, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+    const marks = self.padRecord?.snapshots;
+    const open = !!marks?.length && marks.at(-1).closed !== true;
+    if (open) snapshotPad(self, undefined, atMs); // what the last exercise left is recorded first
+    replacePadText(self, text);
+    dbg('pad-sheet', { number, problem: shown?.ref ?? null, chars: text.length, restored: !!kept, starter: !!starter });
+    if (!marks) return;
+    const mark = { sheet: number, ...(starter ? { starter: true } : {}) };
+    if (!open) { self.padTurned = mark; return; } // goes on the mark of the pad coming up
+    marks.push({ atMs: Math.round(Number.isFinite(atMs) ? atMs : callMs(self)), text, ...mark });
+    self.padRecord.lastText = text;
+  }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
   function applyPadEvent(self, rawEvent) {
     const event = rawEvent?.open ? { ...rawEvent, lang: padLabel(self, rawEvent.lang) } : rawEvent;
     // Opening a pad that is already open is how an interviewer starts an exercise of their own in it.
-    if (event?.open && state.pad.open) self.padReopenedAt = clock.now();
+    const wasOpen = state.pad.open;
+    if (event?.open && wasOpen) self.padReopenedAt = clock.now();
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
-    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); }
+    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); turnPad(self, { wasOpen }, event.atMs); }
     else { self.padProblemRef = null; state.pad = { ...state.pad, seed: null }; } // the next exercise starts without this one's given code
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
     // The record marks when the pad came up and went away, so the replay shows it from its opening (empty at first)
@@ -799,7 +871,7 @@ export function createPracticeCallService(deps = {}) {
       const marks = self.padRecord.snapshots;
       const markAt = Math.round(Number.isFinite(event.atMs) ? event.atMs : callMs(self));
       const closed = marks.at(-1)?.closed === true;
-      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text }); self.padOpenMark = marks.at(-1); }
+      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text, ...(self.padTurned || {}) }); self.padTurned = null; self.padOpenMark = marks.at(-1); }
       else if (!event.open && marks.length && !closed) {
         // What was typed since the pad last reached an interviewer is recorded first, so the close holds the final text.
         snapshotPad(self, state.pad.text, markAt);
@@ -826,7 +898,9 @@ export function createPracticeCallService(deps = {}) {
     const file = visual ? self.visuals.get(visualId)?.file : null;
     self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId, ...(visual ? { visual: { ...visual, ...(file ? { file } : {}) } } : {}) });
     state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId), ...(visual ? { visual } : {}) };
+    self.padScreenAt = clock.now();
     syncPadOptions(self);
+    turnPad(self, null, atMs);
     seedPad(self, atMs);
   }
   /** The screen a suggested reply should see: the one shown now, else the last one shown in this call. */
@@ -1291,7 +1365,8 @@ export function createPracticeCallService(deps = {}) {
       self.candidateVad = !!event.speaking;
       refreshSpeaking(self);
     }
-    if (event?.type === 'transcript' && event.final && Number.isFinite(event.startMs) && Number.isFinite(event.endMs)) {
+    // What the microphone hears before the call is answered (the ready and ringing screens) is not the candidate in it.
+    if (event?.type === 'transcript' && event.final && self.inCall && Number.isFinite(event.startMs) && Number.isFinite(event.endMs)) {
       // A segment of the voice's own cut line that stayed open past the cut ends at the cut: the entry, the answer timings and the tone notes all read it.
       const clampedEnd = clampedEndOfCutSegment(event, self.injectSpans?.values());
       if (clampedEnd !== null) { dbg('transcript-clamped', { segmentId: event.segmentId, fromMs: event.endMs, toMs: clampedEnd }); event = { ...event, endMs: clampedEnd }; }
@@ -2461,6 +2536,7 @@ export function createPracticeCallService(deps = {}) {
     }
     // The interviewers moved on to another planned question: the exercise the pad was limited for is over, so a
     // screen of their own after this is a new exercise and not a follow-up (a prepared part still on screen keeps it).
+    if (event.type === 'question-asked' && call && !call.finished) call.padAsked = (call.padAsked || 0) + 1;
     if (event.type === 'question-asked' && call && !call.finished && call.padProblemRef) {
       const limited = (call.settledPlan?.problems || []).find(problem => problem?.ref === call.padProblemRef);
       if (limited && limited.question !== event.number) { call.padProblemRef = null; call.padMovedOn = true; syncPadOptions(call); publish(); }
@@ -2489,7 +2565,7 @@ export function createPracticeCallService(deps = {}) {
           // Its record mark goes with it: the pad is marked when it really comes up, with the share (the replay showed
           // an empty pad for the 5 s before the problem it belonged to).
           const marks = self.padRecord?.snapshots;
-          if (marks?.length && marks.at(-1) === self.padOpenMark) { marks.pop(); self.padRecord.lastText = marks.at(-1)?.text ?? ''; }
+          if (marks?.length && marks.at(-1) === self.padOpenMark) { const taken = marks.pop(); if (taken.sheet) self.padTurned = { sheet: taken.sheet, ...(taken.starter ? { starter: true } : {}) }; self.padRecord.lastText = marks.at(-1)?.text ?? ''; }
         }
         state.sharing = { speakerId, presenterName: presenterNameOf(self, speakerId), title: null };
         self.shareTimer = clock.setTimeout(() => {
@@ -2529,7 +2605,8 @@ export function createPracticeCallService(deps = {}) {
     }
     // Assumed engine event: the pad text went to the interviewer with a candidate turn.
     if (event.type === 'pad-sent' && call && !call.finished) {
-      snapshotPad(call, typeof event.text === 'string' ? event.text : undefined, event.atMs);
+      // The event's own text can be older than the pad by now, and would show the replay going backwards.
+      snapshotPad(call, undefined, event.atMs);
       return;
     }
     // The candidate's voice was cut off: the chat keeps what was actually said, broken off with a dash, as a
@@ -3498,10 +3575,12 @@ export function createPracticeCallService(deps = {}) {
       publish();
       return snapshot();
     },
-    updatePad: text => {
+    updatePad: (text, sheet) => {
       // A pad that has just closed still takes text: the window sends its last keystrokes as it closes.
       // One that was never opened in this call takes nothing.
       if (!call || call.finished || !call.inCall || call.interviewerEnded || state.interviewerLeft || (!state.pad.open && !call.padOpened)) return snapshot();
+      // Keys sent before the window knew the pad was turned over to another exercise belong to the one before.
+      if (Number.isInteger(sheet) && sheet !== (call.padSheetNo || 0)) return snapshot();
       const value = typeof text === 'string' ? text.slice(0, PAD_MAX) : '';
       if (value !== state.pad.text) noteTyping(call);
       state.pad.text = value;
@@ -3564,6 +3643,7 @@ export function createPracticeCallService(deps = {}) {
         // With the coding pad open the wand works the exercise (steps of a line and the pad after it), when the app passes
         // that call in; otherwise it only talks, as before.
         const working = !!state.pad?.open && typeof deps.draftWorkText === 'function';
+        const sheetNo = self.padSheetNo || 0;
         const draft = await resolve(working ? 'draftWork' : 'draftAnswer');
         const engineState = self.engine?.state?.() || { transcript: [] };
         // For a typed job the career documents sit in the résumé slot; they are passed once, as career text.
@@ -3583,8 +3663,10 @@ export function createPracticeCallService(deps = {}) {
           dbg('draft-answer', { ms: Math.round(clock.now() - started), work: true, steps: result.length, chars: result.reduce((sum, step) => sum + step.say.length + (step.code?.length ?? 0), 0), plan: result.map((step, at) => ({ step: at + 1, order: step.order || (step.together === true ? 'during' : 'before'), say: step.say, code: step.code === null ? null : (step.code.match(/[\s\S]{1,1900}/gu) ?? ['']) })) }); // the debug log caps a string at 2000 characters, so a step's code goes in pieces to be joined
           if (call !== self || self.finished) return { error: 'The call has ended.' };
           if (state.muted) return { muted: true };
+          if ((self.padSheetNo || 0) !== sheetNo) return { error: 'Could not suggest a reply. Try again.' }; // written for the exercise before
           // The window says the steps one after another: their delivery tags are written now, so no line waits for its own.
-          try { self.candidateVoice?.prepare?.(result.map(step => step.say).filter(Boolean)); } catch { /* tagging ahead is best effort */ }
+          // The first is asked for on its own: it is said at once, and waiting for the tags of every line cost it its own.
+          try { const lines = result.map(step => step.say).filter(Boolean); if (lines.length) { self.candidateVoice?.prepare?.(lines.slice(0, 1)); if (lines.length > 1) self.candidateVoice?.prepare?.(lines.slice(1)); } } catch { /* tagging ahead is best effort */ }
           return { steps: result.map(step => ({ say: step.say, code: step.code, order: ['before', 'during', 'after'].includes(step.order) ? step.order : step.together === true ? 'during' : 'before', together: step.order ? step.order === 'during' : step.together === true })) };
         }
         const text = result;

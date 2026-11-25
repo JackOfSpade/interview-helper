@@ -296,7 +296,7 @@ export function typingSpans(snapshots, onClock = clock, typing = null) {
     const at = Number(snapshot?.atMs);
     if (!Number.isFinite(at)) continue;
     const text = String(snapshot?.text ?? '');
-    if (text !== last && snapshot.starter !== true) times.push(at);
+    if (text !== last && snapshot.starter !== true && !snapshot.sheet) times.push(at);
     last = text;
   }
   const spans = [];
@@ -454,9 +454,16 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const screens = Array.isArray(callRecord.screens)
     ? callRecord.screens.filter(screen => screen && typeof screen === 'object' && line(screen.content)) : [];
   const snapshots = Array.isArray(callRecord.pad?.snapshots) ? callRecord.pad.snapshots : [];
-  const padText = String(snapshots.at(-1)?.text ?? '').trim();
+  // Each exercise had its own pad (a snapshot with `sheet` is where the pad was turned over): the last text of each.
+  const sheetTexts = new Map();
+  let sheet = 1;
+  for (const snapshot of snapshots) {
+    if (Number.isInteger(snapshot?.sheet)) sheet = snapshot.sheet;
+    sheetTexts.set(sheet, String(snapshot?.text ?? '').trim());
+  }
+  const padTexts = [...sheetTexts.values()].filter(Boolean);
   const starters = snapshots.filter(snapshot => snapshot?.starter === true).map(snapshot => String(snapshot.text ?? '')).filter(text => text.trim());
-  const hasPad = Boolean(padText);
+  const hasPad = padTexts.length > 0;
   const unprepared = unpreparedText(callRecord);
   const picked = pickedCards(callRecord, plan);
   const sections = [
@@ -470,7 +477,7 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers, at),
     ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at, transcript))]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
-    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP)),
+    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, ...(padTexts.length > 1 ? ['Each exercise had its own pad; the final text of each, in the order they came up:'] : []), ...padTexts.map(text => fenced(cut(text, REVIEW_PAD_CAP))),
       ...(starters.length ? ['The pad opened with this code already in it. It was given with the exercise: the candidate did not write it, and is neither credited nor faulted for it.', ...starters.map(text => fenced(cut(text, REVIEW_PAD_CAP)))] : []),
       `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at, callRecord.pad?.typing).join(', ') || '(no typing times were recorded)'}`] : []),
     ...(typedOnly ? [] : [

@@ -25,6 +25,8 @@ export const TAG_TIMEOUT_MS = 4000;
 // Lines tagged ahead (the steps of a worked exercise) go in one call, and nobody waits on it until a line opens, so it
 // may take longer; each line still waits at most TAG_TIMEOUT_MS from its own start.
 export const PREPARE_TIMEOUT_MS = 15000;
+// A line this short (a goodbye, a thank-you) is said as written: a call for tags would hold it longer than it takes to say.
+const UNTAGGED_WORDS = 10;
 const TRANSCRIPT_TURNS = 12;
 const TURN_MAX = 600;
 const REPLY_LOGGED_MAX = 400;
@@ -220,10 +222,13 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
   // exercise had a 2.4 s silence between them. Lines known ahead are tagged ahead (`prepare`), and `open` takes the
   // result for the same words; a line nobody prepared is tagged as before.
   const prepared = new Map();
+  const isShort = key => key.split(' ').length <= UNTAGGED_WORDS;
   const keyOf = value => String(value ?? '').replace(/\s+/gu, ' ').trim();
   return Object.freeze({
     prepare(texts = []) {
       const keys = [...new Set((Array.isArray(texts) ? texts : [texts]).map(keyOf).filter(key => key && !prepared.has(key)))];
+      // A short line on its own needs no tags (as in `open`); among others it costs nothing.
+      if (keys.length === 1 && isShort(keys[0])) return;
       if (!keys.length) return;
       const { transcript, brief } = attemptValue(context) || {};
       // One call for all of them (see tagCandidateLines), shared by each line's entry.
@@ -243,7 +248,7 @@ export function createCandidateVoice({ factories = {}, gender = () => DEFAULT_CA
         const { transcript, brief } = attemptValue(context) || {};
         const tagged = ready
           ? await within(ready, TAG_TIMEOUT_MS, { text: String(text ?? '').trim(), tagged: false, tags: 0, reply: null }, clock)
-          : await tagCandidateLine({ tagText, text, transcript, brief, signal, clock });
+          : await tagCandidateLine({ tagText: isShort(key) ? null : tagText, text, transcript, brief, signal, clock });
         attemptValue(() => onEvent({ type: 'candidate-voice', gender: chosen.gender, tagged: tagged.tagged, tags: tagged.tags ?? 0, prepared: Boolean(ready), ...(ready ? { reply: tagged.reply ?? null } : {}), tagMs: Math.round((typeof clock.now === 'function' ? clock.now() : Date.now()) - started), chars: tagged.text.length }));
         if (signal?.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
         stream.sendText(tagged.text);

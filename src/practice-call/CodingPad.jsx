@@ -79,7 +79,7 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
     sendTimerRef.current = setTimeout(flush, PAD_SEND_DEBOUNCE_MS);
     beat();
   };
-  // The exercise's starter code arriving while the pad is up: it takes the pad over, and nothing unsent from before goes out.
+  // Another exercise's pad (empty, with its given code, or as it was left) arriving while the pad is up: it takes the pad over, and nothing unsent from before goes out.
   const seedIdRef = useRef(seed?.id ?? null);
   useEffect(() => {
     if (readOnly || !seed || seed.id === seedIdRef.current) return;
@@ -87,7 +87,10 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
     clearTimeout(sendTimerRef.current);
     dirtyRef.current = false;
     textRef.current = String(seed.text || '').slice(0, PAD_TEXT_MAX);
+    cursorRef.current = null;
     setOwn(textRef.current);
+    stopTyping();
+    if (areaRef.current) { areaRef.current.scrollTop = 0; areaRef.current.scrollLeft = 0; }
   }, [seed, readOnly]);
   const editRef = useRef(edit);
   const flushRef = useRef(flush);
@@ -110,11 +113,13 @@ export default function CodingPad({ lang = '', choice = '', options, onChooseLan
         // began in the first second would find the pad untouched and not know the candidate is typing.
         let first = true;
         const sendFirst = () => { if (!first) return; first = false; flushRef.current(); flushedAt = Date.now(); };
+        // The pad turned over to another exercise: what was being typed belonged to the one before.
+        const seedId = seedIdRef.current;
         const goal = String(target ?? '').slice(0, PAD_TEXT_MAX);
         const step = async ms => {
           await sleep(ms);
           while (alive && paused() && !stopped()) await sleep(200);
-          return alive && !stopped();
+          return alive && !stopped() && seedIdRef.current === seedId;
         };
         // The edit is worked out once and typed through. It is worked out again only when the pad is not what the last
         // key left (the person edited in between), so their edit is respected, and the cursor never jumps to another

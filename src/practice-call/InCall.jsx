@@ -548,7 +548,7 @@ export default function InCall({ state, api }) {
               <div data-stage="true" className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${sidePanelOpen ? 'xl:flex-row' : 'md:flex-row'}`}>
                 {screen && <SharedScreen key="screen" title={screen.title} content={screen.content} visual={screen.visual} className="min-h-0 min-w-0 flex-1 basis-0" />}
                 {padOpen && <CodingPad key="pad" lang={pad.lang || ''} choice={pad.choice || ''} options={padOptions} onChooseLanguage={canChooseLanguage ? chooseLanguage : undefined} initialText={pad.text || ''} seed={pad.seed || null} disabled={interviewerLeft} typerRef={typerRef}
-                  onChange={api?.updatePad} className="min-h-0 min-w-0 flex-1 basis-0" />}
+                  onChange={typeof api?.updatePad === 'function' ? text => api.updatePad(text, pad.sheet || 0) : undefined} className="min-h-0 min-w-0 flex-1 basis-0" />}
               </div>
             </div>
             : <div data-layout="grid" data-tiles={shown.length} className={`grid h-full gap-3 ${layout.grid}`}>

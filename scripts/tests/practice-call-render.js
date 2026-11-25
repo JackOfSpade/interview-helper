@@ -341,6 +341,12 @@ export const presentingTests = [
         assert(!area(), 'closing the pad removes it');
         await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', text: 'reopened' } }));
         assert(area().value === 'reopened', 'a reopened pad is seeded again');
+        await act(async () => setValue('unsent'));
+        calls.length = 0;
+        await act(async () => render({ ...PRESENT_STATE, pad: { open: true, lang: '', text: '', sheet: 1, seed: { id: 1, text: '' } } }));
+        assert(area().value === '', 'another exercise turns the pad over to an empty one');
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 500)); });
+        assert(calls.filter(call => call[0] === 'pad').length === 0, 'nothing unsent from the exercise before goes out');
         await act(async () => root.unmount());
       } finally {
         for (const name of names) { if (saved[name]) Object.defineProperty(globalThis, name, saved[name]); else delete globalThis[name]; }
