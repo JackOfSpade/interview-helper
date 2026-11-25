@@ -108,6 +108,8 @@ export const DEFAULT_CALL_THRESHOLDS = Object.freeze({
   candidateYieldMinMs: 300,
   candidateYieldMaxMs: 900,
   candidateYieldFadeMs: 60,
+  // The wand's reply is written but no line of it has come (the window dropped it): its quiet pause ends this much later.
+  wandIdleMs: 5000,
 });
 
 /** The pause a speaker leaves after a line, by how the line ended: a full stop pauses longer than a comma. */
@@ -359,6 +361,13 @@ export function createPracticeCallEngine({
   let paused = false; // hidden pause: silence accounting and the elapsed time the interviewer sees stand still
   let pausedAt = null;
   let pausedTotalMs = 0;
+  // The wand's quiet pause (wand()): the same stopped clock while its reply is made, with nothing shown for it.
+  let quiet = false; // the pause holding now is the wand's own
+  let quietWanted = false; // a reply is being written: the pause begins as soon as the call is only waiting on the candidate
+  let quietFromMs = null; // helper time it began: words that begin after it are the candidate answering by themselves
+  let quietVadAt = null; // the candidate's live sound since it began: its last start and end
+  let quietVadEndMs = null;
+  let quietTimer = null;
   let silencePrompts = 0; // silence prompts sent since the candidate last said or typed anything
   // The last reply asked the candidate nothing (a statement), so a silence after it is nobody's failure: the interviewer
   // carries the conversation on once, uncounted, before any check-in. carriedOn: that turn has been used since the
@@ -2468,6 +2477,17 @@ export function createPracticeCallEngine({
 
   function overlapStart(atMs) {
     if (overlapWait) { unschedule(overlapWait.timer); overlapWait = null; }
+    const held = overlapRecord;
+    if (held?.active && held.paused && !held.speaking && held.reply === current && tokens(overlapText(held)).length === 0) {
+      // Another sound while the reply is still stopped for a wordless one: the same pause goes on, judged from this sound.
+      held.startMs = atMs;
+      held.endMs = null;
+      held.speaking = true;
+      unschedule(held.maxPausedTimer);
+      held.maxPausedTimer = schedule(th.maxPausedMs, () => onMaxPaused(held));
+      overlap = held;
+      return;
+    }
     const record = {
       startMs: atMs, endMs: null, speaking: true, reply: current, timer: null, durationElapsed: false,
       active: true, decision: earFloorBid() ? null : 'continue', paused: false, pausedAt: null,
@@ -2533,12 +2553,21 @@ export function createPracticeCallEngine({
     if (record.paused) {
       if (clearInterruption(record)) return stopFromOverlap(record);
       if (tokens(overlapText(record)).length >= 1) return classify(record, reply, overlapText(record));
-      return; // echo residue: the maxPaused timer decides
+      // Echo residue, or a noise that has stopped: once the recogniser has had its time to find words, the reply plays on.
+      unschedule(record.maxPausedTimer);
+      record.maxPausedTimer = schedule(Math.min(OVERLAP_WORD_WAIT_MS, Math.max(0, th.maxPausedMs - (now() - record.pausedAt))), () => onMaxPaused(record));
+      return;
     }
     if (record.decision === null) return; // the floor bid is still in flight: it applies the decision
     if (record.decision === 'pause') return; // the boundary pause applies the decision, then the classifier
     if (tokens(overlapText(record)).length) return evaluateOverlap(record, reply);
-    // No words yet: the recogniser can trail the VAD, so wait a little before ignoring the overlap.
+    awaitOverlapWords(record);
+  }
+
+  /** No words yet: the recogniser can trail the VAD, so wait a little before ignoring the overlap. */
+  function awaitOverlapWords(record) {
+    if (overlap && overlap !== record) return; // a newer sound is being judged
+    unschedule(record.timer);
     record.timer = schedule(OVERLAP_WORD_WAIT_MS, () => { if (overlapWait === record) overlapWait = null; });
     overlapWait = record;
   }
@@ -2567,6 +2596,14 @@ export function createPracticeCallEngine({
     const pause = () => {
       record.boundaryTimer = null;
       if (!record.active || current !== reply) return;
+      // The sound that asked for the floor is already over and had no words (a click, a cough): they talk on, as a person
+      // would. Words the recogniser still owes are judged as an overlap that never paused. In call-mwwe9usa-p82te0 a
+      // 180 ms noise stopped the interviewer for 2.5 s in the middle of a question.
+      if (!record.speaking && !clearInterruption(record) && tokens(overlapText(record)).length === 0) {
+        record.decision = 'continue';
+        awaitOverlapWords(record);
+        return;
+      }
       record.paused = true;
       record.pausedAt = now();
       reply.positionMs = livePosition(reply);
@@ -2612,8 +2649,10 @@ export function createPracticeCallEngine({
     if (tokens(overlapText(record)).length === 0 && !clearInterruption(record)) {
       // Only a wordless noise paused the reply and nothing followed it: carry on speaking.
       if (overlap === record) overlap = null;
-      endOverlapRecord(record);
       resumePlayback(record, reply);
+      if (record.speaking) { endOverlapRecord(record); return; }
+      record.decision = 'continue'; // words the recogniser delivers later still are judged, over the reply playing on
+      awaitOverlapWords(record);
       return;
     }
     // No decision in time: the pause counts as an interruption, and the call must not go quiet afterwards.
@@ -2823,6 +2862,7 @@ export function createPracticeCallEngine({
 
   function armSilence() {
     disarm('silence');
+    if (enterQuiet()) return;
     if (paused || phase !== 'listening' || typingNow || speaking || current || said || injecting || named.spec || named.commit) return;
     // A typed line held back for an interviewer who was then stopped is said now.
     if (injectQueue.length) { startInject(); return; }
@@ -3284,6 +3324,12 @@ export function createPracticeCallEngine({
   function onVad(event) {
     noteHelperTime(event.atMs);
     // While the call is paused the candidate's voice starts nothing; the recording still has it.
+    // In the wand's quiet pause it is kept, and followed up when that pause ends: a sound alone does not end it.
+    if (quiet) {
+      speaking = !!event.speaking;
+      if (event.speaking) quietVadAt = event.atMs; else quietVadEndMs = event.atMs;
+      return;
+    }
     if (paused) { if (!event.speaking) speaking = false; return; }
     if (event.speaking) {
       speaking = true; // a bare sound postpones the check-in but is not an answer: the counters stay
@@ -3338,7 +3384,9 @@ export function createPracticeCallEngine({
   }
 
   function onTranscript(event) {
-    if (paused) return; // dropped: no caption, no stored words, so nothing from the pause reaches a turn
+    // Their own words during the wand's quiet pause: they are answering, so the call goes on.
+    if (quiet && String(event.text ?? '').trim() && (event.startMs >= quietFromMs || (quietVadAt !== null && event.endMs > quietFromMs))) endQuiet({ spoke: true });
+    if (paused && !quiet) return; // dropped: no caption, no stored words, so nothing from the pause reaches a turn
     dropSupersededVolatile(event);
     storeSegment(event);
     emit({ type: 'caption', speaker: 'candidate', text: String(event.text ?? ''), final: !!event.final });
@@ -3749,7 +3797,7 @@ export function createPracticeCallEngine({
     const utterance = {
       utteranceId: newId(), texts, text: line, tries, words: [], positionMs: 0, positionAt: null, audioBytes: 0, sampleRate: null,
       gotAudio: false, sent: false, voiceDone: false, started: false, startMs: null, ending: false, overInterviewer: false, extraTexts: [],
-      holding: paused, heldAudio: [],
+      holding: paused && !quiet, heldAudio: [], // the wand's quiet pause ends as its line is ready, so it holds nothing
       ctl: new AbortController(), stream: null, startTimer: null, finishTimer: null, cancelWait: null, yieldTimer: null, boundaryTimer: null,
     };
     let stream;
@@ -3770,6 +3818,7 @@ export function createPracticeCallEngine({
         utterance.gotAudio = true;
         // The line is ready to be heard: playing next, or held for the resume.
         emit({ type: 'candidate-voice', state: 'ready', injected: true, held: utterance.holding, chatIds: chatIdsOf(utterance.texts) });
+        endQuiet();
       }
       if (utterance.holding) { utterance.heldAudio.push(buffer); return; }
       sendInjectAudio(utterance, buffer);
@@ -3864,6 +3913,7 @@ export function createPracticeCallEngine({
     }
     emit({ type: 'error', code: 'candidate-voice-failed', chatIds: chatIdsOf(texts) });
     if (injectQueue.length) return startInject();
+    endQuiet();
     if (resumeDeferredTurnEnd()) return;
     armSilence();
   }
@@ -4010,9 +4060,12 @@ export function createPracticeCallEngine({
     const text = String(value ?? '').trim();
     // Only the shortcut resumes: a message typed during a pause is refused. A generated line (the wand) is the exception
     // when the voice goes through the microphone: it is made now and held, so it is ready the moment the call resumes.
-    if (!text || (paused && !(generated === true && injectMode()))) return false;
+    if (!text || (paused && !quiet && !(generated === true && injectMode()))) return false;
     // Muted, nothing the candidate says goes out, a line in their AI voice no more than their own voice.
     if (muted) return false;
+    // A message of their own, or a wand line whose voice cannot say when it is ready, ends the wand's quiet pause; its
+    // line through the microphone ends it once its voice is made.
+    if (quiet && !(generated === true && injectMode())) endQuiet();
     // chatId: the window's chat entry for this message, so a line cut short can be cut short there too.
     queueTyped({ text, generated: generated === true, ...(chatId != null ? { chatId: String(chatId) } : {}) });
     return true;
@@ -4037,6 +4090,8 @@ export function createPracticeCallEngine({
     const next = String(value ?? '').slice(0, PAD_TEXT_CAP);
     if (next === padText) return;
     padText = next;
+    // The wand has its reply and is typing it: there is nothing left to wait for.
+    if (quiet && !quietWanted) endQuiet();
     // Keys typed while they gave way (the yield time, the end of the word) are still the halted work: the note follows
     // the text. Any edit after that is the candidate going back to it.
     if (padHaltText !== null && now() < padHaltUntil) padHaltText = next; else padHaltText = null;
@@ -4104,6 +4159,7 @@ export function createPracticeCallEngine({
     const next = !!value;
     if (next === muted) return;
     muted = next;
+    if (muted) endQuiet();
     if (muted && phase !== 'ended') {
       if (injecting) injecting.holding = false; // a line held by a pause is dropped too, never played on the resume
       stopInjection();
@@ -4133,7 +4189,17 @@ export function createPracticeCallEngine({
   /** Pause or resume the silence clock. Resuming re-arms the wait from zero; the check-in count is kept. */
   function setPaused(value) {
     const next = !!value;
-    if (phase === 'ended' || phase === 'connecting' || next === paused) return;
+    if (phase === 'ended' || phase === 'connecting') return;
+    if (next && quiet) {
+      // The shortcut during the wand's quiet pause: from here it is an ordinary pause, which only the shortcut ends.
+      quiet = false;
+      clearQuiet();
+      if (injecting && !injecting.sent && !injecting.ending) injecting.holding = true;
+      dropCandidateActivity();
+      emit({ type: 'paused', paused: true });
+      return;
+    }
+    if (next === paused || quiet) return; // the wand's own pause ends with its reply
     paused = next;
     if (paused) {
       pausedAt = now();
@@ -4144,9 +4210,11 @@ export function createPracticeCallEngine({
       if (injecting && !injecting.sent && !injecting.ending) injecting.holding = true;
       else stopInjection();
       dropCandidateActivity();
+      emit({ type: 'paused', paused: true });
     } else {
       pausedTotalMs += now() - pausedAt;
       pausedAt = null;
+      emit({ type: 'paused', paused: false }); // told first: a wand reply still being written starts its own pause below
       // Speech that began during the pause can still deliver words after it: they start before this mark.
       if (!current) { markTurnConsumed(); candidateSpoke = false; clearLiveAnswer(); }
       if (padDirty) { padEditedAt = now(); padDirtySince = padEditedAt; schedulePadProgress(); }
@@ -4154,8 +4222,80 @@ export function createPracticeCallEngine({
       else if (!injecting && injectQueue.length) startInject(); // anything sent during the pause that is not playing yet
       else if (voicedHeld) { voicedHeld = false; deliverVoiced(); } else armSilence();
     }
-    emit({ type: 'paused', paused });
   }
+  /**
+   * The wand (Suggest a reply) is making a reply: the call stands still meanwhile, as in a pause but with nothing shown
+   * for it (the 'paused' events carry quiet), so the time the AI takes is never time the candidate kept an interviewer
+   * waiting. It holds only while the call waits on the candidate: an interviewer still speaking, or a turn already
+   * ending, goes on first and it begins after (armSilence).
+   * 'writing': a reply is being written. 'written': the window has it; the pause goes on until its line's voice is made or
+   * its first key is typed (at most wandIdleMs with neither). 'dropped': there is no reply.
+   */
+  function wand(step) {
+    if (phase === 'ended') return;
+    if (step === 'writing') {
+      quietWanted = true;
+      unschedule(quietTimer);
+      quietTimer = null;
+      enterQuiet();
+      return;
+    }
+    if (step !== 'written') { endQuiet(); return; }
+    quietWanted = false;
+    if (!quiet) return;
+    unschedule(quietTimer);
+    quietTimer = schedule(th.wandIdleMs, () => { quietTimer = null; if (!injecting && !injectQueue.length) endQuiet(); });
+  }
+
+  function enterQuiet() {
+    if (!quietWanted || paused || muted || phase !== 'listening' || current || cancelling || said || injecting || injectQueue.length
+      || pendingTyped.length || voicedDone.length || speaking || named.spec || named.commit) return false;
+    paused = true;
+    quiet = true;
+    pausedAt = now();
+    quietFromMs = helperTimelineMs();
+    quietVadAt = null;
+    quietVadEndMs = null;
+    for (const name of ['silence', 'padIdle', 'quietRelook']) disarm(name);
+    cancelWatch();
+    emit({ type: 'paused', paused: true, quiet: true });
+    return true;
+  }
+
+  function clearQuiet() {
+    unschedule(quietTimer);
+    quietTimer = null;
+    quietFromMs = null;
+    quietVadAt = null;
+    quietVadEndMs = null;
+  }
+
+  /** The wand's quiet pause is over (if one is holding), and none begins for the reply it was for. */
+  function endQuiet({ spoke = false } = {}) {
+    quietWanted = false;
+    if (!quiet) return;
+    const vadAt = quietVadAt;
+    // Ended by their own words: they began a moment before the recogniser gave them, and that moment is not paused time.
+    const spokeMs = spoke && vadAt !== null ? clamp(Math.round(now() - (toClock(vadAt) ?? now())), 0, now() - pausedAt) : 0;
+    const heldMs = now() - pausedAt - spokeMs;
+    const vadEndMs = quietVadEndMs;
+    quiet = false;
+    paused = false;
+    pausedAt = null;
+    pausedTotalMs += heldMs;
+    clearQuiet();
+    // What was being timed goes on from where it stood.
+    if (checkInAt !== null) checkInAt += heldMs;
+    if (answerSince !== null) answerSince += heldMs;
+    if (listenedText !== null && lastVadEndMs !== null) lastVadEndMs += heldMs; // the quiet look counts from it
+    if (padDirty) { padEditedAt = now(); padDirtySince = padEditedAt; schedulePadProgress(); }
+    emit({ type: 'paused', paused: false, quiet: true, ...(spokeMs ? { spokeMs } : {}) });
+    if (phase === 'ended') return;
+    if (speaking && vadAt !== null) { onVad({ speaking: true, atMs: vadAt }); return; }
+    if (spoke && vadEndMs !== null) { candidateSpoke = true; scheduleTurnEnd(vadEndMs); return; }
+    armSilence();
+  }
+
   /**
    * A pause stops the candidate's voice from steering the call: end any overlap (a reply the overlap had
    * paused plays on), forget unanswered speech and its timers. A reply already being spoken finishes.
@@ -4246,6 +4386,7 @@ export function createPracticeCallEngine({
     canHoldVoice: () => injectMode(),
     typing,
     setPaused,
+    wand,
     setMuted,
     setPadText,
     seedPadText,

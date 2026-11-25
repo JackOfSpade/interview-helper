@@ -5785,6 +5785,36 @@ test('draftAnswer: with the coding pad open the wand works the exercise as steps
   await service.hangUp({ feedback: false });
 });
 
+test('draftAnswer: the engine is told a reply is being written, then written or dropped; its quiet pause stops the clock with nothing shown', async () => {
+  const steps = [];
+  let emit;
+  let now = 1000;
+  let outcome = 'A reply.';
+  const { service, deps } = await liveCall({ deps: {
+    clock: { now: () => now, setTimeout: () => 1, clearTimeout: () => {} },
+    engineFactory: options => { emit = options.onEvent; return { start() { emit({ type: 'phase', phase: 'listening' }); }, hangUp() {}, wand: step => steps.push(step), setPaused() {}, state: () => ({ transcript: [], elapsedMs: 0 }) }; },
+    draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l', logger: { warn() {}, info() {} },
+    draftAnswer: async () => { if (outcome instanceof Error) throw outcome; return outcome; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  await service.draftAnswer();
+  assert.deepEqual(steps, ['writing', 'written']);
+  outcome = new Error('model down');
+  await service.draftAnswer();
+  assert.deepEqual(steps.slice(2), ['writing', 'dropped']);
+  emit({ type: 'paused', paused: true, quiet: true });
+  assert.equal(service.getState().paused, false, 'no notice');
+  now += 4000;
+  emit({ type: 'paused', paused: true }); // the shortcut meanwhile
+  assert.equal(service.getState().paused, true);
+  now += 1000;
+  emit({ type: 'paused', paused: false });
+  assert.equal(service.getState().paused, false);
+  await service.hangUp({ feedback: false });
+  assert.equal((await deps.store.readRecord('call-1')).pausedMs, 5000, 'one stretch, off the call clock like any pause');
+});
+
 test('draftAnswer: pausing neither refuses a suggestion nor stops one being written', async () => {
   const engineFactory = () => ({ start() {}, hangUp() {}, setPaused() {}, state: () => ({ transcript: [], elapsedMs: 0 }) });
   let release;

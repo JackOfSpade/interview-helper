@@ -207,7 +207,7 @@ test('exports the default thresholds and does no direct timing or I/O', () => {
     floorBidAfterMs: 250, resumeDelayMs: 250, maxResumePauseMs: 1200, maxPausedMs: 2500, voiceNoteTimeoutMs: 150, openerGraceMs: 400, openerDeadlineMs: 1500,
     joinFlushLeadMs: 900, joinGapMinLeadMs: 900, handoverQuietMinMs: 1200, handoverQuietMaxMs: 1800,
     cutInFirstMs: 12000, cutInEveryMs: 10000, cutInMinLeftMs: 2500, candidateVoiceStartMs: 15000, cutInYieldMs: 2500, watchEveryMs: 2500, watchTimeoutMs: 2500, cutInHoldMs: 1500, cutInStaleWords: 12, cutInStaleMs: 5000, cutInStaleHardWords: 30, watchVetoBackoffMs: 10000, watchVetoWords: 40, cutInSentenceMaxMs: 5000, injectFinalWaitMs: 1200, voicedNoteWaitMs: 300,
-    candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, reactionGuard: 3,
+    candidateYieldMinMs: 300, candidateYieldMaxMs: 900, candidateYieldFadeMs: 60, wandIdleMs: 5000, reactionGuard: 3,
   });
   assert(Object.isFrozen(DEFAULT_CALL_THRESHOLDS));
   const source = fs.readFileSync(new URL('../../electron/interviewPracticeCallEngine.js', import.meta.url), 'utf8');
@@ -4789,22 +4789,86 @@ test('an interrupted interviewer entry ends at the cut point and an acknowledgem
   assert.equal(cut.endMs - cut.startMs, 650, 'the entry ends where playback was cut');
 });
 
-test('a wordless noise that paused the reply resumes it after maxPausedMs instead of cutting it for good', async () => {
+test('a wordless noise over before the reply could stop at a word never pauses it; words that come late are still judged', async () => {
+  for (const late of [false, true]) {
+    const rig = makeRig({ ear: makeEar({ floorBid: () => ({ decision: 'pause' }) }) });
+    await greet(rig);
+    await toPlaying(rig);
+    rig.h.playback('utt2', 'position', 100);
+    rig.h.vad(true); // a click or a cough
+    await rig.clock.advance(250); // the ear asks for a pause, at the end of the word being said
+    rig.h.vad(false);
+    const startedAt = rig.clock.now() - 250;
+    await rig.clock.advance(300);
+    assert.equal(rig.opsOf('pause').length, 0, 'the interviewer talks on');
+    if (late) {
+      rig.h.transcript('right', 'o1', startedAt);
+      await flush();
+      assert.equal(rig.sessions.classifier.calls.length, 1, 'a word the recogniser still owed is judged');
+      rig.sessions.classifier.answer('interruption');
+      await flush();
+      await rig.clock.advance(500);
+      assert.equal(cancelsOf(rig, 'utt2'), 1);
+      continue;
+    }
+    await rig.clock.advance(3000);
+    assert.equal(cancelsOf(rig, 'utt2'), 0);
+    assert.equal(rig.sessions.classifier.calls.length, 0);
+    rig.h.playback('utt2', 'finished', 3300);
+    await flush();
+    assert.equal(rig.engine.state().phase, 'listening');
+  }
+});
+
+test('a reply paused by a wordless noise plays on soon after the noise stops, not after maxPausedMs', async () => {
   const rig = makeRig({ ear: makeEar({ floorBid: () => ({ decision: 'pause' }) }) });
   await greet(rig);
   await toPlaying(rig);
   rig.h.playback('utt2', 'position', 100);
-  rig.h.vad(true); // no transcript word: a cough or a bump
-  await rig.clock.advance(400);
-  rig.h.vad(false);
-  await rig.clock.advance(200); // the boundary pause lands
+  rig.h.vad(true);
+  await rig.clock.advance(500); // still going as the word ends
   assert.equal(rig.opsOf('pause').filter(item => item.id === 'utt2').length, 1);
-  await rig.clock.advance(2600); // past maxPausedMs
-  assert.equal(cancelsOf(rig, 'utt2'), 0, 'the reply is not cut');
+  rig.h.vad(false);
+  await rig.clock.advance(599);
+  assert.equal(rig.opsOf('resume').length, 0, 'the recogniser is given its time');
+  await rig.clock.advance(1);
   assert.equal(rig.opsOf('resume').filter(item => item.id === 'utt2').length, 1);
-  rig.h.playback('utt2', 'finished', 3300);
+  assert.equal(cancelsOf(rig, 'utt2'), 0, 'the reply is not cut');
+});
+
+test('a second sound, or a late word, after a noise that paused the reply is judged as ever', async () => {
+  const paused = async () => {
+    const rig = makeRig({ ear: makeEar({ floorBid: () => ({ decision: 'pause' }) }) });
+    await greet(rig);
+    await toPlaying(rig);
+    rig.h.playback('utt2', 'position', 100);
+    rig.h.vad(true);
+    await rig.clock.advance(500);
+    rig.h.vad(false);
+    return rig;
+  };
+  const second = await paused();
+  await second.clock.advance(300);
+  second.h.vad(true);
+  second.h.transcript('mm', 'o1', second.clock.now());
+  await second.clock.advance(310); // past the first noise's wait
+  assert.equal(cancelsOf(second, 'utt2'), 0);
+  assert.equal(second.opsOf('resume').length, 0, 'no talking over a sound still going');
+  second.h.vad(false);
   await flush();
-  assert.equal(rig.engine.state().phase, 'listening');
+  assert.equal(second.sessions.classifier.calls.length, 1);
+
+  const late = await paused();
+  const at = late.clock.now() - 500;
+  await late.clock.advance(800);
+  assert.equal(late.opsOf('resume').length, 1);
+  late.h.transcript('wait', 'o1', at);
+  await flush();
+  assert.equal(late.sessions.classifier.calls.length, 1, 'a word 800 ms late');
+  late.sessions.classifier.answer('interruption');
+  await flush();
+  await late.clock.advance(500);
+  assert.equal(cancelsOf(late, 'utt2'), 1);
 });
 
 test('a paused reply cut by maxPausedMs for a long noise re-arms the silence prompt', async () => {

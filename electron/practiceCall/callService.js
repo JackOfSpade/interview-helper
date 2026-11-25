@@ -594,7 +594,7 @@ export function createPracticeCallService(deps = {}) {
   const pausedTotalMs = self => Math.max(0, Math.round((self?.pausedMs || 0) + (self?.pausedSince ? clock.now() - self.pausedSince : 0)));
   /** The call timer the window shows: wall time without paused time, so it freezes and never jumps back. */
   const onScreenMs = self => Math.max(0, Math.round(clock.now() - self.startedAt) - pausedTotalMs(self));
-  function setPausedState(self, paused) {
+  function setPausedState(self, paused, quiet = false, spokeMs = 0) {
     if (!self) return;
     const wasPaused = !!self.pausedSince;
     if (paused && !self.pausedSince) {
@@ -604,11 +604,11 @@ export function createPracticeCallService(deps = {}) {
     }
     if (!paused && self.pausedSince) {
       const open = self.pauseSpans?.at(-1);
-      if (open && open.endMs === undefined) open.endMs = Math.max(open.startMs, callMs(self));
-      self.pausedMs = (self.pausedMs || 0) + Math.max(0, Math.round(clock.now() - self.pausedSince));
+      if (open && open.endMs === undefined) open.endMs = Math.max(open.startMs, callMs(self) - spokeMs); // they spoke that long before the pause was ended by it
+      self.pausedMs = (self.pausedMs || 0) + Math.max(0, Math.round(clock.now() - self.pausedSince - spokeMs));
       self.pausedSince = 0;
     }
-    state.paused = !!paused;
+    state.paused = !!paused && !quiet; // the wand's quiet pause stops the clock like any pause but shows nothing
     // A late colleague's wait runs on the call clock: a pause holds it, and the resume picks it up where it stopped.
     if (paused && !wasPaused) clearLateJoins(self);
     else if (!paused && wasPaused) armJoinTimers(self);
@@ -2658,7 +2658,7 @@ export function createPracticeCallService(deps = {}) {
       return;
     }
     if (event.type === 'paused') {
-      if (call && !call.finished) { setPausedState(call, event.paused === true); state.elapsedMs = onScreenMs(call); publish(); }
+      if (call && !call.finished) { setPausedState(call, event.paused === true, event.quiet === true, Number(event.spokeMs) || 0); state.elapsedMs = onScreenMs(call); publish(); }
       return;
     }
     if (event.type === 'ended') {
@@ -3638,6 +3638,10 @@ export function createPracticeCallService(deps = {}) {
       // The reply is on its way, as if they were typing it: no silence check or carry-on comes in over it.
       try { self.engine?.typing?.(true); } catch { /* engine already ended */ }
       dbg('user', { action: 'draft-answer' });
+      // The call stands still, with nothing shown, until the reply is ready: the AI's time is not the candidate's silence.
+      const wand = step => { try { self.engine?.wand?.(step); } catch { /* engine already ended */ } };
+      let written = false;
+      wand('writing');
       try {
         // The career text and the listing are read once per call, on the first suggestion.
         self.draftSources ??= (async () => {
@@ -3686,12 +3690,14 @@ export function createPracticeCallService(deps = {}) {
           // The window says the steps one after another: their delivery tags are written now, so no line waits for its own.
           // The first is asked for on its own: it is said at once, and waiting for the tags of every line cost it its own.
           try { const lines = result.map(step => step.say).filter(Boolean); if (lines.length) { self.candidateVoice?.prepare?.(lines.slice(0, 1)); if (lines.length > 1) self.candidateVoice?.prepare?.(lines.slice(1)); } } catch { /* tagging ahead is best effort */ }
+          written = result.length > 0;
           return { steps: result.map(step => ({ say: step.say, code: step.code, order: ['before', 'during', 'after'].includes(step.order) ? step.order : step.together === true ? 'during' : 'before', together: step.order ? step.order === 'during' : step.together === true })) };
         }
         const text = result;
         dbg('draft-answer', { ms: Math.round(clock.now() - started), chars: text.length });
         if (call !== self || self.finished) return { error: 'The call has ended.' };
         if (state.muted) return { muted: true }; // muted while it was written: dropped, never spoken
+        written = !!text;
         return { text };
       } catch (error) {
         dbg('draft-answer', { ms: Math.round(clock.now() - started), error: error?.code || error?.message || 'error' });
@@ -3702,6 +3708,7 @@ export function createPracticeCallService(deps = {}) {
       } finally {
         self.drafting = false;
         if (self.draftAbort === abort) self.draftAbort = null;
+        wand(written ? 'written' : 'dropped');
         if (call === self && !self.finished) { try { self.engine?.typing?.(!!state.typing); } catch { /* engine already ended */ } }
       }
     },

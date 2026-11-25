@@ -534,6 +534,29 @@ asked for ("Get feedback", chosen on the screen after the call) is finished even
 while it is being prepared: that is one transcription and one Claude call, and
 the replay shows it.
 
+**The wand's quiet pause (2026-11-25).** Pressing Suggest a reply stops the
+call as the P pause does (no silence checks, the call clock stands still, the
+stretch is a pause span the replay and the numbers leave out) but `state.paused`
+stays false, so nothing is shown (`engine.wand()`; its `paused` events carry
+`quiet`). It holds only while the call waits on the candidate: pressed while an
+interviewer is speaking, it begins when they finish. It ends when the line's
+voice is made, at the first key typed into the pad, when there is no reply, on a
+mute, a typed message or the candidate's own words (a wordless sound does not
+end it), and `wandIdleMs` after a reply the window never used. P during it makes
+it an ordinary pause.
+
+**A noise no longer stops the interviewer (2026-11-25).** In
+call-mwwe9usa-p82te0 a 180 ms wordless sound paused the interviewer for 2.5 s
+between two sentences. A sound that is over, wordless and short by the time the
+reply could stop at a word never pauses it; one that did pause it lets it play
+on 600 ms after it stops (the recogniser's time to find words), not after
+`maxPausedMs`. Late words that arrive before then are judged as ever.
+
+**After an interviewer answers the candidate's question**, the wand no longer
+repeats their point back (8 of 8 replays of that call did before the rule had a
+line of its own, 2 of 8 after). How many questions it asks is still its own
+judgment from the time left.
+
 Practice calls draw from the whole pool (General, posting, topics) and do not
 cover all of it in one call. Each entry shows "Practised ×N": how many practice
 calls asked it and got an answer. Since 2026-11-19 a question counts only once

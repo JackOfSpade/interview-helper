@@ -579,6 +579,149 @@ async function injectLine(rig, line, started = true) {
   await flush();
 }
 
+const pauses = rig => rig.of('paused').map(event => [event.paused, event.quiet === true]);
+
+test('the wand: the call stands still from the press until its line is ready, then the line plays at once', async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.wand('writing');
+  assert.deepEqual(pauses(rig), [[true, true]]);
+  const at = rig.engine.state().elapsedMs;
+  await rig.clock.advance(46000); // a long exercise being written: no check-in, no time on the call
+  assert.equal(rig.sessions.main.calls.length, 1);
+  assert.equal(rig.engine.state().elapsedMs, at);
+  rig.engine.wand('written');
+  assert.equal(rig.engine.typed('I would add an index.', { generated: true, chatId: 'm1' }), true);
+  await rig.clock.advance(6000); // the voice is still being made, past wandIdleMs
+  assert.equal(rig.engine.state().paused, true);
+  voice.lines[0].audioCb(Buffer.alloc(48000));
+  assert.equal(rig.engine.state().paused, false);
+  assert.equal(rig.opsOf('inject').length, 1, 'nothing is held');
+  assert.equal(rig.of('candidate-voice').find(event => event.state === 'ready').held, false);
+  assert.deepEqual(pauses(rig), [[true, true], [false, true]]);
+  assert.equal(rig.engine.state().pausedMs, 52000);
+});
+
+test('the wand pressed while an interviewer speaks: they finish, then the call waits; done before that, it never stands still', async () => {
+  for (const early of [false, true]) {
+    const { rig } = await injectRig();
+    await interviewerSpeaking(rig);
+    rig.engine.wand('writing');
+    assert.deepEqual(pauses(rig), [], 'the interviewer is not waiting for anyone yet');
+    if (early) rig.engine.wand('written');
+    const id = rig.opsOf('play').at(-1).id;
+    rig.h.playback(id, 'finished', 2000);
+    await flush();
+    assert.deepEqual(pauses(rig), early ? [] : [[true, true]]);
+    await rig.clock.advance(21000);
+    assert.equal(rig.sessions.main.calls.length > 2, early, 'the silence wait runs only when nothing is being written');
+  }
+});
+
+test('the wand: no reply, a reply never sent, its first key, a mute, a line that fails and a typed message all end the quiet pause', async () => {
+  const start = async () => { const made = await injectRig(); made.rig.engine.wand('writing'); return made; };
+  const dropped = await start();
+  dropped.rig.engine.wand('dropped');
+  assert.equal(dropped.rig.engine.state().paused, false);
+  await dropped.rig.clock.advance(20000);
+  assert.equal(dropped.rig.sessions.main.calls.length, 2, 'the silence wait starts again from zero');
+
+  const unsent = await start();
+  unsent.rig.engine.wand('written');
+  await unsent.rig.clock.advance(4999);
+  assert.equal(unsent.rig.engine.state().paused, true);
+  await unsent.rig.clock.advance(1);
+  assert.equal(unsent.rig.engine.state().paused, false);
+
+  const keys = await start();
+  keys.rig.engine.setPadText('left over'); // the window's copy of the pad while it is written
+  assert.equal(keys.rig.engine.state().paused, true);
+  keys.rig.engine.wand('written');
+  keys.rig.engine.setPadText('int');
+  assert.equal(keys.rig.engine.state().paused, false);
+
+  const mute = await start();
+  mute.rig.engine.setMuted(true);
+  assert.equal(mute.rig.engine.state().paused, false);
+
+  const lost = await start();
+  lost.rig.engine.wand('written');
+  lost.rig.engine.typed('A line.', { generated: true, chatId: 'm1' });
+  await lost.rig.clock.advance(15000);
+  assert.equal(lost.rig.engine.state().paused, true, 'tried once more');
+  await lost.rig.clock.advance(15000);
+  assert.equal(lost.rig.engine.state().paused, false);
+
+  const typed = await start();
+  assert.equal(typed.rig.engine.typed('Typed by hand.', { chatId: 'm1' }), true);
+  assert.equal(typed.rig.engine.state().paused, false);
+});
+
+test("the wand's quiet pause and the shortcut: P makes it an ordinary pause that only P ends, and a reply still being written waits on quietly after it", async () => {
+  const { rig, voice } = await injectRig();
+  rig.engine.wand('writing');
+  rig.engine.setPaused(false);
+  assert.equal(rig.engine.state().paused, true, 'nothing to resume');
+  rig.engine.setPaused(true);
+  rig.engine.wand('written');
+  rig.engine.typed('I would add an index.', { generated: true, chatId: 'm1' });
+  voice.lines[0].audioCb(Buffer.alloc(48000));
+  assert.equal(rig.opsOf('inject').length, 0, 'held for the resume');
+  await rig.clock.advance(9000);
+  assert.deepEqual(pauses(rig), [[true, true], [true, false]]);
+  rig.engine.setPaused(false);
+  assert.equal(rig.opsOf('inject').length, 1);
+  assert.equal(rig.engine.state().pausedMs, 9000);
+
+  const again = await injectRig();
+  again.rig.engine.setPaused(true);
+  again.rig.engine.wand('writing');
+  again.rig.engine.setPaused(false);
+  assert.deepEqual(pauses(again.rig), [[true, false], [false, false], [true, true]], 'still being written: on with the quiet pause');
+});
+
+test('the wand: the candidate answering by themselves goes on as ever, and a wordless sound does not end the quiet pause', async () => {
+  const { rig } = await injectRig();
+  rig.engine.wand('writing');
+  await rig.clock.advance(500);
+  rig.h.vad(true);
+  await rig.clock.advance(200);
+  rig.h.vad(false);
+  await rig.clock.advance(1000);
+  assert.equal(rig.engine.state().paused, true, 'a click');
+  await speak(rig, 'Actually I would shard it', 'a');
+  assert.equal(rig.engine.state().paused, false);
+  await rig.clock.advance(2000);
+  assert.match(rig.sessions.main.calls.at(-1).message, /Actually I would shard it/u, 'their words are a turn');
+  assert.equal(rig.engine.state().pausedMs, 1700, 'paused up to their first sound');
+
+  // The recogniser's range starts a little before the press; the first word is given late.
+  const lead = await injectRig();
+  await lead.rig.clock.advance(1000);
+  lead.rig.engine.wand('writing');
+  const from = lead.rig.clock.now();
+  lead.rig.h.vad(true);
+  await lead.rig.clock.advance(600);
+  lead.rig.h.vad(false);
+  lead.rig.h.transcript('Let me take this one', 'a', from - 100, true, from + 500);
+  assert.deepEqual(lead.rig.of('paused').at(-1), { type: 'paused', paused: false, quiet: true, spokeMs: 600 });
+  await lead.rig.clock.advance(2000);
+  assert.match(lead.rig.sessions.main.calls.at(-1).message, /Let me take this one/u);
+
+  // An unfinished answer before the press: the time held is not time they were quiet.
+  const part = await injectRig();
+  await speak(part.rig, 'I built a scheduler', 'a');
+  await part.rig.clock.advance(600);
+  part.rig.sessions.main.answer('<listen/>');
+  await part.rig.clock.advance(1000);
+  part.rig.engine.wand('writing');
+  const held = part.rig.engine.state().paused;
+  await part.rig.clock.advance(30000);
+  part.rig.engine.wand('dropped');
+  await part.rig.clock.advance(4000);
+  assert(held, 'the call was waiting');
+  for (const event of part.rig.of('quiet-relook')) assert(event.quietMs < 10000, String(event.quietMs));
+});
+
 /** The microphone hears the injected line: the helper's vad and transcript events, like real speech. */
 function micHears(rig, text, segmentId = 's1') {
   rig.h.vad(true);
