@@ -595,6 +595,9 @@ const screenTests = [
       }
       assert.deepEqual(allItems(['A. <pad-open/>B.']), [{ sentence: 'A.' }, { pad: { open: true, lang: '' } }, { sentence: 'B.' }]);
       assert.deepEqual(allItems(['<pad-open lang="sql"/>']), [{ pad: { open: true, lang: 'sql' } }]);
+      for (const tag of ['<pad-open fresh/>', '<pad-open fresh />', '<pad-open fresh="true"/>', '<pad-open fresh>', '<pad-open fresh=true/>']) assert.deepEqual(allItems([tag]), [{ pad: { open: true, lang: '', fresh: true } }], tag);
+      assert.deepEqual(allItems(['<pad-open lang="sql" fr', 'esh/>']), [{ pad: { open: true, lang: 'sql', fresh: true } }]);
+      for (const tag of ['<pad-open fresh="false"/>', '<pad-open lang="a fresh b"/>', '<pad-open refresh/>']) assert.equal(allItems([tag])[0].pad.fresh, undefined, tag);
     },
   },
   {

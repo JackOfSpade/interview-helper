@@ -1428,7 +1428,7 @@ export function createPracticeCallEngine({
     // Opening an open pad keeps its text; a label given again replaces the old one.
     padState = control.open ? { open: true, lang: control.lang || (padState.open ? padState.lang : '') } : { open: false, lang: padState.lang };
     if (!padState.open) padHaltText = null;
-    emit({ type: 'pad', open: padState.open, lang: padState.lang, atMs });
+    emit({ type: 'pad', open: padState.open, lang: padState.lang, ...(control.open && control.fresh ? { fresh: true } : {}), ...(control.open && !control.lang && padState.lang ? { labelKept: true } : {}), atMs });
   }
 
   /** Whether playback has heard everything spoken before this control's tag (see deliverDueControls for the fallbacks). */
@@ -1814,7 +1814,7 @@ export function createPracticeCallEngine({
             }
           }
           else if (item.screenStop) { if (!absentAt(reply)) { reply.shownInOrder = false; addControl(reply, { kind: 'screen-stop' }); } }
-          else if (item.pad) { if (!absentAt(reply)) addControl(reply, { kind: 'pad', open: item.pad.open === true, lang: String(item.pad.lang ?? '').slice(0, 40) }); }
+          else if (item.pad) { if (!absentAt(reply)) addControl(reply, { kind: 'pad', open: item.pad.open === true, lang: String(item.pad.lang ?? '').slice(0, 40), ...(item.pad.fresh === true ? { fresh: true } : {}) }); }
           else {
             const before = reply.parserChars;
             reply.parserChars += nonSpace(item.sentence);

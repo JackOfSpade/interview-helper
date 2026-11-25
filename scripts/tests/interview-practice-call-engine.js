@@ -3278,7 +3278,7 @@ function screenParser() {
         items.push({ screen: { title, content: rest.join('|'), delaySeconds: last ? Number(last[1]) : null } });
       }
       else if (kind === 'stop') items.push({ screenStop: true });
-      else if (kind === 'pad-open') items.push({ pad: { open: true, lang: arg } });
+      else if (kind === 'pad-open') items.push({ pad: { open: true, lang: arg === '+fresh' ? '' : arg, ...(arg === '+fresh' ? { fresh: true } : {}) } });
       else if (kind === 'pad-close') items.push({ pad: { open: false } });
       else if (kind === 'spk') items.push({ speaker: arg });
       else if (kind === 'pause') items.push({ pause: Number(arg) });
@@ -3935,6 +3935,14 @@ test('pad progress: a listen from the quick reaction never showed the pad to the
   rig.sessions.opener.answer('<listen/>', { chunks: ['<listen/>'] });
   await flush();
   assert.equal(rig.of('pad-sent').length, 0);
+});
+
+test('a fresh pad opening reaches the service as fresh, an ordinary one does not', async () => {
+  const rig = padRig();
+  await greet(rig);
+  await deliver(rig, 'Write it in the pad.[[pad-open:python]]');
+  await deliver(rig, 'Now another small one.[[pad-open:+fresh]]');
+  assert.deepEqual(rig.of('pad').map(event => event.fresh === true), [false, true]);
 });
 
 test('pad progress: held while the interviewer speaks, typing does not cut the comment, and at most one goes out afterwards', async () => {

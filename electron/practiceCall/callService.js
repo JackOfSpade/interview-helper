@@ -748,7 +748,8 @@ export function createPracticeCallService(deps = {}) {
   function padOptions(self) {
     const problems = self?.settledPlan?.problems;
     if (!Array.isArray(problems) || !problems.length) return [];
-    const shown = shownProblem(self);
+    const onScreen = shownProblem(self);
+    const shown = onScreen && self.padSheet?.over === onScreen.ref ? null : onScreen; // the pad was opened fresh for another exercise over it
     if (shown) { self.padProblemRef = shown.ref; self.padMovedOn = false; }
     // A screen of the interviewer's own starts another exercise when the pad is closed, or when they opened the pad
     // again for it in the same reply (the tag may come just before or just after the screen).
@@ -807,7 +808,9 @@ export function createPracticeCallService(deps = {}) {
    * one's finished code). What counts as another exercise: a different prepared problem on screen; a screen of the
    * interviewer's own that came with a pad open; or a pad opened with nothing shown after another planned question was
    * asked. A part, follow-up or corrected screen of the same exercise, and a pad opened again for it, keep the work.
-   * `opening` is a pad event ({ wasOpen }); without it a screen has just been shown.
+   * A pad opened `fresh` is always another exercise, one said out loud with no screen of its own: only the interviewer
+   * knows that it is new. A problem still on screen then stays the one before (`over`) until it is shown again.
+   * `opening` is a pad event ({ wasOpen, fresh }); without it a screen has just been shown.
    */
   function turnPad(self, opening, atMs) {
     if (!self || !state.pad.open) return;
@@ -816,16 +819,23 @@ export function createPracticeCallService(deps = {}) {
     const screenId = state.screen ? `${state.screen.title}\n${state.screen.content}` : '';
     const asked = self.padAsked || 0;
     const sheet = self.padSheet;
+    // Written along with a prepared problem just put up, fresh adds nothing: that problem's own pad is already there.
+    const fresh = !!opening?.fresh && !(shown && now - (self.padScreenAt ?? -Infinity) < SAME_REPLY_MS);
+    const next = fresh ? null : shown; // the prepared problem the pad is for now
+    const over = fresh && shown ? shown.ref : null;
     if (!sheet) {
       self.padSheetCount = 1;
-      self.padSheet = { number: 1, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+      self.padSheet = { number: 1, key: next?.ref ?? null, over, screens: new Set(screenId ? [screenId] : []), asked, fresh };
+      if (fresh) { self.padProblemRef = null; self.padMovedOn = true; syncPadOptions(self); }
       return;
     }
     let turn = false;
-    if (shown) {
-      turn = shown.ref !== sheet.key;
+    if (fresh) {
+      turn = true;
+    } else if (shown) {
+      turn = shown.ref !== sheet.key && !(opening && sheet.over === shown.ref);
       // A pad opened a moment ahead of its own problem, with nothing shown until now: the same exercise.
-      if (turn && sheet.key === null && !sheet.screens.size && sheet.asked === asked) { sheet.key = shown.ref; turn = false; }
+      if (turn && sheet.key === null && !sheet.fresh && !sheet.screens.size && sheet.asked === asked) { sheet.key = shown.ref; turn = false; }
     } else if (state.screen) {
       const cameTogether = opening ? now - (self.padScreenAt ?? -Infinity) < SAME_REPLY_MS : now - (self.padOpenedAt ?? -Infinity) < SAME_REPLY_MS;
       turn = opening && !opening.wasOpen ? !sheet.screens.has(screenId) : cameTogether;
@@ -833,22 +843,29 @@ export function createPracticeCallService(deps = {}) {
     if (!turn) { if (screenId) sheet.screens.add(screenId); return; }
     const sheets = (self.padSheets ||= new Map());
     if (sheet.key) sheets.set(sheet.key, { number: sheet.number, text: state.pad.text });
-    const kept = shown ? sheets.get(shown.ref) : null;
+    // The label is the new exercise's own, never the one before's.
+    // A screen of the interviewer's own comes here only just after a pad opening, which brought its own.
+    if (opening || next) state.pad = { ...state.pad, lang: opening?.label || String(next?.language ?? '').trim() };
+    if (self.padRecord && !opening) self.padRecord.lang = state.pad.lang;
+    if (fresh) { self.padProblemRef = null; self.padMovedOn = true; }
+    const kept = next ? sheets.get(next.ref) : null;
     const number = kept?.number ?? (self.padSheetCount += 1);
-    const starter = kept || !shown ? '' : takeStarter(self, shown.ref);
+    const starter = kept || !next ? '' : takeStarter(self, next.ref);
     const text = kept?.text ?? starter;
     // Nothing was written and nothing is given: the empty pad simply belongs to the new exercise.
     if (!state.pad.text && !text) {
       if (sheet.key) sheets.delete(sheet.key);
-      self.padSheet = { ...sheet, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+      self.padSheet = { ...sheet, key: next?.ref ?? null, over, screens: new Set(screenId ? [screenId] : []), asked, fresh };
+      if (fresh) syncPadOptions(self);
       return;
     }
-    self.padSheet = { number, key: shown?.ref ?? null, screens: new Set(screenId ? [screenId] : []), asked };
+    self.padSheet = { number, key: next?.ref ?? null, over, screens: new Set(screenId ? [screenId] : []), asked, fresh };
+    if (fresh) syncPadOptions(self);
     const marks = self.padRecord?.snapshots;
     const open = !!marks?.length && marks.at(-1).closed !== true;
     if (open) snapshotPad(self, undefined, atMs); // what the last exercise left is recorded first
     replacePadText(self, text);
-    dbg('pad-sheet', { number, problem: shown?.ref ?? null, chars: text.length, restored: !!kept, starter: !!starter });
+    dbg('pad-sheet', { number, problem: next?.ref ?? null, ...(fresh ? { fresh: true } : {}), chars: text.length, restored: !!kept, starter: !!starter });
     if (!marks) return;
     const mark = { sheet: number, ...(starter ? { starter: true } : {}) };
     if (!open) { self.padTurned = mark; return; } // goes on the mark of the pad coming up
@@ -857,12 +874,13 @@ export function createPracticeCallService(deps = {}) {
   }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
   function applyPadEvent(self, rawEvent) {
-    const event = rawEvent?.open ? { ...rawEvent, lang: padLabel(self, rawEvent.lang) } : rawEvent;
+    // A label the engine only carried on (none was given) is the one the pad shows now: turning it over may have changed it.
+    const event = rawEvent?.open ? { ...rawEvent, lang: rawEvent.labelKept && state.pad.open ? state.pad.lang : padLabel(self, rawEvent.lang) } : rawEvent;
     // Opening a pad that is already open is how an interviewer starts an exercise of their own in it.
     const wasOpen = state.pad.open;
     if (event?.open && wasOpen) self.padReopenedAt = clock.now();
     state.pad = { ...state.pad, open: !!event.open, lang: event.open ? String(event.lang ?? state.pad.lang ?? '') : state.pad.lang };
-    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); turnPad(self, { wasOpen }, event.atMs); }
+    if (event.open) { self.padOpened = true; self.padOpenedAt = clock.now(); syncPadOptions(self); turnPad(self, { wasOpen, fresh: event.fresh === true, label: rawEvent.labelKept ? '' : event.lang }, event.atMs); }
     else { self.padProblemRef = null; state.pad = { ...state.pad, seed: null }; } // the next exercise starts without this one's given code
     if (event.open && self.padRecord) self.padRecord.lang = state.pad.lang;
     // The record marks when the pad came up and went away, so the replay shows it from its opening (empty at first)
@@ -899,6 +917,7 @@ export function createPracticeCallService(deps = {}) {
     self.screens.push({ atMs: Math.max(0, Math.round(atMs)), title, content, speakerId, ...(visual ? { visual: { ...visual, ...(file ? { file } : {}) } } : {}) });
     state.screen = { title, content, speakerId, presenterName: presenterNameOf(self, speakerId), ...(visual ? { visual } : {}) };
     self.padScreenAt = clock.now();
+    if (self.padSheet) self.padSheet.over = null;
     syncPadOptions(self);
     turnPad(self, null, atMs);
     seedPad(self, atMs);

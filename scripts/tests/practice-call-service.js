@@ -4197,6 +4197,87 @@ test('each exercise has its own pad: another problem turns it over, going back b
   for (const text of ['first()', 'second()', 'given() third()', 'own()']) assert.ok(record.snapshots.some(item => item.text === text), text);
 });
 
+test('a pad opened fresh is another exercise, said out loud with no screen: empty from open or closed, and the problem on screen before keeps its work', async () => {
+  const box = padEngine([]);
+  const clock = timerClock();
+  const planner = fakePlanner();
+  const live = await liveCall({ deps: { clock, trimStart: async () => {}, engineFactory: box.factory, planCall: async inputs => {
+    const made = await planner(inputs);
+    const number = made.plan.questions.find(question => question.number > 0).number;
+    return { ...made, plan: { ...made.plan, problems: [{ ref: 'p1', question: number, language: '', languages: ['Go', 'C'], parts: [{ title: 'p1', content: 'P1' }], solution: 'S', edgeCases: [], hints: [] }] } };
+  } } });
+  await live.service.start(ARGS);
+  await live.service.answer();
+  const { service } = live;
+  const pad = () => service.getState().pad;
+  const open = extra => { clock.advance(60000); box.emit({ type: 'pad', open: true, ...extra }); };
+  const type = text => service.updatePad(text, pad().sheet || 0);
+  box.emit({ type: 'screen', title: 'p1', content: 'P1', speakerId: 'A', delayMs: 0 });
+  box.emit({ type: 'pad', open: true, fresh: true });
+  assert.deepEqual(pad().options, ['Go', 'C'], 'fresh beside its own prepared screen changes nothing');
+  type('p1()');
+  open({});
+  assert.equal(pad().text, 'p1()');
+  open({ fresh: true });
+  assert.equal(pad().text, '', 'fresh while open, the old problem still on screen');
+  assert.deepEqual(pad().options, []);
+  type('said()');
+  open({});
+  assert.equal(pad().text, 'said()', 'opened again without fresh it stays the same exercise');
+  box.emit({ type: 'pad', open: false });
+  open({});
+  assert.equal(pad().text, 'said()', 'also after a close');
+  box.emit({ type: 'screen-stop' });
+  box.emit({ type: 'pad', open: false });
+  open({ fresh: true });
+  assert.equal(pad().text, '', 'fresh from closed');
+  type('third()');
+  clock.advance(60000);
+  box.emit({ type: 'screen', title: 'p1', content: 'P1', speakerId: 'A', delayMs: 0 });
+  assert.equal(pad().text, 'p1()', 'showing the problem again brings its work back');
+  assert.deepEqual(pad().options, ['Go', 'C']);
+  await service.hangUp();
+  const { pad: record } = await live.deps.store.readRecord('call-1');
+  for (const text of ['p1()', 'said()', 'third()']) assert.ok(record.snapshots.some(item => item.text === text), text);
+});
+
+test('a fresh first pad over a prepared problem takes none of its code or languages, and a label never outlives its exercise', async () => {
+  const run = async () => {
+    const box = padEngine([]);
+    const clock = timerClock();
+    const planner = fakePlanner();
+    const live = await liveCall({ deps: { clock, trimStart: async () => {}, engineFactory: box.factory, planCall: async inputs => {
+      const made = await planner(inputs);
+      const number = made.plan.questions.find(question => question.number > 0).number;
+      const problem = (ref, extra) => ({ ref, question: number, language: '', parts: [{ title: ref, content: ref }], solution: 'S', edgeCases: [], hints: [], ...extra });
+      return { ...made, plan: { ...made.plan, problems: [problem('p1', { language: 'Python', starter: 'given()' }), problem('p2', { question: 0 })] } };
+    } } });
+    await live.service.start(ARGS);
+    await live.service.answer();
+    box.emit({ type: 'screen', title: 'p1', content: 'p1', speakerId: 'A', delayMs: 0 });
+    clock.advance(60000);
+    return { box, clock, pad: () => live.service.getState().pad };
+  };
+  const first = await run();
+  first.box.emit({ type: 'pad', open: true, lang: '', fresh: true });
+  assert.deepEqual([first.pad().text, first.pad().lang, first.pad().options], ['', '', []]);
+  const { box, clock, pad } = await run();
+  box.emit({ type: 'pad', open: true, lang: 'Python' });
+  assert.deepEqual([pad().text, pad().lang], ['given()', 'Python']);
+  box.emit({ type: 'pad', open: true, lang: 'Python', labelKept: true });
+  assert.equal(pad().lang, 'Python', 'the same exercise keeps its label');
+  clock.advance(60000);
+  box.emit({ type: 'screen', title: 'p2', content: 'p2', speakerId: 'A', delayMs: 0 });
+  box.emit({ type: 'pad', open: true, lang: 'Python', labelKept: true });
+  assert.deepEqual([pad().text, pad().lang], ['', '']);
+  clock.advance(60000);
+  box.emit({ type: 'screen', title: 'p1', content: 'p1', speakerId: 'A', delayMs: 0 });
+  assert.deepEqual([pad().text, pad().lang], ['given()', 'Python']);
+  clock.advance(60000);
+  box.emit({ type: 'pad', open: true, lang: 'Python', labelKept: true, fresh: true });
+  assert.deepEqual([pad().text, pad().lang], ['', ''], 'a fresh pad drops the label');
+});
+
 test('a pad taken back for a share coming up is recorded when it really appears (call-mwu3jble)', async () => {
   const { service, deps, clock, box } = await delayedCall();
   clock.advance(1000);
