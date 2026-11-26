@@ -443,7 +443,7 @@ const base = [
         assert(!bare.includes('planned to run') && !/before the upper target/u.test(bare) && !/Past \d+:00/u.test(bare), `${none}`);
         assert(bare.includes('No length was set for this call'), `${none}`);
         assert(bare.includes('once the call has run about as long as an interview of this kind does, start wrapping up'), `${none}`);
-        assert(bare.includes('end that reply with <end-call/>'), `${none}: the call still closes`);
+        assert(bare.includes('leaving without another word (<end-call/> as the whole reply'), `${none}: the call still closes`);
       }
     },
   },
@@ -501,7 +501,7 @@ const base = [
       assert(text.includes('time for the candidate'));
       assert(text.includes('only in generic terms'));
       assert(text.includes('never gets <listen/>'), 'listen never applies to a typed line');
-      assert(text.includes('once it is plainly over, say goodbye and end that reply with <end-call/>'), 'the interviewer may end a silent call itself');
+      assert(text.includes('or end the call. A person gives more room'), 'the interviewer may end a silent call itself');
       assert(!buildOpenerInstructions({ persona, brief, plan }).includes('OPENING'), 'the acknowledgement session does not run the interview');
     },
   },
@@ -1497,13 +1497,41 @@ export default [
         const line = text.split('\n').find(entry => entry.startsWith('- A message of the form [candidate silent Ns, check K]'));
         assert.ok(line);
         assert.match(line, /What you do is your choice each time, from how long it has been and what was going on/u);
-        for (const option of ['reply <listen/> and wait longer', 'say something short that fits the moment', 'check whether they can hear you', 'offer to pick it up another time', 'end that reply with <end-call/>']) assert(line.includes(option), option);
-        assert.match(line, /No check calls for any particular one of these/u);
+        for (const option of ['reply <listen/> and wait longer', 'say something short that fits the moment', 'check whether they can hear you', 'offer to pick it up another time', 'or end the call']) assert(line.includes(option), option);
         assert.doesNotMatch(line, /First check:|Second check:|Third check:|of three|whatever happens/u);
         // The carry-on rule for a statement is unchanged.
         assert(text.includes('[candidate silent Ns after your last line, which asked them nothing]'));
         assert(text.includes('Never nudge them as if they had missed a question, never ask whether they can hear you, and never comment on the silence itself.'));
       }
+    },
+  },
+  {
+    // Call of 2026-11-26 (call-mwx4sj3o): four spoken check-ins over a minute and a half, then a full goodbye to a line that
+    // had answered nothing, as if the candidate could still hear.
+    name: 'interview practice prompt: a line that answers nothing gets a few short tries, and is left in one of several ordinary ways',
+    run() {
+      const text = buildInterviewerInstructions({ persona, brief, plan, callPlan });
+      const line = text.split('\n').find(entry => entry.startsWith('- A message of the form [candidate silent Ns, check K]'));
+      assert.match(line, /never make speeches to someone who may not hear/u);
+      assert.match(line, /one to three short tries in all/u);
+      assert.match(line, /fewer once the call's planned time is up, and is settled within a minute or two/u);
+      for (const way of ['leaving without another word (<end-call/> as the whole reply', 'one short line said in case the candidate can still hear', 'taking it as nothing more to say and closing in a few words']) assert(line.includes(way), way);
+      assert.match(line, /A full close \(thanks, next steps, take care, goodbye\) spoken to someone who has not answered for a minute sounds as if they could still hear you/u);
+      assert.match(line, /a silent wait is <listen\/> with a <wait s="N"\/>/u);
+      assert.match(line, /never in the chat/u);
+      assert.doesNotMatch(line, /note in <chat>/u);
+      const last = formatTurnMessage({ elapsedMs: 600000, silenceMs: 600000, silenceCheck: 9, lastCall: true });
+      assert(last.includes('in whichever way you would leave a line that answers nothing (no words at all, or a short line)'), last);
+    },
+  },
+  {
+    name: 'interview practice prompt: the lead\'s own way with a quiet line is given as style, and left out when the plan has none',
+    run() {
+      const people = quiet => [{ id: 'A', name: 'Alex Morgan', role: 'Manager', temperament: 'neutral', manner: 'Even.', interrupting: 'Rarely.', ...(quiet ? { quiet } : {}) }];
+      const make = quiet => buildInterviewerInstructions({ persona: { name: 'Alex Morgan', role: 'Manager', temperament: 'neutral' }, brief: { company: 'Acme', role: 'Engineer' }, cards: [], picked: [],
+        callPlan: { interviewKind: 'A screen.', people: people(quiet), questions: [{ number: 1, askedBy: 'A', minutes: 5, probes: [] }], problems: [] } });
+      assert(make('Busy; one quick hello, then leaves without a word.').includes('- How you deal with a candidate who goes quiet, up to a line that seems to have dropped (style only, never lines to repeat): Busy; one quick hello, then leaves without a word.'));
+      assert(!make('').includes('How you deal with a candidate who goes quiet'));
     },
   },
   {

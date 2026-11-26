@@ -116,6 +116,17 @@ export function padSnapshotAt(pad, ms) {
   return found?.closed ? null : found;
 }
 
+/** The pad's language label at this moment: the one on the latest opening or new sheet before it (older records: the pad's one label). */
+export function padLangAt(pad, ms) {
+  const list = Array.isArray(pad?.snapshots) ? pad.snapshots : [];
+  let found = null;
+  for (const item of list) {
+    const start = Number(item?.atMs);
+    if (typeof item?.lang === 'string' && Number.isFinite(start) && start <= ms && (!found || start >= Number(found.atMs))) found = item;
+  }
+  return found ? found.lang : String(pad?.lang ?? '');
+}
+
 /**
  * What a key writes into the pad. Tab writes two spaces (Shift+Tab still leaves the field for
  * keyboard users). Enter starts the new line at the indentation of the line it leaves, the one

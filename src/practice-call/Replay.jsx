@@ -9,7 +9,7 @@ import {
 } from './replayModel.js';
 import SharedScreen from './SharedScreen.jsx';
 import CodingPad from './CodingPad.jsx';
-import { padSnapshotAt, screenAt } from './screenMarkup.js';
+import { padLangAt, padSnapshotAt, screenAt } from './screenMarkup.js';
 import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
 const TYPED_ONLY_DELIVERY = 'Delivery was not measured: every answer was typed.';
@@ -469,7 +469,7 @@ export default function Replay({ replay, api, initialPositionMs = 0, initialShow
             <div className="min-w-0"><PartFeedback chapter={chapter} hasFeedback={hasFeedback} /></div>
             {(showScreen || showPad) && <div data-replay-share="true" className="min-w-0 space-y-3">
               {showScreen && <SharedScreen title={shownScreen.title} content={shownScreen.content} visual={shownScreen.visual ?? null} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-72" onEnlarge={() => setScreenEnlarged(true)} />}
-              {showPad && <CodingPad readOnly lang={replay?.pad?.lang || replay?.pad?.chosen || ''} value={shownPad.text} className="h-60" />}
+              {showPad && <CodingPad readOnly lang={padLangAt(replay?.pad, positionMs) || replay?.pad?.chosen || ''} value={shownPad.text} className="h-60" />}
             </div>}
           </div>
         </article>}

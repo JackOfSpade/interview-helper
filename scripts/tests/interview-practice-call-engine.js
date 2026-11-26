@@ -5062,7 +5062,28 @@ test('repeated wordless noise does not reset the silence count, but a spoken wor
   await rig.clock.advance(200);
   rig.h.vad(false);
   await rig.clock.advance(32000);
-  assert.equal(lastSilence(), '40', 'the cough did not start the count over');
+  // Counted on the call clock, so the cough and the re-armed wait after it are in the total too (41 s here).
+  assert(Number(lastSilence()) >= 40, `the cough did not start the count over (got ${lastSilence()})`);
+});
+
+// Call of 2026-11-26 (call-mwx4sj3o): the fourth check-in said 62 s when about 96 s had passed, because only the waits
+// were added up and the time each check-in took to be made and said was left out.
+test('silence: the quiet a check-in reports includes the time the earlier check-ins took to make and say', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await deliver(rig, 'Any questions for me?<wait s="15"/>');
+  assert.equal(await checkInAt(rig, 15, 'first'), 15);
+  await rig.clock.advance(4000); // the check-in is being written
+  rig.sessions.main.answer('No rush.');
+  rig.streams[rig.streams.length - 1].audio(300);
+  await flush();
+  await rig.clock.advance(5000); // and said
+  await playOut(rig);
+  const before = rig.sessions.main.calls.length;
+  await rig.clock.advance(30000);
+  assert.equal(rig.sessions.main.calls.length, before + 1);
+  const reported = Number(rig.sessions.main.calls.at(-1).message.match(/candidate silent (\d+)s/)?.[1]);
+  assert(reported >= 15 + 9 + 12, `the second check counts the 9 s of the first check-in too (got ${reported})`);
 });
 
 test('silence prompts back off, report the real cumulative silence, and reset when the candidate speaks', async () => {
@@ -5599,6 +5620,22 @@ test('silence: the interviewer may end the call itself at the very first check-i
   rig.h.playback('utt2', 'finished', 800);
   await flush();
   assert.deepEqual(rig.of('ended'), [{ type: 'ended', reason: 'interviewer' }], 'ended by the interviewer, not by the backstop');
+});
+
+// Call of 2026-11-26 (call-mwx4sj3o): after four check-ins the interviewer said a full goodbye to a line that had answered
+// nothing for a minute. A person who thinks the line is dead may simply leave.
+test('silence: a check-in may leave the call without a word, and nothing is spoken', async () => {
+  const silent = makeRig();
+  await greet(silent);
+  await deliver(silent, 'Can you hear me?<wait s="10"/>');
+  await checkInAt(silent, 10, 'first');
+  const entries = silent.engine.state().transcript.length;
+  const plays = silent.opsOf('play').length;
+  silent.sessions.main.answer('<end-call/>');
+  await flush();
+  assert.deepEqual(silent.of('ended'), [{ type: 'ended', reason: 'interviewer' }], 'left without a word');
+  assert.equal(silent.engine.state().transcript.length, entries, 'no line is added for a silent leave');
+  assert.equal(silent.opsOf('play').length, plays, 'nothing is played');
 });
 
 // A reply that asked nothing (<wait s="N" statement/>): after N s of quiet the interviewer picks the conversation up once,

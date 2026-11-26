@@ -857,6 +857,9 @@ export function createPracticeCallService(deps = {}) {
     // Nothing was written and nothing is given: the empty pad simply belongs to the new exercise.
     if (!state.pad.text && !text) {
       if (sheet.key) sheets.delete(sheet.key);
+      // No new sheet is marked, so the empty pad's own mark takes the new exercise's label.
+      const lastMark = self.padRecord?.snapshots?.at(-1);
+      if (lastMark && lastMark.closed !== true && !String(lastMark.text ?? '')) lastMark.lang = state.pad.lang ?? '';
       self.padSheet = { ...sheet, key: next?.ref ?? null, over, screens: new Set(screenId ? [screenId] : []), asked, fresh };
       if (fresh) syncPadOptions(self);
       return;
@@ -871,7 +874,9 @@ export function createPracticeCallService(deps = {}) {
     if (!marks) return;
     const mark = { sheet: number, ...(starter ? { starter: true } : {}) };
     if (!open) { self.padTurned = mark; return; } // goes on the mark of the pad coming up
-    marks.push({ atMs: Math.round(Number.isFinite(atMs) ? atMs : callMs(self)), text, ...mark });
+    // Each exercise's label goes on the mark where its sheet begins: the record's one `lang` is only the last exercise's
+    // (call-mwx4sj3o: the regex exercise's empty label replaced the Go one, so the replay and review lost it).
+    marks.push({ atMs: Math.round(Number.isFinite(atMs) ? atMs : callMs(self)), text, ...mark, lang: state.pad.lang ?? '' });
     self.padRecord.lastText = text;
   }
   /** Applies a pad event to the state and the record; used at once, or when a pending share has appeared. */
@@ -891,7 +896,7 @@ export function createPracticeCallService(deps = {}) {
       const marks = self.padRecord.snapshots;
       const markAt = Math.round(Number.isFinite(event.atMs) ? event.atMs : callMs(self));
       const closed = marks.at(-1)?.closed === true;
-      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text, ...(self.padTurned || {}) }); self.padTurned = null; self.padOpenMark = marks.at(-1); }
+      if (event.open && (!marks.length || closed)) { self.padRecord.lastText = state.pad.text; marks.push({ atMs: markAt, text: state.pad.text, ...(self.padTurned || {}), lang: state.pad.lang ?? '' }); self.padTurned = null; self.padOpenMark = marks.at(-1); }
       else if (!event.open && marks.length && !closed) {
         // What was typed since the pad last reached an interviewer is recorded first, so the close holds the final text.
         snapshotPad(self, state.pad.text, markAt);
@@ -1971,7 +1976,7 @@ export function createPracticeCallService(deps = {}) {
       interviewKind: plan.interviewKind,
       // The lead first (id A), then each colleague still on the plan's cast.
       people: [
-        { id: 'A', name: self.persona.name, role: self.persona.role, focus: '', temperament: self.persona.temperament, manner: plan.lead.manner ?? '', interrupting: self.persona.interrupting ?? plan.lead.interrupting ?? '', voice: self.persona.voice },
+        { id: 'A', name: self.persona.name, role: self.persona.role, focus: '', temperament: self.persona.temperament, manner: plan.lead.manner ?? '', interrupting: self.persona.interrupting ?? plan.lead.interrupting ?? '', quiet: String(plan.lead.quiet ?? '').trim(), voice: self.persona.voice },
         ...(self.panel || []).map(entry => ({
           id: entry.id, name: entry.name, role: entry.role, focus: entry.focus,
           manner: (plan.panel || []).find(member => member.voice === entry.key)?.manner ?? '',

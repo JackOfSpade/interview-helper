@@ -4278,6 +4278,63 @@ test('a fresh first pad over a prepared problem takes none of its code or langua
   assert.deepEqual([pad().text, pad().lang], ['', ''], 'a fresh pad drops the label');
 });
 
+// Call of 2026-11-26 (call-mwx4sj3o): a Go exercise and then a regex one in any language. The record kept one label,
+// the second exercise's empty one, so the replay showed the Go pad with no language and the review was told none.
+test('each exercise\'s pad label is kept on the record where its sheet begins, so the second does not erase the first', async () => {
+  const box = padEngine([]);
+  const clock = timerClock();
+  const planner = fakePlanner();
+  const live = await liveCall({ deps: { clock, trimStart: async () => {}, engineFactory: box.factory, planCall: async inputs => {
+    const made = await planner(inputs);
+    const number = made.plan.questions.find(question => question.number > 0).number;
+    const problem = (ref, language) => ({ ref, question: number, language, parts: [{ title: ref, content: ref }], solution: 'S', edgeCases: [], hints: [] });
+    return { ...made, plan: { ...made.plan, problems: [problem('p1', 'Go'), problem('p2', '')] } };
+  } } });
+  await live.service.start(ARGS);
+  await live.service.answer();
+  const { service } = live;
+  const pad = () => service.getState().pad;
+  box.emit({ type: 'screen', title: 'p1', content: 'p1', speakerId: 'A', delayMs: 0 });
+  box.emit({ type: 'pad', open: true, lang: 'Go' });
+  service.updatePad('func ParseKeyValue() {}', pad().sheet || 0);
+  clock.advance(60000);
+  box.emit({ type: 'screen', title: 'p2', content: 'p2', speakerId: 'A', delayMs: 0 });
+  box.emit({ type: 'pad', open: true, lang: 'Go', labelKept: true });
+  assert.equal(pad().lang, '', 'the regex exercise has no label of its own');
+  service.updatePad('^(0|[1-9][0-9]*)$', pad().sheet || 0);
+  await service.hangUp();
+  const { pad: record } = await live.deps.store.readRecord('call-1');
+  const labelled = record.snapshots.filter(item => typeof item.lang === 'string').map(item => [item.sheet ?? null, item.lang]);
+  assert.deepEqual(labelled[0], [null, 'Go'], 'the pad\'s opening carries the first exercise\'s label');
+  assert(labelled.some(([sheet, lang]) => sheet !== null && lang === ''), JSON.stringify(labelled));
+  const { padLangAt } = await import('../../src/practice-call/screenMarkup.js');
+  const second = record.snapshots.find(item => item.sheet && item.lang === '');
+  assert.equal(padLangAt(record, second.atMs - 1), 'Go');
+  assert.equal(padLangAt(record, second.atMs), '');
+  assert.equal(padLangAt({ lang: 'python', snapshots: [{ atMs: 0, text: '' }] }, 10), 'python', 'an older record keeps its one label');
+
+  // A Go pad never written in, turned over to the regex exercise: no sheet is marked, so its own mark takes the new label.
+  const box2 = padEngine([]);
+  const clock2 = timerClock();
+  const live2 = await liveCall({ deps: { clock: clock2, trimStart: async () => {}, engineFactory: box2.factory, planCall: async inputs => {
+    const made = await planner(inputs);
+    const number = made.plan.questions.find(question => question.number > 0).number;
+    const problem = (ref, language) => ({ ref, question: number, language, parts: [{ title: ref, content: ref }], solution: 'S', edgeCases: [], hints: [] });
+    return { ...made, plan: { ...made.plan, problems: [problem('p1', 'Go'), problem('p2', '')] } };
+  } } });
+  await live2.service.start(ARGS);
+  await live2.service.answer();
+  box2.emit({ type: 'screen', title: 'p1', content: 'p1', speakerId: 'A', delayMs: 0 });
+  box2.emit({ type: 'pad', open: true, lang: 'Go' });
+  clock2.advance(60000);
+  box2.emit({ type: 'screen', title: 'p2', content: 'p2', speakerId: 'A', delayMs: 0 });
+  box2.emit({ type: 'pad', open: true, lang: 'Go', labelKept: true });
+  live2.service.updatePad('^0$', live2.service.getState().pad.sheet || 0);
+  await live2.service.hangUp();
+  const { pad: record2 } = await live2.deps.store.readRecord('call-1');
+  assert.equal(padLangAt(record2, Number.MAX_SAFE_INTEGER), '', 'the regex pad is not shown as Go');
+});
+
 test('a pad taken back for a share coming up is recorded when it really appears (call-mwu3jble)', async () => {
   const { service, deps, clock, box } = await delayedCall();
   clock.advance(1000);

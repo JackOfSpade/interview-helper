@@ -563,6 +563,45 @@ reply could stop at a word never pauses it; one that did pause it lets it play
 on 600 ms after it stops (the recogniser's time to find words), not after
 `maxPausedMs`. Late words that arrive before then are judged as ever.
 
+**A candidate who stops answering (2026-11-26, call-mwx4sj3o-64rgi4).** The
+owner stayed silent after "What questions do you have for me?". The interviewer
+gave four spoken check-ins over about 100 s (one of them a long "I'll hang on
+another moment") and then a full goodbye ("Thanks for your time today. Take
+care, bye now.") to a line that had answered nothing for a minute and a half.
+Real people give a dead line one to three short tries, fewer once the call's
+time is up, settle it within a minute or two, and do not make speeches to
+someone who may not hear. How they leave varies, so the interviewer prompt now
+describes the ordinary ways and leaves the choice to the model each time:
+leaving without a word (a bare `<end-call/>`), one short line about the line
+and how they will follow up, a
+silent wait (`<listen/>` with a `<wait>`) first, or, when the candidate was
+plainly heard a moment ago, taking the silence as no questions and closing in
+a few words. A full close is only for that last case. The interviewer never uses the chat
+for this (owner's decision, 2026-11-26). The planner gives the
+lead a `quiet` text (how this person handles a quiet candidate and a dropped
+line), shown to the interviewer as style, so calls differ; a kept plan without
+one still loads. The engine backstop (eight check-ins or ten minutes) is
+unchanged. Fixes from the same call:
+
+- *The silence a check-in reports* was the sum of the waits only, so the fourth
+  said 62 s after about 96 s. It is now counted on the call clock (paused time
+  left out) from where the first check-in counted it, so each check-in's own
+  making and speaking time is included, and the ten-minute backstop uses the
+  same count. A check-in's own `<wait>` is now logged (`wait` with `checkIn`).
+- *Each exercise's pad language* is kept on the snapshot where its pad opens or
+  its sheet begins (`lang`); the record's single `pad.lang` had been replaced by
+  the second exercise's empty label, so the replay showed the Go pad without
+  Go. The replay reads the label in effect (`padLangAt`), the review lists
+  each pad with its own language; older records keep their one label.
+- *The review* now gets the stretches of typing while the candidate said
+  nothing (from `lineSpans`); it had called 15 s of silent typing between two
+  wand lines talking while typing. It is told not to score low or prioritise a
+  moment its own note calls fine, to say "each/every/all" only when true of
+  every answer, and that `fastest20sWindowWpm` is an even-spread estimate that
+  equals the pace of a short answer, never a separately measured stretch.
+
+Unit-tested only, not yet seen in a call.
+
 **After an interviewer answers the candidate's question**, the wand no longer
 repeats their point back (8 of 8 replays of that call did before the rule had a
 line of its own, 2 of 8 after). How many questions it asks is still its own

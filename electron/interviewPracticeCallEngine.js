@@ -375,6 +375,7 @@ export function createPracticeCallEngine({
   let floorOpen = false;
   let carriedOn = false;
   let silenceTotalMs = 0;
+  let silenceSinceMs = null; // call-clock (elapsed) time the quiet stretch's first check-in counted from
   let silenceLastCall = false; // the last check-in before the backstop has been given
   let patienceS = null; // seconds of normal silence after the last delivered reply (its <wait>); null = the default
   let nextGapMs = null; // a check-in reply's own <wait>: the gap to the next check-in, once
@@ -2110,10 +2111,16 @@ export function createPracticeCallEngine({
     const statement = reply.statement === true && !reply.endCall;
     const own = reply.wait === null ? null : clamp(Math.round(reply.wait), statement ? STATEMENT_WAIT_MIN_S : WAIT_MIN_S, WAIT_MAX_S);
     // A check-in keeps the check-in schedule; the turn that carried the conversation on is an ordinary reply.
-    if (reply.checkIn && !reply.carryOn) { nextGapMs = own === null ? null : own * 1000; return; }
     // Called at commit and again when the tag arrives after it: logged once for each value applied.
     const applied = `${own}:${statement}`;
-    if (reply.waitLogged !== applied) { reply.waitLogged = applied; emit({ type: 'wait', seconds: own, statement }); }
+    const logged = reply.waitLogged === applied;
+    reply.waitLogged = applied;
+    if (reply.checkIn && !reply.carryOn) {
+      if (!logged) emit({ type: 'wait', seconds: own, statement: false, checkIn: true }); // the gap to the next check-in (null: the schedule's own)
+      nextGapMs = own === null ? null : own * 1000;
+      return;
+    }
+    if (!logged) emit({ type: 'wait', seconds: own, statement });
     patienceS = own;
     nextGapMs = null;
     floorOpen = statement;
@@ -2906,13 +2913,19 @@ export function createPracticeCallEngine({
         return;
       }
       // A backstop, never the interviewer's script: only a dead call runs this long, whatever the model would say.
-      const overLimit = silencePrompts >= MAX_SILENCE_CHECKS || silenceTotalMs + waitMs >= MAX_SILENCE_MS;
+      // The quiet is counted on the call clock from where the first check-in counted it from (the vad end for a listen
+      // check), so the time each check-in took to make and say is in the total too: call-mwx4sj3o was told 62 s of
+      // silence at its fourth check-in after about 96 s, because only the waits were added up.
+      const counted = silencePrompts === 0 ? (listenCheck ? th.listenCheckInMs : waitMs)
+        : Math.max(silenceTotalMs + waitMs, silenceSinceMs === null ? 0 : elapsed() - silenceSinceMs);
+      const overLimit = silencePrompts >= MAX_SILENCE_CHECKS || counted >= MAX_SILENCE_MS;
       if (overLimit && silenceLastCall) return end('interviewer', undefined, { cause: 'silence' });
       const lastCall = overLimit;
       if (lastCall) silenceLastCall = true;
       nextGapMs = null;
+      if (silencePrompts === 0) silenceSinceMs = elapsed() - counted;
       silencePrompts += 1;
-      silenceTotalMs += listenCheck ? th.listenCheckInMs : waitMs; // the check-in counts the quiet from the vad end
+      silenceTotalMs = counted;
       if (listenCheck) checkInAt = null;
       beginTurn({ silenceMs: silenceTotalMs, immediate: true, lastCall });
     });

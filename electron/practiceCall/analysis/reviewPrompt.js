@@ -283,6 +283,36 @@ const TYPING_GAP_MS = 10000;
 
 const spanText = (span, onClock) => (span.endMs - span.startMs < 1000 ? onClock(span.startMs) : `${onClock(span.startMs)}-${onClock(span.endMs)}`);
 
+const SILENT_TYPING_MIN_MS = 2000;
+
+/**
+ * Parts of the recorded typing stretches when the candidate was not speaking, at least SILENT_TYPING_MIN_MS long. A
+ * spoken turn's speech is its lineSpans when it has them (the wand's lines, with the silent typing between them), else the
+ * whole turn: call-mwx4sj3o's review read 15 s of silent typing between two lines as talking while typing.
+ */
+export function silentTypingSpans(typing, transcript, onClock = clock) {
+  const recorded = (Array.isArray(typing) ? typing : []).filter(span => Number.isFinite(span?.startMs) && Number.isFinite(span?.endMs) && span.endMs > span.startMs);
+  if (!recorded.length) return [];
+  const speech = [];
+  for (const turn of Array.isArray(transcript) ? transcript : []) {
+    if (turn?.speaker !== 'candidate' || turn.channel === 'chat') continue;
+    const spans = Array.isArray(turn.lineSpans) && turn.lineSpans.length ? turn.lineSpans : [turn];
+    for (const span of spans) if (Number.isFinite(span?.startMs) && Number.isFinite(span?.endMs)) speech.push([span.startMs, span.endMs]);
+  }
+  speech.sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const span of recorded) {
+    let from = span.startMs;
+    for (const [start, end] of speech) {
+      if (end <= from || start >= span.endMs) continue;
+      if (start - from >= SILENT_TYPING_MIN_MS) out.push({ startMs: from, endMs: start });
+      from = Math.max(from, end);
+    }
+    if (span.endMs - from >= SILENT_TYPING_MIN_MS) out.push({ startMs: from, endMs: span.endMs });
+  }
+  return out.map(item => `${onClock(item.startMs)}-${onClock(item.endMs)}`);
+}
+
 /**
  * The stretches the candidate was typing in the pad, on the active clock: as the call recorded them (`typing`), else
  * from when the snapshots' text changed (a record from before it did).
@@ -325,7 +355,7 @@ const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
   // The schema's maxLength is not enforced on the model's side, so the limits are stated here, from the numbers the validator enforces.
   `- ${lengthLimits()}`,
-  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included); articulationWpm counts only voiced time and is never quoted as pace. Before saying the candidate used a term, look for it in their lines (a word only on a screen or said by an interviewer is not theirs); before saying they left something out, check every line of that answer for it in any wording. A difference in pace between answers is never a reason to praise or fault how dense an explanation was.',
+  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value. Pace is wordsPerMinute and fastest20sWindowWpm (words over the answer\'s time, pauses included). fastest20sWindowWpm is estimated from words spread evenly over the answer, and for an answer of 20 seconds or less it is simply that answer\'s pace: never present it as a separately measured stretch of the call, and do not quote it beside a pace it equals; articulationWpm counts only voiced time and is never quoted as pace. Before saying the candidate used a term, look for it in their lines (a word only on a screen or said by an interviewer is not theirs); before saying they left something out, check every line of that answer for it in any wording. A difference in pace between answers is never a reason to praise or fault how dense an explanation was.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
@@ -343,6 +373,8 @@ const SCOPE_RULES = [
   '- Scope: judge each answer against the question that was actually asked and the follow-ups the interviewer put to it. A prepared point the candidate was not asked about may appear only in the optional extension of that entry, never in improve and never as a gap or something they missed.',
   '- Priorities, improve, communication and delivery notes rest only on what the transcript shows. A prepared point or probe that was never put to the candidate, and a check the interviewer cut short, moved on from or ended, is never a priority, a gap or an improvement; it may only appear in extension.',
   '- Hedges: report a hedged statement as hedged. Quote the hedge ("perhaps", "maybe", "I might") and never upgrade it into a decision, a commitment or a fact the candidate did not state.',
+  '- Agree with yourself: a moment whose note says what the candidate did was fine, or that the candidate\'s focus note made it unnecessary, is not scored as a weak moment and is not a priority; if something small would still have helped, say it in that note as an optional tip.',
+  '- Count before you generalise: "each", "every", "all" or "both" about the candidate\'s answers holds only when it is true of every answer it covers (a greeting and a short follow-up are answers too); otherwise name which answers, or say how many.',
 ].join('\n');
 
 const PICKED_RULE = [
@@ -354,7 +386,7 @@ const STATEMENT_RULE = '- An interviewer turn marked (asked nothing; left room f
 const PANEL_RULE = '- Panel: more than one interviewer was on this call. Praise or fault for how the candidate dealt with a joiner, a hand-over or the panel is given only when a candidate line shows it, and then you name what they said (a greeting, a name used, a question put to one interviewer). A colleague who joined or a hand-over that the candidate said nothing about is not praised ("welcomed", "handled smoothly") and not faulted: say nothing about it. Do not fault the candidate for how the interviewers dealt with each other.';
 
 // How the candidate talked while writing is only known from when the pad changed; without those spans it is not commented on.
-const PAD_TALK_RULE = '- Talking while typing: how the candidate talked while writing is judged only from the typing spans listed with the pad, set against the times of their speech in the transcript. When no typing spans are listed, say nothing about whether they narrated while typing. Never advise narrating while typing, or talking only after finishing, from the final pad text alone.';
+const PAD_TALK_RULE = '- Talking while typing: how the candidate talked while writing is judged only from the typing spans listed with the pad, set against the times of their speech in the transcript and the stretches of typing while they said nothing, when those are listed. When no typing spans are listed, say nothing about whether they narrated while typing. Never advise narrating while typing, or talking only after finishing, from the final pad text alone.';
 const HEDGED_POINT_RULE = '- A point you can only state conditionally ("if the pad was quiet", "if they had...") is never a priority and not worth a line: leave it out, or state it only when the data settles it.';
 const VOICED_RULE = '- Two voices: each answer in the metrics and each spoken candidate turn says whose voice it was in: "AI voice" (the candidate had it spoken by a generated voice), "own voice" (their own, on the microphone), or both. Judge both the same way and to the same standard, for content and for delivery alike: pace, pauses, fillers, pitch, loudness and tone, in scores, notes and priorities. The voice is never a reason to score higher or lower, to leave a measurement out or to excuse it, and a difference between the two voices is not itself praise or fault. Identify it: in delivery.summary say which answers were in which voice, and whenever you cite a delivery measurement for one answer, say which voice it was. A gap or wait the metrics leave out stays left out.';
 
@@ -456,14 +488,25 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const snapshots = Array.isArray(callRecord.pad?.snapshots) ? callRecord.pad.snapshots : [];
   // Each exercise had its own pad (a snapshot with `sheet` is where the pad was turned over): the last text of each.
   const sheetTexts = new Map();
+  const sheetLangs = new Map(); // each sheet's own label, where the record keeps one per sheet
   let sheet = 1;
   for (const snapshot of snapshots) {
     if (Number.isInteger(snapshot?.sheet)) sheet = snapshot.sheet;
     sheetTexts.set(sheet, String(snapshot?.text ?? '').trim());
+    if (typeof snapshot?.lang === 'string') sheetLangs.set(sheet, line(snapshot.lang)); // the latest, as the replay shows it
   }
-  const padTexts = [...sheetTexts.values()].filter(Boolean);
+  const padSheets = [...sheetTexts.entries()].filter(([, text]) => text);
+  const padTexts = padSheets.map(([, text]) => text);
+  const perSheetLang = sheetLangs.size > 0;
+  const padLangNote = !perSheetLang && line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : '';
+  const padBlocks = padSheets.flatMap(([number, text]) => [
+    ...(perSheetLang && padSheets.length > 1 ? [`Pad ${number}${sheetLangs.get(number) ? ` (language: ${sheetLangs.get(number)})` : ' (no language set)'}:`] : []),
+    ...(perSheetLang && padSheets.length === 1 && sheetLangs.get(number) ? [`Language: ${sheetLangs.get(number)}`] : []),
+    fenced(cut(text, REVIEW_PAD_CAP)),
+  ]);
   const starters = snapshots.filter(snapshot => snapshot?.starter === true).map(snapshot => String(snapshot.text ?? '')).filter(text => text.trim());
   const hasPad = padTexts.length > 0;
+  const silentTyping = hasPad ? silentTypingSpans(callRecord.pad?.typing, transcript, at) : [];
   const unprepared = unpreparedText(callRecord);
   const picked = pickedCards(callRecord, plan);
   const sections = [
@@ -477,9 +520,10 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     '--- TIMED TRANSCRIPT (turn indices are what chapters and moments must cite) ---', formatTranscript(transcript, wordsByTurn, interviewers, at),
     ...(typedOnly ? [] : ['--- DETERMINISTIC METRICS (the only source of numbers) ---', formatMetrics(metricsOnClock(metrics, at, transcript))]),
     ...(screens.length ? ['--- SHARED SCREENS (what the interviewer showed, in order; the interviewer did not read this aloud) ---', formatScreens(screens, transcript, at)] : []),
-    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, ...(padTexts.length > 1 ? ['Each exercise had its own pad; the final text of each, in the order they came up:'] : []), ...padTexts.map(text => fenced(cut(text, REVIEW_PAD_CAP))),
+    ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${padLangNote}) ---`, ...(padTexts.length > 1 ? ['Each exercise had its own pad; the final text of each, in the order they came up:'] : []), ...padBlocks,
       ...(starters.length ? ['The pad opened with this code already in it. It was given with the exercise: the candidate did not write it, and is neither credited nor faulted for it.', ...starters.map(text => fenced(cut(text, REVIEW_PAD_CAP)))] : []),
-      `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at, callRecord.pad?.typing).join(', ') || '(no typing times were recorded)'}`] : []),
+      `When the candidate was typing in the pad (active clock, stretches of changes): ${typingSpans(snapshots, at, callRecord.pad?.typing).join(', ') || '(no typing times were recorded)'}`,
+      ...(silentTyping.length ? [`Of that, typing while the candidate said nothing (active clock; a turn's time in the transcript can span silent typing between its lines): ${silentTyping.join(', ')}`] : [])] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),
       '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples, at),

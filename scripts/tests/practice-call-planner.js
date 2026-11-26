@@ -20,7 +20,7 @@ const ctx = { pool, voices };
 const goodPlan = () => ({
   interviewKind: 'A hiring-manager screen with one technical segment.',
   callMinutes: 30, wrapUpMinutes: 5,
-  lead: { voice: 'V1', name: 'Ingrid Solberg', role: 'Engineering manager', temperament: 'Patient and encouraging; gives a thin answer room before pressing.', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.', interrupting: 'Lets people finish and rarely cuts in.' },
+  lead: { voice: 'V1', name: 'Ingrid Solberg', role: 'Engineering manager', temperament: 'Patient and encouraging; gives a thin answer room before pressing.', stability: 0.3, room: 0.2, manner: 'Unhurried, listens for the reason behind a choice.', interrupting: 'Lets people finish and rarely cuts in.', quiet: 'Gives a silence room, checks the line once by name, then says it will follow up and goes.' },
   panel: [{ voice: 'V2', name: 'Tevita Fonua', role: 'Senior engineer', focus: 'caching design', joins: 'start', joinMinutes: 0, stability: 0.35, room: 0.4, manner: 'Direct and curious.', interrupting: 'Lets people finish and rarely cuts in.' }],
   questions: [
     { number: 1, askedBy: 'V1', minutes: 8, probes: ['Ask what exactly they built.'] },
@@ -133,6 +133,26 @@ const tests = [
       assert.match(planPrompt, /never narrows the languages silently[^]*really tests that language[^]*restricted to it and says so[^]*every language the role is hired for, the one the role's work is mainly done in included and listed first[^]*rather than in one language's syntax/u);
       assert.match(planPrompt, /written in one main language and partly in others[^.]*is hired for more than one language; a query, shell or markup language the listing only mentions beside them is not one of these/u);
       assert.match(PLAN_SCHEMA.properties.problems.items.properties.languages.description, /the work is mainly done in first/u);
+    },
+  },
+  {
+    // Call of 2026-11-26 (call-mwx4sj3o): every quiet line was left the same way, with a full goodbye; the planner now
+    // gives the lead a way of its own.
+    name: 'practice call planner: the lead gets a "quiet" text, asked for in the schema and prompt; a kept plan without one still loads',
+    async run() {
+      assert(PLAN_SCHEMA.properties.lead.required.includes('quiet'));
+      assert.equal(PLAN_SCHEMA.properties.panel.items.properties.quiet, undefined, 'the lead closes the call, so only the lead has one');
+      assert.equal(check(goodPlan()).plan.lead.quiet, goodPlan().lead.quiet);
+      const kept = goodPlan(); delete kept.lead.quiet;
+      const result = check(kept);
+      assert.deepEqual(result.problems, []);
+      assert.equal(result.plan.lead.quiet, '');
+      const prompt = buildPlanPrompt({ ...ctx, brief, application });
+      assert.match(prompt, /Give the lead a "quiet" text too/u);
+      for (const way of ['Some leave without another word', 'some wait a while in silence first', 'take it as nothing more to say and close in a few words']) assert(prompt.includes(way), way);
+      assert.match(prompt, /do not settle on the same one every time/u);
+      assert.match(prompt, /never by writing in the call's chat/u);
+      assert.doesNotMatch(prompt, /post a short note in the call's chat/u);
     },
   },
   {

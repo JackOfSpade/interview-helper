@@ -5,7 +5,7 @@ import path from 'node:path';
 import { analyzeCall, checkReview, fillerTotals, fillPlannedFromPicked, momentAtMs, planFromRetryContext, retryContext, wordsByAnswer } from '../../electron/practiceCall/analysis/analyzeCall.js';
 import { buildChapters } from '../../electron/practiceCall/analysis/chapters.js';
 import { PRACTICE_FEEDBACK_LIMITS } from '../../electron/ipc/interviewQaPractice.js';
-import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits, pickedCards, typingSpans } from '../../electron/practiceCall/analysis/reviewPrompt.js';
+import { REVIEW_LIMITS, REVIEW_SCHEMA, buildReviewPrompt, candidateAnswerKinds, lengthLimits, pickedCards, silentTypingSpans, typingSpans } from '../../electron/practiceCall/analysis/reviewPrompt.js';
 
 // Synthetic call: small talk, two questions, a typed answer, then the farewell.
 const transcript = [
@@ -858,6 +858,34 @@ export default [
       assert.deepEqual(typingSpans([{ atMs: 1000, text: 'a' }, { atMs: 20000, text: 'ab' }], undefined, [{ startMs: 1000, endMs: 34000 }]).length, 1);
       assert.equal(typingSpans([{ atMs: 1000, text: 'a' }, { atMs: 20000, text: 'ab' }]).length, 2, 'an older record infers them');
       assert.match(buildReviewPrompt({ callRecord: { reason: 'candidate', transcript: [] }, plan: [], brief: {}, metrics: {} }), /had already thanked them or taken their leave, the call was complete/u);
+    },
+  },
+  {
+    // Call of 2026-11-26 (call-mwx4sj3o): the review was told one pad language for a Go exercise and a regex one, read
+    // 15 s of silent typing between two wand lines as talking while typing, scored a moment it called fine at 3, and
+    // said "each answer" ended on an invitation when two of four did.
+    name: 'practice call analysis: each exercise\'s pad language, typing with no speech, and a review that agrees with itself (call-mwx4sj3o)',
+    run() {
+      const callRecord = { reason: 'interviewer', transcript: [
+        { speaker: 'interviewer', text: 'Write it in the pad.', startMs: 0, endMs: 5000 },
+        { speaker: 'candidate', text: 'So I cut on the first equals.', startMs: 83310, endMs: 173965, voiced: true, generated: true, lineSpans: [{ startMs: 83310, endMs: 99219 }, { startMs: 114210, endMs: 122845 }, { startMs: 130310, endMs: 138692 }, { startMs: 151510, endMs: 173965 }] },
+      ], pad: { lang: '', typing: [{ startMs: 99671, endMs: 151286 }], snapshots: [
+        { atMs: 50000, text: '', lang: 'Go' }, { atMs: 160000, text: 'func ParseKeyValue() {}' },
+        { atMs: 217000, text: '', sheet: 2, lang: '' }, { atMs: 270000, text: '^(0|[1-9][0-9]*)$' },
+      ] } };
+      const text = buildReviewPrompt({ callRecord, plan: [], brief: {}, metrics: {} });
+      assert.match(text, /--- CANDIDATE CODING PAD \(final text\) ---/u);
+      assert.match(text, /Pad 1 \(language: Go\):/u);
+      assert.match(text, /Pad 2 \(no language set\):/u);
+      const silent = silentTypingSpans(callRecord.pad.typing, callRecord.transcript, ms => `${Math.round(ms / 1000)}`);
+      assert.deepEqual(silent, ['100-114', '123-130', '139-151'], 'the stretches between the lines, none under 2 s');
+      assert(text.includes('Of that, typing while the candidate said nothing'), 'listed for the review');
+      assert.deepEqual(silentTypingSpans([{ startMs: 0, endMs: 10000 }], [{ speaker: 'candidate', startMs: 0, endMs: 10000 }]), [], 'typing all spoken over has no silent stretch');
+      assert.match(text, /Agree with yourself: a moment whose note says what the candidate did was fine/u);
+      assert.match(text, /Count before you generalise/u);
+      assert.match(text, /fastest20sWindowWpm is estimated from words spread evenly over the answer/u);
+      const old = buildReviewPrompt({ callRecord: { ...callRecord, pad: { lang: 'python', snapshots: [{ atMs: 1, text: 'x = 1' }] } }, plan: [], brief: {}, metrics: {} });
+      assert.match(old, /--- CANDIDATE CODING PAD \(final text, language: python\) ---/u, 'an older record keeps its one label');
     },
   },
   {
