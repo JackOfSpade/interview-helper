@@ -404,6 +404,13 @@ Unit-tested only, not yet seen in a call.
 - **The plan of a call that is one kind of work.** The focus note said general questions were already covered, and the call still opened with a manager's general question. The planner's own question now belongs to the kind of work the note asks for, and when the hands-on work is the whole interview the person who does that work may own the call alone. Prompt only, not yet seen in a call.
 - **Suggested replies.** Asked outright what they had done, the candidate listed what they had never done; each question of theirs opened by retelling the last answer and saying what they would take from it. Both are ruled out. Prompt only.
 
+**Fixes from the call of 2026-11-26 (call-mwx0uj25, Canonical ten-minute Go coding screen).** The call ran end to end (plan, two exercises on the pad, one follow-up each, the candidate's questions, the close, the review). An audit (four readers, each finding checked by a second against the log and the code) found the following. Unit-tested only, not yet seen in a call.
+- *A sentence lost from the transcript.* A wand line began 0.1 s before the interviewer's line ended, and the recogniser dated its first sentence ("Thanks, that helps.") from just before that, so the new turn's start cut it out of the candidate's entry. A turn that starts while a line in the candidate's voice is already playing now starts just before that line, but after any of its words already kept as a back-channel (`injectedTurnFloor`).
+- *Pace.* That shortened entry was timed by the recogniser's span while all the words sent were counted, so the review gave 223 wpm for about 176. A voiced line's sent words are now timed over its `lineSpans` (`callMetrics`).
+- *The wand ahead of the interviewer.* Pressed as the interviewer's "does that answer it?" check-in was being made, the reply was written without it and began as it ended. A press while an interviewer line is being made or said now waits for it to end, then writes the reply in the quiet pause (`interviewerTurnOver`); nothing is written when that line was their goodbye.
+- *Closing early.* The two exercises were done by 5:12 of ten minutes and the interviewer said "we can wrap up a little early". The instructions licensed closing once the topics were covered; spare time is now the interviewer's to use (dig deeper, test, a changed constraint, a small extension) or to move to the candidate's questions when they have seen enough, with no reason tied to the clock. Prompt only.
+- *Left as it is:* the transcript keeps the recogniser's words for a voiced line (`sentText` sits beside it, and the review uses it); the suggested replies' closing hand-offs differed in wording across the two exercises, too few to call a habit.
+
 **Fixes from the call of 2026-11-24 (call-mwunu4jr, second Shopify coding screen).** The interviewer stopped mid-question and the call stayed silent until the hang-up. Unit-tested only, not yet seen in a call.
 - *The wand talked over a cut-in.* A cut-in went on air 0.1 s after the wand's next line was sent and 0.4 s before it was heard. Only a line already playing gave way, so the whole line was said over the interviewer, who stopped. A line sent before the interviewer began now gives way too: begun within the reaction time, it stops at a word end; not begun by then, a wand line is left unsaid and a typed one waits (`holdBackInjected`). A line sent while an interviewer is already speaking still talks over them on purpose.
 - *Nothing answered what was said.* A sentence the recogniser began inside a cut-in's protected window counted whole as before the new answer, so the words said after the window were lost and the turn had nothing to answer. It is now split where the window closes (`splitSpeech`, `storeSegment`), for the microphone as well.
@@ -539,7 +546,11 @@ call as the P pause does (no silence checks, the call clock stands still, the
 stretch is a pause span the replay and the numbers leave out) but `state.paused`
 stays false, so nothing is shown (`engine.wand()`; its `paused` events carry
 `quiet`). It holds only while the call waits on the candidate: pressed while an
-interviewer is speaking, it begins when they finish. It ends when the line's
+interviewer is speaking, it begins when they finish. Pressed while an
+interviewer line is on its way (being made or being said), the reply is not
+written until that line has ended (`interviewerTurnOver` in `callService.js`,
+at most a minute), so it answers what they said and never starts over them
+(2026-11-26, call-mwx0uj25). It ends when the line's
 voice is made, at the first key typed into the pad, when there is no reply, on a
 mute, a typed message or the candidate's own words (a wordless sound does not
 end it), and `wandIdleMs` after a reply the window never used. P during it makes

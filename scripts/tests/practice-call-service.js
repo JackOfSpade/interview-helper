@@ -5815,6 +5815,86 @@ test('draftAnswer: the engine is told a reply is being written, then written or 
   assert.equal((await deps.store.readRecord('call-1')).pausedMs, 5000, 'one stretch, off the call clock like any pause');
 });
 
+test('call-mwx0uj25: draftAnswer pressed while an interviewer line is on its way waits for it, and writes against it', async () => {
+  const engine = { phase: 'listening', transcript: [{ speaker: 'interviewer', text: 'Here is how team matching works.' }], wand: [] };
+  let emit;
+  const engineFactory = options => ({
+    start() { emit = options.onEvent; emit({ type: 'phase', phase: 'listening' }); }, hangUp() {}, typed() {}, typing() {},
+    wand(step) { engine.wand.push(step); },
+    state: () => ({ phase: engine.phase, transcript: engine.transcript.map(item => ({ ...item })), elapsedMs: 0 }),
+  });
+  const seen = [];
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    draftAnswer: async ({ transcript }) => { seen.push(transcript.map(item => item.text)); return 'Thanks, that helps.'; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  // The interviewer's check-in after the candidate went quiet is being made when the wand is pressed.
+  engine.phase = 'speculating';
+  emit({ type: 'phase', phase: 'speculating' });
+  const pending = service.draftAnswer();
+  await flush();
+  assert.equal(seen.length, 0, 'nothing is written while the line is on its way');
+  assert.deepEqual(engine.wand, ['writing'], 'the wand\'s quiet pause is asked for, to begin when they finish');
+  engine.phase = 'playing';
+  emit({ type: 'phase', phase: 'playing' });
+  await flush();
+  assert.equal(seen.length, 0, 'nor while it is being said');
+  engine.transcript.push({ speaker: 'interviewer', text: 'Does that answer it?' });
+  engine.phase = 'listening';
+  emit({ type: 'phase', phase: 'listening' });
+  assert.deepEqual(await pending, { text: 'Thanks, that helps.' });
+  assert.deepEqual(seen, [['Here is how team matching works.', 'Does that answer it?']], 'the reply is written knowing the line');
+  // With no line on its way it is written at once.
+  assert.deepEqual(await service.draftAnswer(), { text: 'Thanks, that helps.' });
+  assert.equal(seen.length, 2);
+  await service.hangUp({ feedback: false });
+});
+
+test('call-mwx0uj25: a wand waiting for an interviewer line gives up when the call ends', async () => {
+  let emit;
+  let drafts = 0;
+  const engineFactory = options => ({
+    start() { emit = options.onEvent; }, hangUp() {}, typed() {}, typing() {}, wand() {},
+    state: () => ({ phase: 'playing', transcript: [], elapsedMs: 0 }),
+  });
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    draftAnswer: async () => { drafts += 1; return 'unused'; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  const pending = service.draftAnswer();
+  await flush();
+  emit({ type: 'phase', phase: 'ended' });
+  await service.hangUp({ feedback: false });
+  assert.deepEqual(await pending, { error: 'The call has ended.' });
+  assert.equal(drafts, 0, 'nothing is written for a call that is over');
+});
+
+test('call-mwx0uj25: a wand waiting for an interviewer line writes nothing when that line was their goodbye', async () => {
+  let emit;
+  let drafts = 0;
+  const engineFactory = options => ({
+    start() { emit = options.onEvent; }, hangUp() {}, typed() {}, typing() {}, wand() {},
+    state: () => ({ phase: 'playing', transcript: [], elapsedMs: 0 }),
+  });
+  const { service } = await liveCall({ deps: {
+    engineFactory, draftText: async () => '', loadCareerDocuments: async () => 'c', loadListing: async () => 'l',
+    draftAnswer: async () => { drafts += 1; return 'unused'; },
+  } });
+  await service.start(ARGS);
+  await service.answer();
+  const pending = service.draftAnswer();
+  await flush();
+  emit({ type: 'phase', phase: 'ended' });
+  emit({ type: 'ended', reason: 'interviewer' });
+  assert.deepEqual(await pending, { error: 'No one is waiting for an answer.' });
+  assert.equal(drafts, 0, 'the candidate is still in the window, but no one is waiting');
+  await service.hangUp({ feedback: false });
+});
+
 test('draftAnswer: pausing neither refuses a suggestion nor stops one being written', async () => {
   const engineFactory = () => ({ start() {}, hangUp() {}, setPaused() {}, state: () => ({ transcript: [], elapsedMs: 0 }) });
   let release;

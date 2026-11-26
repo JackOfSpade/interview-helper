@@ -136,13 +136,19 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
     }
     if (entry?.speaker !== 'candidate') { group = null; return; }
     if (entry.acknowledgement) return;
-    if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0, voicedOnly: true, startsGenerated: entry.generated === true }; groups.push(group); }
+    // A voiced line's known sent words are counted when the call kept them: the recogniser's text can repeat itself.
+    const sent = entry.voiced === true && typeof entry.sentText === 'string';
+    // Those words are timed over the line's own playback too: the recogniser can miss its first or last sentence, and
+    // the whole line's words over the shorter recognised span read far too fast (call-mwx0uj25: 223 wpm for ~176).
+    const spans = sent && Array.isArray(entry.lineSpans) ? entry.lineSpans.filter(span => finite(span?.startMs) && finite(span?.endMs)) : [];
+    const startMs = Math.min(entry.startMs, ...spans.map(span => span.startMs));
+    const endMs = Math.max(entry.endMs, ...spans.map(span => span.endMs));
+    if (!group) { group = { turnIndexes: [], startMs, endMs, words: 0, voicedOnly: true, startsGenerated: entry.generated === true }; groups.push(group); }
     if (entry.voiced !== true) group.voicedOnly = false;
     group.turnIndexes.push(index);
-    group.startMs = Math.min(group.startMs, entry.startMs);
-    group.endMs = Math.max(group.endMs, entry.endMs);
-    // A voiced line's known sent words are counted when the call kept them: the recogniser's text can repeat itself.
-    group.words += countWords(entry.voiced === true && typeof entry.sentText === 'string' ? entry.sentText : entry.text);
+    group.startMs = Math.min(group.startMs, startMs);
+    group.endMs = Math.max(group.endMs, endMs);
+    group.words += countWords(sent ? entry.sentText : entry.text);
   });
 
   // When the call kept no baseline of the synthetic voice (its lines were heard on the microphone path), the voice's

@@ -1197,6 +1197,66 @@ test('injected: a line sent while the interviewer is already speaking is talking
   assert.equal(injectCancels(rig, line.utteranceId).length, 0);
 });
 
+test('call-mwx0uj25: a voice line begun just before the interviewer finished keeps its first sentence in the candidate\'s entry', async () => {
+  const { rig, voice } = await injectRig();
+  const reply = await interviewerSpeaking(rig);
+  rig.engine.typed('Thanks, that helps. On your own team, what do reviewers push hardest on?', { chatId: 'm1', generated: true });
+  await flush();
+  const line = voice.lines.at(-1);
+  await injectLine(rig, line);
+  const lineAt = rig.clock.now();
+  await rig.clock.advance(200);
+  rig.h.playback(reply, 'finished', 6400); // the interviewer's last word ends 0.2 s into the candidate's line
+  await flush();
+  rig.h.vad(true);
+  // The recogniser dates the line's first sentence from a little before the line began, so before the interviewer ended.
+  rig.h.transcript('Thanks, that helps.', 'c1', lineAt - 80, true, lineAt + 1500);
+  await rig.clock.advance(2000);
+  rig.h.transcript('On your own team, what do reviewers push hardest on?', 'c2', lineAt + 1800, true, lineAt + 4000);
+  await rig.clock.advance(2000);
+  rig.h.vad(false);
+  rig.h.inject(line.utteranceId, 'finished', 4000);
+  await rig.clock.advance(1000);
+  rig.sessions.main.answer('Mostly the tests.');
+  rig.streams.at(-1).audio(3200);
+  await rig.clock.advance(1000);
+  const entry = rig.engine.state().transcript.filter(item => item.speaker === 'candidate').at(-1);
+  assert.match(entry.text, /^Thanks, that helps\. On your own team/u, entry.text);
+  const interviewer = rig.engine.state().transcript.filter(item => item.speaker === 'interviewer').at(-1);
+  assert.doesNotMatch(interviewer.text, /Thanks/u);
+});
+
+test('call-mwx0uj25: words of a voice line already taken as a back-channel over the interviewer are not in its entry twice', async () => {
+  const { rig, voice } = await injectRig();
+  const reply = await interviewerSpeaking(rig);
+  rig.engine.typed('Right. Mostly the tests and the rollout plan.', { chatId: 'm1', generated: true });
+  await flush();
+  const line = voice.lines.at(-1);
+  await injectLine(rig, line);
+  micHears(rig, 'Right.', 'c1');
+  await rig.clock.advance(300);
+  rig.h.vad(false);
+  await flush();
+  rig.sessions.classifier.answer('Acknowledgement');
+  await flush();
+  micSettles(rig, 'Right.', 'c1');
+  await rig.clock.advance(400);
+  rig.h.playback(reply, 'finished', 6400);
+  await flush();
+  rig.h.vad(true);
+  rig.h.transcript('Mostly the tests and the rollout plan.', 'c2', rig.clock.now(), true, rig.clock.now() + 2000);
+  await rig.clock.advance(2000);
+  rig.h.vad(false);
+  rig.h.inject(line.utteranceId, 'finished', 4000);
+  await rig.clock.advance(1000);
+  rig.sessions.main.answer('Okay.');
+  rig.streams.at(-1).audio(3200);
+  await rig.clock.advance(1000);
+  const candidate = rig.engine.state().transcript.filter(item => item.speaker === 'candidate');
+  assert(candidate.some(item => item.acknowledgement && item.text === 'Right.'), JSON.stringify(candidate));
+  assert.equal(candidate.at(-1).text, 'Mostly the tests and the rollout plan.');
+});
+
 test('injected: a brief overlap by an injected line goes to the classifier like a person\'s "right", and the line is left alone', async () => {
   const { rig, voice } = await injectRig();
   await interviewerSpeaking(rig);

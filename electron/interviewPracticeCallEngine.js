@@ -2011,6 +2011,23 @@ export function createPracticeCallEngine({
     return true;
   }
 
+  /**
+   * The start of the candidate's turn, `candidateMs`, unless a line in the candidate's voice had already begun: then
+   * from just before that line, so its first sentence stays theirs. The recogniser dates a segment from a little before
+   * the line's own start. Never earlier than the turn already began. Seen call-mwx0uj25: a wand line started 0.1 s
+   * before the interviewer's line ended, and its "Thanks, that helps." was left out of the candidate's entry.
+   */
+  function injectedTurnFloor(candidateMs) {
+    const line = injecting;
+    if (!line?.started || !Number.isFinite(line.startMs)) return candidateMs;
+    let floor = Math.max(turnStartMs, line.startMs - INJECTED_MATCH_EARLY_MS);
+    // Words of the line already taken as a back-channel over the interviewer ("Right.") have their own entry: not twice.
+    for (const entry of transcript) {
+      if (entry.speaker === 'candidate' && entry.acknowledgement && Number.isFinite(entry.endMs) && entry.endMs >= floor) floor = entry.endMs;
+    }
+    return Math.min(candidateMs, floor);
+  }
+
   function markTurnConsumed() {
     const helperNow = offset === null ? null : now() - offset;
     if (helperNow !== null) turnStartMs = Math.max(turnStartMs, helperNow);
@@ -2247,7 +2264,7 @@ export function createPracticeCallEngine({
     }
     if (atMs !== null && atMs !== undefined) {
       noteHelperTime(atMs);
-      turnStartMs = overlap?.speaking ? overlap.startMs : Math.max(turnStartMs, atMs);
+      turnStartMs = injectedTurnFloor(overlap?.speaking ? overlap.startMs : Math.max(turnStartMs, atMs));
     }
     if (overlap) {
       if (overlap.speaking) candidateSpoke = true;

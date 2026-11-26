@@ -520,6 +520,23 @@ export default [
     },
   },
   {
+    name: 'practice call audio: call-mwx0uj25: a voiced line\'s sent words are timed over its playback, not the shorter span the recogniser kept',
+    run() {
+      const sentText = 'Thanks, that helps. On your own team, when a pull request goes up for review, what do you and the other reviewers push hardest on before it gets merged?';
+      const transcript = [
+        { speaker: 'interviewer', text: 'Does that answer it?', startMs: 382500, endMs: 386400 },
+        // The recogniser lost "Thanks, that helps.": its entry starts 1.9 s into the line.
+        { speaker: 'candidate', voiced: true, generated: true, text: 'On your own team, when a pool request goes up for review, what do you and the other reviewers push hardest on before it gets merged?', sentText, lineSpans: [{ startMs: 386223, endMs: 396091 }], startMs: 388100, endMs: 395900 },
+      ];
+      const [answer] = callMetrics({ transcript }).answers;
+      assert.equal(answer.startMs, 386223);
+      assert.equal(answer.endMs, 396091);
+      assert.equal(answer.wordCount, 29);
+      assert.ok(answer.wordsPerMinute > 170 && answer.wordsPerMinute < 180, String(answer.wordsPerMinute));
+      assert.ok(answer.fastest20sWindowWpm < 180, String(answer.fastest20sWindowWpm));
+    },
+  },
+  {
     name: 'practice call audio: the gap between two generated lines is not the candidate\'s pause, a gap next to a live line is',
     run() {
       const transcript = [

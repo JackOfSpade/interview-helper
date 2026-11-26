@@ -160,6 +160,8 @@ function mostRecentlyUsed(lastUsed) {
  * 180 s of silence. The audio is counted and thrown away, never played or transcribed.
  */
 const WARM_UP_TIMEOUT_MS = 15000;
+// The longest the wand waits for an interviewer line already on its way to end before it writes the reply anyway.
+const INTERVIEWER_TURN_WAIT_MAX_MS = 60000;
 async function warmUpVoice({ factory, clock }) {
   let stream;
   try { stream = factory?.open?.({ utteranceId: 'warm-up' }); } catch { return false; }
@@ -2466,12 +2468,37 @@ export function createPracticeCallService(deps = {}) {
     return self.sessions;
   }
 
+  /**
+   * Resolves, with the ms waited, once no interviewer turn is on its way: the engine is back to listening (or the call
+   * ended, or `signal` aborted). At once when the engine is not making or saying a line.
+   */
+  function interviewerTurnOver(self, signal) {
+    let phase = null;
+    try { phase = self.engine?.state?.()?.phase ?? null; } catch { /* engine already ended */ }
+    if (!['speculating', 'committed', 'playing'].includes(phase) || signal?.aborted) return Promise.resolve(0);
+    const started = clock.now();
+    return new Promise(resolveWait => {
+      let timer = null;
+      const done = () => {
+        if (timer !== null) { try { clock.clearTimeout?.(timer); } catch { /* already fired */ } timer = null; }
+        signal?.removeEventListener?.('abort', done);
+        const at = self.turnWaiters?.indexOf(done) ?? -1;
+        if (at >= 0) self.turnWaiters.splice(at, 1);
+        resolveWait(Math.round(clock.now() - started));
+      };
+      (self.turnWaiters ||= []).push(done);
+      signal?.addEventListener?.('abort', done, { once: true });
+      timer = clock.setTimeout(done, INTERVIEWER_TURN_WAIT_MAX_MS); // a line that never reports its end does not hold the wand for ever
+    });
+  }
+
   function onEngineEvent(event) {
     if (!event || typeof event !== 'object') return;
     // Every engine event, whatever its type, so a new type needs no code here.
     { const { type, ...fields } = event; dbg('engine', { type, ...fields }); }
     if (event.type === 'phase') {
       const self = call;
+      if (self && ['listening', 'ended'].includes(event.phase)) for (const release of self.turnWaiters?.splice(0) ?? []) release();
       if (self) {
         if (event.phase === 'playing') {
           self.interviewerPlaying = true;
@@ -3663,6 +3690,15 @@ export function createPracticeCallService(deps = {}) {
           return { careerText, listingText };
         })();
         const sources = await self.draftSources;
+        // An interviewer line already on its way (a check-in being made, or being said) is heard before the reply is
+        // written, as a person would wait for it: the reply answers it, and is never said over it. The wand's quiet pause
+        // begins once they finish (call-mwx0uj25: pressed as the "does that answer it?" check-in was being made, the
+        // reply was written without it and began before it ended).
+        const waitedMs = await interviewerTurnOver(self, abort.signal);
+        if (waitedMs > 0) dbg('draft-answer', { waitedForInterviewerMs: waitedMs });
+        if (call !== self || self.finished) return { error: 'The call has ended.' };
+        if (self.interviewerEnded || state.interviewerLeft) return { error: 'No one is waiting for an answer.' }; // the line they waited for was the goodbye
+        if (state.muted) return { muted: true };
         // With the coding pad open the wand works the exercise (steps of a line and the pad after it), when the app passes
         // that call in; otherwise it only talks, as before.
         const working = !!state.pad?.open && typeof deps.draftWorkText === 'function';

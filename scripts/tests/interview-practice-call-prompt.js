@@ -323,6 +323,13 @@ const base = [
       assert(given.includes('The candidate\'s questions are never cut short for time'), 'the clock never cuts the candidate\'s questions');
       assert(given.includes('This call was planned to run 33 to 40 minutes'));
       assert.equal(given.includes('5 minutes before'), false, 'no fixed five minutes');
+      // call-mwx0uj25: two small exercises done by 5:12 of a 10-minute round, and the interviewer closed "a little early".
+      for (const text of [given, buildInterviewerInstructions({ persona, brief, plan })]) {
+        assert.equal(text.includes('You may also wrap up earlier once the topics are covered'), false, 'no blanket licence to close once the questions are asked');
+        assert(text.includes('Time left once the planned questions are done is yours to use'), 'spare time is the interviewer\'s to use');
+        assert(text.includes('when you already have what you need to judge them, go to their questions'), 'closing early stays an option');
+        assert(text.includes('give no reason tied to the clock or the plan'), 'an early move on is not announced by the clock');
+      }
       assert(buildInterviewerInstructions({ persona, brief, plan, targetMinutes: [8, 10], wrapUpMinutes: 1 }).includes('from about 9:00 elapsed (1 minute before the upper target of 10:00)'));
       assert(buildInterviewerInstructions({ persona, brief, plan, targetMinutes: [20, 25], wrapUpMinutes: 2.5 }).includes('from about 22:30 elapsed (2.5 minutes before the upper target of 25:00)'));
       // A kept interview from before has no wrap-up time: a sixth of the length, never under two minutes.
