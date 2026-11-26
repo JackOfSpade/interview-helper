@@ -158,7 +158,8 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
       <label className="block space-y-1">
         <span className="text-[10px] font-semibold uppercase text-white/45">Steer this interview (optional)</span>
-        <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30 disabled:opacity-50" rows={3} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} disabled={!canCall} placeholder={'e.g. "First recruiter screen: light questions, no deep technicals" or "Final round before an offer: ask my salary expectations"'} aria-label="Steer this interview (optional)" />
+        {/* Always editable: the text only takes effect at Start, so typing it while a call cannot start yet is harmless. */}
+        <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30" rows={3} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} placeholder={'e.g. "First recruiter screen: light questions, no deep technicals" or "Final round before an offer: ask my salary expectations"'} aria-label="Steer this interview (optional)" />
       </label>
       {choosing ? <div className="space-y-1.5 rounded-md border border-violet-300/20 bg-violet-500/5 p-2" aria-label="Choose an interview">
         <p className="text-[11px] text-white/75">You have practised this job before. Start a new interview, or take one of the earlier ones again exactly as it was.</p>

@@ -243,6 +243,13 @@ export default [
         assert.equal(started.length, 3);
         assert.equal(started[2].steering, 'Go easy on me');
         assert.equal('repeatInterviewId' in started[2], false);
+        // The steer box stays editable while a call cannot start (not ready, disabled, or starting).
+        const steerBox = () => panel().querySelector('textarea[aria-label="Steer this interview (optional)"]');
+        for (const blocked of [{ ready: false }, { disabled: true }]) {
+          await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, { ...props, ...blocked })); await new Promise(resolve => setTimeout(resolve, 5)); });
+          assert.equal(steerBox().disabled, false, `the steer box is editable when ${JSON.stringify(blocked)}`);
+        }
+        await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, props)); await new Promise(resolve => setTimeout(resolve, 5)); });
         // Cancel closes it; forgetting the last one closes it too.
         await click(buttonNamed('Start practice call'));
         await click(buttonNamed('Cancel'));
