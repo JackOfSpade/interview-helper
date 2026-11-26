@@ -104,9 +104,10 @@ export default function PracticeCallApp() {
   const stageKey = phase === 'ended' || phase === 'analyzing' ? 'processing' : phase;
   const renderPhase = () => {
   switch (phase) {
-    case 'consent': return <ConsentScreen onAgree={agree} busy={busy} />;
+    case 'consent': return <ConsentScreen onAgree={agree} busy={busy} sizes={state.modelDownload?.sizes} />;
     case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
-    case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} onReady={() => invoke('ready')} />;
+    case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} microphoneUnavailable={!!state.microphoneUnavailable}
+      onReady={() => invoke('ready')} onCancel={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
     case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('decline')} />;
     case 'missed': return <MissedCall persona={state.persona} missed={state.missed} onCallBack={() => invoke('callBack')} onClose={() => invoke('close')} />;
     case 'calling': return <OutgoingCall persona={state.persona} onCancel={() => invoke('cancelCallBack')} />;
@@ -131,7 +132,7 @@ export default function PracticeCallApp() {
     case 'analyzing': return <EndedScreen state={state} onChooseFeedback={wants => invoke('chooseFeedback', wants)} />;
     case 'replay': return <Replay replay={replay} api={{ deleteRecording: () => invoke('deleteRecording'), ...(typeof readApi()?.retryAnalysis === 'function' ? { retryAnalysis: () => invoke('retryAnalysis') } : {}) }} />;
     case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
-    default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: `The call window received an unknown phase (${String(state.phase)}).` }} onClose={() => invoke('close')} />;
+    default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: 'Something went wrong with this window. Close it and start the call again.' }} onClose={() => invoke('close')} />;
   }
   };
   return <div key={stageKey} className="pc-fade">{renderPhase()}</div>;

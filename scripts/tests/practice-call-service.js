@@ -1608,7 +1608,7 @@ test('a draw failure ends the call before anything is created', async () => {
   const state = await service.start(ARGS);
   assert.equal(state.phase, 'error');
   assert.equal(state.error.code, 'voice-library-unavailable');
-  assert.equal(state.error.message, 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.');
+  assert.equal(state.error.message, 'Your interviewer could not be set up. Check your internet connection and try again.');
   assert.deepEqual(created, { helpers: 0, tracks: 0, sessions: 0 }, 'nothing is created');
   assert.deepEqual(catalog.listings, [], 'the account voice list is never read');
   assert.deepEqual(catalog.picks, [], 'no voice is picked');
@@ -1630,7 +1630,7 @@ test('a missing, throwing or unusable draw is voice-library-unavailable', async 
     assert.equal(state.phase, 'error', label);
     assert.equal(state.error.code, 'voice-library-unavailable', label);
     assert.equal(state.error.message,
-      'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.', label);
+      'Your interviewer could not be set up. Check your internet connection and try again.', label);
     assert.deepEqual(catalog.listings, [], `${label}: the account voice list is never read`);
     const stamped = await readFile(poolFilePath(tmp), 'utf8').then(() => true, () => false);
     assert.equal(stamped, false, `${label}: no lastUsed stamp is saved`);

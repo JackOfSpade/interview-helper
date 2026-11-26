@@ -72,6 +72,8 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   // Interviews held before for this job and company: after Start, the candidate picks a new one or one of these again.
   const [savedInterviews, setSavedInterviews] = useState([]);
   const [choosing, setChoosing] = useState(false);
+  // The saved interview whose Remove was pressed once: a second press removes it for good.
+  const [confirmForget, setConfirmForget] = useState(null);
   const api = typeof window !== 'undefined' ? window.electronAPI : null;
   const savedReady = typeof api?.listSavedPracticeInterviews === 'function';
   const loadSaved = useCallback(async () => {
@@ -152,49 +154,63 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   // The in-app call is the only practice path; without it the panel has nothing to show.
   if (typeof api?.startPracticeCall !== 'function') return null;
   const canCall = ready && !disabled && !practiceBusy;
+  const whyNot = !ready ? 'Prepare the interview first: the call asks the prepared questions.' : disabled && !practiceBusy ? 'Available once the current task finishes.' : '';
+  const primary = 'nodrag w-full rounded-md bg-violet-500/40 px-2 py-2 text-[12px] font-semibold text-violet-50 hover:bg-violet-500/50 disabled:opacity-50';
+  const small = 'nodrag rounded border border-white/10 px-1.5 py-0.5 text-[11px] hover:bg-white/5 disabled:opacity-40';
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
-    <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
-    <p className="text-[11px] text-white/60">An AI interviewer calls you for a mock interview. You get feedback on the call when it ends.</p>
-    <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
-      <label className="block space-y-1">
-        <span className="text-[10px] font-semibold uppercase text-white/45">Steer this interview (optional)</span>
-        {/* Always editable: the text only takes effect at Start, so typing it while a call cannot start yet is harmless. */}
-        <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30" rows={3} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} placeholder={'e.g. "First recruiter screen: light questions, no deep technicals" or "Final round before an offer: ask my salary expectations"'} aria-label="Steer this interview (optional)" />
-      </label>
-      {choosing ? <div className="space-y-1.5 rounded-md border border-violet-300/20 bg-violet-500/5 p-2" aria-label="Choose an interview">
-        <p className="text-[11px] text-white/75">You have practised this job before. Start a new interview, or take one of the earlier ones again exactly as it was.</p>
-        <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={() => launch(null)} disabled={!canCall}>Generate a new interview</button>
-        <p className="text-[10px] font-semibold uppercase text-white/45">Or repeat an earlier one</p>
-        <ul className="space-y-1">{savedInterviews.map(item => <li key={item.id} className="rounded-md border border-white/10 bg-black/20 p-1.5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0 text-[11px] text-white/75">
-              <p className="truncate">{savedInterviewLabel(item)}</p>
-              <p className="text-[10px] text-white/45">Last held {(Number(item.lastUsedAt) > 0 && when(new Date(Number(item.lastUsedAt)).toISOString())) || 'earlier'}{Number(item.timesUsed) > 1 ? ` · held ${item.timesUsed} times` : ''}</p>
-              {item.steering && <p className="truncate text-[10px] text-white/45" title={item.steering}>Steered: {item.steering}</p>}
+    <div>
+      <p className="text-[12px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" aria-hidden="true" />Practice interview</p>
+      <p className="text-[11px] text-white/60">An AI interviewer calls you for a mock interview, with feedback when it ends.</p>
+    </div>
+    <div className="space-y-2 rounded-md border border-white/10 bg-black/20 p-2">
+      {choosing ? <div className="space-y-1.5" role="group" aria-label="Choose an interview">
+        <p className="text-[11px] text-white/75">You’ve practised this job before. Start a new interview, or repeat an earlier one with the same interviewers and questions.</p>
+        <button type="button" className={primary} onClick={() => launch(null)} disabled={!canCall} autoFocus>{practiceBusy ? 'Getting ready in the call window…' : 'New interview'}</button>
+        <ul className="space-y-1" aria-label="Earlier interviews">{savedInterviews.map(item => {
+          const who = item?.lead?.name || 'this interviewer';
+          return <li key={item.id} className="rounded-md border border-white/10 bg-black/20 p-1.5">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 text-[11px] text-white/75">
+                <p className="truncate" title={savedInterviewLabel(item)}>{savedInterviewLabel(item)}</p>
+                <p className="text-[11px] text-white/50">Last held {(Number(item.lastUsedAt) > 0 && when(new Date(Number(item.lastUsedAt)).toISOString())) || 'earlier'}{Number(item.timesUsed) > 1 ? ` · ${item.timesUsed} times` : ''}</p>
+                {item.steering && <p className="truncate text-[11px] text-white/50" title={item.steering}>Focus: {item.steering}</p>}
+              </div>
+              {confirmForget === item.id
+                ? <div className="flex shrink-0 items-center gap-1" role="group" aria-label={`Remove the interview with ${who}?`}>
+                  <span className="text-[11px] text-white/60">Remove?</span>
+                  <button type="button" className={`${small} text-red-200`} onClick={() => { setConfirmForget(null); void forgetSaved(item.id); }} disabled={practiceBusy}>Remove</button>
+                  <button type="button" className={`${small} text-white/60`} onClick={() => setConfirmForget(null)}>Keep</button>
+                </div>
+                : <div className="flex shrink-0 gap-1">
+                  <button type="button" className={`${small} text-violet-200`} onClick={() => launch(item.id)} disabled={!canCall} aria-label={`Repeat the interview with ${who}`}>Repeat</button>
+                  <button type="button" className={`${small} text-white/55`} onClick={() => setConfirmForget(item.id)} disabled={practiceBusy} aria-label={`Remove the interview with ${who}`}>Remove</button>
+                </div>}
             </div>
-            <div className="flex shrink-0 gap-1">
-              <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-white/5 disabled:opacity-40" onClick={() => launch(item.id)} disabled={!canCall} aria-label={`Repeat the interview with ${item?.lead?.name || 'this interviewer'}`}>Repeat</button>
-              <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-white/50 hover:bg-white/5 disabled:opacity-40" onClick={() => forgetSaved(item.id)} disabled={practiceBusy} aria-label={`Forget the interview with ${item?.lead?.name || 'this interviewer'}`}>Forget</button>
-            </div>
-          </div>
-        </li>)}</ul>
-        <p className="text-[10px] text-white/40">A repeat uses the same interviewers, questions and screens, and the steering it was planned with.</p>
-        <button type="button" className="nodrag text-[10px] text-white/50 underline hover:text-white/70" onClick={() => setChoosing(false)}>Cancel</button>
+          </li>;
+        })}</ul>
+        <button type="button" className="nodrag text-[11px] text-white/55 underline hover:text-white/75" onClick={() => { setChoosing(false); setConfirmForget(null); }}>Back</button>
       </div>
-        : <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>}
-      {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; the call uses the prepared questions and answers.</p>}
-      <div aria-label="Past calls">
-        <p className="text-[10px] font-semibold uppercase text-white/45">Past calls</p>
-        {pastCalls.length === 0 ? <p className="text-[10px] text-white/40">No past calls yet.</p> : <ul className="mt-0.5 space-y-0.5">{pastCalls.map(call => {
+        : <>
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-white/60">Focus (optional)</span>
+            {/* Always editable: the text only takes effect at Start, so typing it while a call cannot start yet is harmless. */}
+            <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/40" rows={2} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} placeholder="e.g. a first recruiter screen, light on technical questions" />
+          </label>
+          <button type="button" className={primary} onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Getting ready in the call window…' : 'Start practice call'}</button>
+        </>}
+      {whyNot && <p className="text-[11px] text-white/50">{whyNot}</p>}
+      {pastNotice && <p role="alert" className="text-[11px] text-red-200">{pastNotice}</p>}
+      <div aria-label="Past calls" role="group">
+        <p className="text-[11px] font-medium text-white/60">Past calls</p>
+        {pastCalls.length === 0 ? <p className="text-[11px] text-white/45">No past calls yet.</p> : <ul className="mt-0.5 space-y-0.5">{pastCalls.map(call => {
           const id = call?.callId || call?.id;
           const label = `${when(call?.startedAt) || 'Undated call'} · ${durationLabel(callLengthMs(call))} · ${call?.persona?.name || 'Interviewer'}`;
           return <li key={id || label} className="flex items-center justify-between gap-2 text-[11px] text-white/70">
-            <span className="min-w-0 truncate">{label}</span>
-            <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-white/5 disabled:opacity-40" onClick={() => openReplay(id)} disabled={!id} aria-label={`Replay ${call?.persona?.name || 'practice'} call from ${when(call?.startedAt) || 'unknown date'}`}>Replay</button>
+            <span className="min-w-0 truncate" title={label}>{label}</span>
+            <button type="button" className={`${small} text-violet-200`} onClick={() => openReplay(id)} disabled={!id} aria-label={`Replay ${call?.persona?.name || 'practice'} call from ${when(call?.startedAt) || 'unknown date'}`}>Replay</button>
           </li>;
         })}</ul>}
       </div>
-      {pastNotice && <p role="alert" className="text-[11px] text-red-200">{pastNotice}</p>}
     </div>
   </section>;
 }

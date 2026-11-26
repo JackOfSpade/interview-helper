@@ -32,11 +32,20 @@ export function mergeEvent(current, event) {
 }
 
 // Sizes mirror docs/interview-practice-call-build.md ("models/"): Smart Turn v3
-// and the wav2vec2 tone model. Shown before anything is downloaded.
+// and the wav2vec2 tone model. The consent screen shows only their total.
 export const MODEL_SIZES = Object.freeze([
-  { name: 'Turn-taking model (Smart Turn v3)', size: '32 MB' },
-  { name: 'Voice tone model (wav2vec2)', size: '610 MB download' },
+  { name: 'Turn-taking model (Smart Turn v3)', megabytes: 32 },
+  { name: 'Voice tone model (wav2vec2)', megabytes: 610 },
 ]);
+/**
+ * The one-time download as the candidate reads it ("about 640 MB"): the sizes the service
+ * sent (bytes by model name) when it has them, else the documented ones.
+ */
+export function modelDownloadLabel(sizes) {
+  const sent = sizes && typeof sizes === 'object' ? Object.values(sizes).map(Number).filter(value => Number.isFinite(value) && value > 0) : [];
+  const megabytes = sent.length ? sent.reduce((sum, value) => sum + value, 0) / (1024 * 1024) : MODEL_SIZES.reduce((sum, model) => sum + model.megabytes, 0);
+  return `about ${Math.max(10, Math.round(megabytes / 10) * 10)} MB`;
+}
 
 export function formatBytes(bytes) {
   const value = Number(bytes);
@@ -102,29 +111,41 @@ export function describeDeliveryValue(value) {
   return String(value);
 }
 
-// The setup steps in the order the service runs them, as the candidate reads them.
-export const SETUP_STEPS = Object.freeze([
-  { step: 'account', label: 'Checking your voice account' },
-  { step: 'voices', label: 'Choosing the interviewer voices' },
-  { step: 'plan', label: 'Planning the interview', hint: 'the longest step, about a minute' },
-  { step: 'voice', label: "Warming up the interviewer's voice" },
-  { step: 'audio', label: 'Turning on your microphone' },
-  { step: 'screens', label: 'Preparing the shared screens' },
-  { step: 'sessions', label: 'Bringing the interviewer in' },
+// The service's setup steps, in the order it runs them.
+export const SETUP_STEPS = Object.freeze(['account', 'voices', 'plan', 'voice', 'audio', 'screens', 'sessions']);
+
+// What the candidate sees: three stages, each covering some of the service's steps. The service's
+// own steps (voice account, voice draws, warm-ups, sessions) are how the call is built, not
+// something the candidate needs to follow, so they are not shown one by one.
+export const SETUP_STAGES = Object.freeze([
+  { key: 'plan', label: 'Preparing your interview', hint: 'usually about a minute', steps: ['account', 'voices', 'plan'] },
+  { key: 'audio', label: 'Setting up audio', steps: ['voice', 'audio'] },
+  { key: 'final', label: 'Final checks', steps: ['screens', 'sessions'] },
 ]);
 
-/** Each setup step as done, active or pending, from the step the service says is running. */
+/** Each setup stage as done, active or pending, from the step the service says is running. */
 export function setupProgress(setup) {
   // 'ready' comes after the last step: everything is done and the call waits for the candidate.
-  const at = setup?.step === 'ready' ? SETUP_STEPS.length : SETUP_STEPS.findIndex(item => item.step === setup?.step);
-  const attempt = Number(setup?.attempt) || 1;
-  return SETUP_STEPS.map((item, index) => ({
-    ...item,
-    status: at < 0 ? 'pending' : index < at ? 'done' : index === at ? 'active' : 'pending',
-    // A plan the checks rejected is written again; say so instead of looking stuck.
-    note: index === at && item.step === 'plan' && attempt > 1 ? `attempt ${attempt}` : '',
-  }));
+  const at = setup?.step === 'ready' ? SETUP_STEPS.length : SETUP_STEPS.indexOf(setup?.step);
+  return SETUP_STAGES.map(({ key, label, hint, steps }) => {
+    const first = SETUP_STEPS.indexOf(steps[0]);
+    const last = SETUP_STEPS.indexOf(steps[steps.length - 1]);
+    const status = at < 0 ? 'pending' : at > last ? 'done' : at >= first ? 'active' : 'pending';
+    return { key, label, hint: hint || '', status };
+  });
 }
+
+/** Whether the microphone is on yet: it starts in the service's 'audio' step and stays on. */
+export function microphoneOn(setup) {
+  if (setup?.step === 'ready') return true;
+  return SETUP_STEPS.indexOf(setup?.step) > SETUP_STEPS.indexOf('audio');
+}
+
+// The meter shows speech on a perceptual scale (as the in-call glow does): a linear RMS
+// percentage sits near the bottom for ordinary talking and reads as a dead microphone.
+export const meterPercent = level => Math.round(selfPulse(level) * 100);
+// Above this level (RMS) the meter says it hears the candidate.
+export const HEARING_LEVEL = 0.01;
 
 export const elapsedLabel = ms => {
   const seconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));

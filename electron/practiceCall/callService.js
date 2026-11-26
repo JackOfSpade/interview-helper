@@ -16,7 +16,8 @@ const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list', listSaved: 'practice-call:list-saved', removeSaved: 'practice-call:remove-saved' });
 const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing', 'replay', 'error']);
 const CLASSIFIER_INSTRUCTIONS = 'You classify one candidate utterance. Reply with exactly one word: acknowledgement if it only acknowledges, agrees or fills a pause, or interruption if it starts a new thought, question or correction. No punctuation, no explanation. Every later message is one utterance to classify. Reply only READY now.';
-const USAGE_LIMIT_MESSAGE = 'Claude usage is limited right now; analysis may wait until the limit resets.';
+// Shown on the setup card. It names no vendor or tool: the call window reads as a real call.
+const USAGE_LIMIT_MESSAGE = 'Your feedback after this call may take longer than usual.';
 const MODELS = Object.freeze(['smartTurn', 'tone']);
 // A panel call: up to four colleagues beside the lead. Whether each joins late, like a person a few
 // minutes behind a meeting, and when, is the plan's own choice (the planner writes it per colleague).
@@ -43,6 +44,7 @@ const MISSED_HOLD_MS = 10 * 60 * 1000;
 const CALLBACK_PICKUP_MIN_MS = 2000;
 const CALLBACK_PICKUP_MAX_MS = 5000;
 const PLANNING_NOTICE = Object.freeze({ code: 'planning', message: 'Planning the interview' });
+const PRECHECK_FAILED_MESSAGE = 'Something went wrong while getting your interview ready. Try starting the call again.';
 const PLAN_FAILED_MESSAGE = 'The interview could not be planned. Try starting the call again.';
 const VOICE_DESCRIPTION_MAX = 300;
 // An interviewer who stays on after the call is over leaves 1.0 to 3.0 s later, in steps of 0.1 s, each on their own draw.
@@ -989,7 +991,10 @@ export function createPracticeCallService(deps = {}) {
   const fail = (code, cause, detail = cause) => {
     // The window shows a plain message; the cause goes to the app log so a failed call can be diagnosed.
     warn(`[PracticeCall] ${code}: ${detail?.message || detail?.userMessage || 'no detail'}`);
-    const message = cause?.userMessage || (code === 'voice-key-missing' ? 'The ElevenLabs key is not available on this computer.' : cause?.message);
+    // A setup failure with no plain message of its own gets a general one: its own text (a network error, a planner
+    // check) is for the log, not the window.
+    const message = cause?.userMessage || (code === 'voice-key-missing' ? 'Your ElevenLabs key could not be read on this Mac. Check that it is saved, then start the call again.'
+      : code === 'precheck-failed' ? PRECHECK_FAILED_MESSAGE : cause?.message);
     dbg('fail', { code, message: detail?.message || detail?.userMessage || null, stack: typeof detail?.stack === 'string' ? detail.stack.split('\n').slice(0, 6).join('\n') : undefined });
     const failed = call;
     call = null;
@@ -2049,7 +2054,7 @@ export function createPracticeCallService(deps = {}) {
     const readKey = await resolve('readKey');
     const key = await readKey();
     if (call !== self || self.finished) return snapshot();
-    if (typeof key !== 'string' || !key) throw new Error('No ElevenLabs key.');
+    if (typeof key !== 'string' || !key) return fail('voice-key-missing', { message: 'No ElevenLabs key.' });
     self.key = key;
     const fetchImpl = deps.fetch ?? globalThis.fetch;
     const fetchTier = await resolve('subscriptionTier');
@@ -2135,7 +2140,7 @@ export function createPracticeCallService(deps = {}) {
       if (call !== self || self.finished) return snapshot();
       if (!chosen) {
         return fail('voice-library-unavailable', {
-          userMessage: 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.',
+          userMessage: 'Your interviewer could not be set up. Check your internet connection and try again.',
         });
       }
       const leadBase = personaOf(chosen, 'library');

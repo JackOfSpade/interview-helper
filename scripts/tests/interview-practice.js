@@ -231,7 +231,7 @@ export default [
         const chooser = panel().querySelector('[aria-label="Choose an interview"]');
         assert.ok(chooser, 'the choice is shown');
         assert.ok(chooser.textContent.includes('Nora Lead (Hiring Manager) + 1 colleague · 6 questions · 1 problem · ~27 min'), chooser.textContent);
-        assert.ok(chooser.textContent.includes('held 2 times') && chooser.textContent.includes('Steered: Final round'));
+        assert.ok(chooser.textContent.includes('2 times') && chooser.textContent.includes('Focus: Final round'));
         await click(chooser.querySelector('button[aria-label="Repeat the interview with Nora Lead"]'));
         assert.equal(started.length, 2);
         assert.equal(started[1].repeatInterviewId, SAVED.id, 'the earlier interview is held again');
@@ -239,24 +239,29 @@ export default [
         assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null, 'the choice closes once started');
         // Start again: a new one, with the box's steering.
         await click(buttonNamed('Start practice call'));
-        await click(buttonNamed('Generate a new interview'));
+        await click(buttonNamed('New interview'));
         assert.equal(started.length, 3);
         assert.equal(started[2].steering, 'Go easy on me');
         assert.equal('repeatInterviewId' in started[2], false);
         // The steer box stays editable while a call cannot start (not ready, disabled, or starting).
-        const steerBox = () => panel().querySelector('textarea[aria-label="Steer this interview (optional)"]');
+        const steerBox = () => panel().querySelector('textarea');
         for (const blocked of [{ ready: false }, { disabled: true }]) {
           await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, { ...props, ...blocked })); await new Promise(resolve => setTimeout(resolve, 5)); });
           assert.equal(steerBox().disabled, false, `the steer box is editable when ${JSON.stringify(blocked)}`);
         }
         await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, props)); await new Promise(resolve => setTimeout(resolve, 5)); });
-        // Cancel closes it; forgetting the last one closes it too.
+        // While choosing, the focus box is hidden: a repeat keeps the focus it was planned with.
         await click(buttonNamed('Start practice call'));
-        await click(buttonNamed('Cancel'));
+        assert.equal(steerBox(), null, 'the focus box is hidden while choosing');
+        // Back closes it; removing the last one closes it too, after a second press.
+        await click(buttonNamed('Back'));
         assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null);
         assert.equal(started.length, 3);
         await click(buttonNamed('Start practice call'));
-        await click(panel().querySelector('button[aria-label="Forget the interview with Nora Lead"]'));
+        await click(panel().querySelector('button[aria-label="Remove the interview with Nora Lead"]'));
+        await settle();
+        assert.deepEqual(removed, [], 'one press only asks');
+        await click(panel().querySelector('[aria-label="Remove the interview with Nora Lead?"] button'));
         await settle();
         assert.deepEqual(removed, [{ nodeId: 'helper-1', id: SAVED.id }]);
         assert.equal(panel().querySelector('[aria-label="Choose an interview"]'), null, 'nothing left to choose');

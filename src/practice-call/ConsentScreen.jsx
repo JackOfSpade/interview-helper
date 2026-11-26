@@ -1,20 +1,20 @@
 import React from 'react';
-import { ShieldCheck } from 'lucide-react';
-import { MODEL_SIZES } from './callModel.js';
+import { Download, ShieldCheck } from 'lucide-react';
+import { modelDownloadLabel } from './callModel.js';
 
-export default function ConsentScreen({ onAgree, busy }) {
+// Shown once, before the first call: the files the call needs, and what happens to the recording.
+export default function ConsentScreen({ onAgree, busy, sizes }) {
   return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Call setup">
-    <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#2d2e30] p-4">
-      <h1 className="text-base font-semibold text-violet-100">Set up your call</h1>
-      <p className="text-[12px] text-white/70">Your interviewer calls you in this window. They hear you through the microphone on this Mac and answer in an AI voice; the call is recorded so you can play it back, and it can be analysed afterwards.</p>
-      <div className="rounded-lg border border-white/10 bg-black/20 p-2">
-        <p className="text-[10px] font-semibold uppercase text-white/45">Downloaded once</p>
-        <ul className="mt-1 space-y-1" aria-label="Model downloads">
-          {MODEL_SIZES.map(model => <li key={model.name} className="flex items-baseline justify-between gap-2 text-[11px] text-white/75"><span>{model.name}</span><span className="text-white/50">{model.size}</span></li>)}
-        </ul>
-      </div>
-      <p className="flex items-start gap-1.5 text-[11px] text-white/55"><ShieldCheck size={12} className="mt-0.5 shrink-0" aria-hidden="true" />Recordings stay on this Mac except for the transcription request. Audio is deleted after analysis unless you keep it.</p>
-      <button type="button" className="w-full rounded-md bg-violet-500/25 px-2 py-1.5 text-xs text-violet-100 hover:bg-violet-500/35 disabled:opacity-50" onClick={onAgree} disabled={!!busy}>{busy ? 'Starting…' : 'Agree and download'}</button>
+    <section className="w-full max-w-sm space-y-4 rounded-2xl border border-white/10 bg-[#2d2e30] p-5 shadow-xl shadow-black/30">
+      <header className="space-y-1">
+        <h1 className="text-lg font-semibold text-violet-50">Before your first call</h1>
+        <p className="text-[13px] text-white/65">The call needs a one-time download of speech files so it can tell when you’ve finished speaking.</p>
+      </header>
+      <ul className="space-y-2 text-[12px] text-white/60">
+        <li className="flex items-start gap-2"><Download size={13} className="mt-0.5 shrink-0" aria-hidden="true" />Download size: {modelDownloadLabel(sizes)}, once.</li>
+        <li className="flex items-start gap-2"><ShieldCheck size={13} className="mt-0.5 shrink-0" aria-hidden="true" />Calls are recorded so you can play them back. Recordings stay on this Mac; only your answers are sent out to be transcribed. The audio is deleted after the feedback unless you keep it.</li>
+      </ul>
+      <button type="button" className="w-full rounded-lg bg-violet-500/35 px-3 py-2.5 text-[14px] font-semibold text-violet-50 hover:bg-violet-500/45 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60" onClick={onAgree} disabled={!!busy} autoFocus>{busy ? 'Starting…' : 'Agree and download'}</button>
     </section>
   </main>;
 }

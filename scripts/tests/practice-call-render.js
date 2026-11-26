@@ -541,15 +541,18 @@ export const presentingTests = [
 
 export default [
   {
-    name: 'practice call render: consent lists the model sizes before asking to agree',
+    name: 'practice call render: consent gives the one-time download size, with no model names, before asking to agree',
     async run() {
       const bundle = await loadServerBundle();
       try {
         const { React, renderToStaticMarkup, ConsentScreen } = bundle.module;
         const markup = renderToStaticMarkup(React.createElement(ConsentScreen, { onAgree: () => {}, busy: false }));
-        for (const fragment of ['aria-label="Model downloads"', '32 MB', '610 MB', 'Agree and download', 'Set up your call', 'AI voice']) {
+        for (const fragment of ['about 640 MB', 'Agree and download', 'Before your first call', 'recorded']) {
           assert(markup.includes(fragment), `consent screen is missing ${fragment}`);
         }
+        assert(!/Smart Turn|wav2vec2/u.test(markup), 'consent names no model');
+        const sent = renderToStaticMarkup(React.createElement(ConsentScreen, { onAgree: () => {}, busy: false, sizes: { smartTurn: 30 * 1024 * 1024, tone: null } }));
+        assert(sent.includes('about 30 MB'), 'consent uses the sizes the service sent');
         const busy = renderToStaticMarkup(React.createElement(ConsentScreen, { onAgree: () => {}, busy: true }));
         assert(busy.includes('Starting…') && busy.includes('disabled'), 'a busy consent screen must show progress and disable the agree button');
       } finally { await bundle.dispose(); }
@@ -565,15 +568,26 @@ export default [
         for (const fragment of ['role="progressbar"', 'aria-valuenow="50"', '50%', 'Downloading call files']) {
           assert(downloading.includes(fragment), `downloading screen is missing ${fragment}`);
         }
+        assert(!downloading.includes('verified'), 'the download screen says nothing about verifying files');
+        const unknown = renderToStaticMarkup(React.createElement(DownloadingScreen, { download: { receivedBytes: 0, totalBytes: 0 } }));
+        assert(unknown.includes('Starting the download') && !unknown.includes('0 MB of 0 MB'), 'an unknown total shows no byte counts');
         const precheck = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0.42, usageWarning: 'Use real examples only.', persona: PERSONA, setup: { step: 'plan', attempt: 2 } }));
-        assert(/data-status="done"[^>]*>(?:(?!<\/li>).)*Choosing the interviewer voices/.test(precheck), 'a finished setup step is marked done');
-        assert(/data-status="active" aria-current="step"[^>]*>(?:(?!<\/li>).)*Planning the interview…(?:(?!<\/li>).)*attempt 2/.test(precheck), 'the running step is marked active and says when the plan is being written again');
-        assert(/data-status="pending"[^>]*>(?:(?!<\/li>).)*Turning on your microphone/.test(precheck), 'a later setup step is still pending');
-        assert(precheck.includes('not on yet'), 'the meter says the microphone is not on while the plan is written');
+        assert(/data-status="active" aria-current="step"[^>]*>(?:(?!<\/li>).)*Preparing your interview/.test(precheck), 'the running stage is marked active');
+        assert(/data-status="pending"[^>]*>(?:(?!<\/li>).)*Setting up audio/.test(precheck), 'a later stage is still pending');
+        assert(!/attempt|voice account|interviewer voices|Warming up|shared screens|Bringing the interviewer/iu.test(precheck), 'the setup card shows no internal steps or retry counts');
+        assert(!precheck.includes('role="meter"'), 'no microphone meter before the microphone is on');
         assert(!/say something/i.test(precheck), 'the setup screen must not ask the candidate to speak: nothing waits on the microphone');
-        for (const fragment of ['aria-label="Setup progress"', 'type every answer', 'role="meter"', 'aria-valuenow="42"', 'Headphones recommended', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Microphone check"']) {
+        for (const fragment of ['aria-label="Setup progress"', 'type your answers', 'Use headphones', 'aria-label="Usage warning"', 'Use real examples only.', 'aria-label="Getting ready"']) {
           assert(precheck.includes(fragment), `precheck screen is missing ${fragment}`);
         }
+        const live = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0.05, persona: PERSONA, setup: { step: 'screens', attempt: 1 } }));
+        assert(/data-status="done"[^>]*>(?:(?!<\/li>).)*Setting up audio/.test(live), 'a finished stage is marked done');
+        assert(live.includes('role="meter"') && live.includes('aria-valuenow="50"') && live.includes('Hearing you'), 'once the microphone is on the meter shows speech on a perceptual scale');
+        const refused = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, persona: PERSONA, setup: { step: 'ready', attempt: 1 }, microphoneUnavailable: true, onOpenMicrophoneSettings: () => {} }));
+        assert(refused.includes('microphone isn’t available') && refused.includes('Open Microphone settings') && !refused.includes('role="meter"'), 'a refused microphone is said before the call rings');
+        const ready = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, persona: PERSONA, setup: { step: 'ready', attempt: 1 }, onCancel: () => {} }));
+        assert(ready.includes(`${PERSONA.name} will call a few seconds after you press I&#x27;m ready.`) && ready.includes('>I&#x27;m ready<'), 'the ready text names the button it means');
+        assert(!ready.includes('aria-label="Setup progress"') && ready.includes('>Cancel<'), 'ready: the finished list goes and the card can be left');
         const quiet = renderToStaticMarkup(React.createElement(PrecheckScreen, { level: 0, usageWarning: null, persona: PERSONA, setup: { step: 'plan', attempt: 1 } }));
         assert(!quiet.includes('aria-label="Usage warning"'), 'the setup screen shows no notice when there is no usage warning');
       } finally { await bundle.dispose(); }
@@ -1184,9 +1198,9 @@ export default [
             await push({ phase: 'downloading', modelDownload: { receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 } });
             assert(byLabel('Model download progress')?.getAttribute('aria-valuenow') === '25', 'downloading must follow the pushed progress');
             await push({ phase: 'precheck', level: 0, setup: { step: 'voices', attempt: 1 } });
-            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Choosing the interviewer voices'), 'precheck must show the setup step in progress');
-            await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'sessions', attempt: 1 } });
-            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Bringing the interviewer in'), 'precheck must follow the pushed setup step');
+            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Preparing your interview'), 'precheck must show the setup step in progress');
+            await push({ phase: 'precheck', level: 0.05, persona: PERSONA, setup: { step: 'sessions', attempt: 1 } });
+            assert(window.document.querySelector('[aria-current="step"]')?.textContent.includes('Final checks'), 'precheck must follow the pushed setup step');
             assert(byLabel('Microphone level')?.getAttribute('aria-valuenow') === '50', 'precheck must meter the live level');
             await push({ phase: 'precheck', level: 0.5, persona: PERSONA, setup: { step: 'ready', attempt: 1 } });
             assert(!window.document.querySelector('[aria-current="step"]'), 'ready: no step is still running');
@@ -2115,8 +2129,11 @@ export default [
         assert(callModel.formatBytes(100 * 1024 * 1024) === '100 MB', 'formatBytes rounds whole megabytes');
         assert(callModel.downloadPercent({ receivedBytes: 25 * 1024 * 1024, totalBytes: 100 * 1024 * 1024 }) === 25, 'downloadPercent reports the received fraction');
         assert(callModel.levelPercent(0.426) === 43, 'levelPercent rounds the meter level');
+        assert(callModel.meterPercent(0.2) === 100 && callModel.meterPercent(0.05) === 50 && callModel.meterPercent(0) === 0, 'meterPercent lifts ordinary speech');
+        assert(!callModel.microphoneOn({ step: 'audio' }) && callModel.microphoneOn({ step: 'screens' }) && callModel.microphoneOn({ step: 'ready' }), 'the microphone is on once its step is done');
         assert(callModel.humanizeKey('pauseCount') === 'pause count', 'humanizeKey splits camelCase keys');
-        assert(callModel.setupProgress({ step: 'voice' }).map(item => item.status).join(',') === 'done,done,done,active,pending,pending,pending', 'setupProgress marks the steps before the running one as done');
+        assert(callModel.setupProgress({ step: 'voice' }).map(item => item.status).join(',') === 'done,active,pending', 'setupProgress marks the stages before the running one as done');
+        assert(callModel.setupProgress({ step: 'ready' }).every(item => item.status === 'done'), 'ready: every stage is done');
         assert(callModel.setupProgress(null).every(item => item.status === 'pending'), 'setupProgress with no step leaves everything pending');
         assert(callModel.elapsedLabel(59999) === '59s' && callModel.elapsedLabel(65000) === '1m 05s', 'elapsedLabel counts seconds, then minutes');
         assert(JSON.stringify(callModel.mergeState({ phase: 'consent', level: 0 }, { phase: 'precheck' })) === JSON.stringify({ phase: 'precheck', level: 0 }), 'mergeState keeps the previous fields');

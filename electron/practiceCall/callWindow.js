@@ -93,6 +93,16 @@ export function createPracticeCallController(deps = {}) {
   });
   const send = (channel, payload) => { if (windowAlive()) { try { win.webContents.send(channel, payload); } catch { /* window is going away */ } } };
   service.onState?.(state => send(`${WINDOW_PREFIX}state`, state));
+  // The setup card tells the candidate they can step away while it runs, so when it finishes
+  // the window asks for attention (the Dock icon bounces on macOS) unless it is already in front.
+  let setupWasReady = false;
+  service.onState?.(state => {
+    const ready = state?.phase === 'precheck' && state?.setup?.step === 'ready' && !state.setup.calling;
+    if (ready && !setupWasReady && windowAlive()) {
+      try { if (!win.isFocused?.()) win.flashFrame?.(true); } catch { /* window is going away */ }
+    }
+    setupWasReady = ready;
+  });
   service.onEvent?.(event => send(`${WINDOW_PREFIX}event`, event));
   service.onReplayUpdated?.(replay => send(`${WINDOW_PREFIX}replay-updated`, replay));
 
@@ -131,7 +141,10 @@ export function createPracticeCallController(deps = {}) {
     });
     // The menu bar follows the call window: a short call menu while it is in front, the app's own menu otherwise.
     // Off unless the app passes callMenu in, so a unit suite never touches the real menu.
-    created.on?.('focus', () => { if (win === created && winMode === 'call') showCallMenu(true); });
+    created.on?.('focus', () => {
+      try { created.flashFrame?.(false); } catch { /* window is going away */ }
+      if (win === created && winMode === 'call') showCallMenu(true);
+    });
     created.on?.('blur', () => { if (win === created) showCallMenu(false); });
     created.on?.('closed', () => {
       if (win === created) showCallMenu(false);
