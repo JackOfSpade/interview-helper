@@ -37,6 +37,8 @@ export default function InterviewHelperApp() {
   useEffect(() => window.interviewAppAPI?.onOpenSettings?.(() => setSettingsOpen(true)), []);
   const stateRef = useRef(EMPTY_STATE);
   const writeQueue = useRef(Promise.resolve());
+  // True once the saved list has been read: until then the state is a placeholder that must never be written over it.
+  const loadedRef = useRef(false);
 
   // Bug reports include what happened in this window; see utils/eventLog.js.
   useEffect(() => installEventCapture(window), []);
@@ -49,6 +51,7 @@ export default function InterviewHelperApp() {
     api.loadState().then((loaded) => {
       if (disposed) return;
       stateRef.current = { ...EMPTY_STATE, ...loaded };
+      loadedRef.current = true;
       setState(stateRef.current);
       setStatus('ready');
     }).catch((error) => { if (!disposed) { setNotice(error?.message || 'Your saved interviews could not be read.'); setStatus('error'); } });
@@ -69,7 +72,7 @@ export default function InterviewHelperApp() {
 
   // Closing the window or quitting the app: the main process asks for the newest state and waits.
   // A field that saves when it loses focus is given the chance first, and the write skips the queue,
-  // which may still be waiting on an earlier one.
+  // which may still be waiting on an earlier one. Nothing is written before the saved list was read.
   useEffect(() => {
     const api = window.interviewAppAPI;
     if (typeof api?.onSaveStateNow !== 'function') return undefined;
@@ -77,7 +80,7 @@ export default function InterviewHelperApp() {
       try {
         window.document.activeElement?.blur?.();
         await new Promise(resolve => setTimeout(resolve, 0));
-        await api.saveState(stateRef.current);
+        if (loadedRef.current) await api.saveState(stateRef.current);
       } catch { /* the main process still writes what it already has */ }
       finally { api.stateSavedNow?.(); }
     });

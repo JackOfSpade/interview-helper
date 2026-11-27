@@ -463,6 +463,47 @@ const tests = [
       }
     },
   },
+  {
+    name: 'interview app: closing the window before the saved list is read never writes the empty placeholder over it',
+    async run() {
+      const { bundleComponent, withDom } = await import('./fixtures/practice-connector/mountComponent.js');
+      const entryDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-interview-app-entry-'));
+      const entry = path.join(entryDirectory, 'entry.mjs');
+      await fs.promises.writeFile(entry, `export { default as InterviewHelperApp } from ${JSON.stringify(path.resolve('src/interview-app/InterviewHelperApp.jsx'))};\n`);
+      let bundle = null;
+      try {
+        await withDom(async window => {
+          bundle = await bundleComponent(entry, {});
+          const saved = [];
+          let finishLoad;
+          let saveNow = null;
+          let answered = 0;
+          const first = { id: 'i1', title: '', createdAt: 1, data: emptyInterviewData() };
+          window.interviewAppAPI = {
+            loadState: () => new Promise(resolve => { finishLoad = () => resolve({ sessions: [first], selectedId: 'i1', appliedJobsFolder: null }); }),
+            saveState: async next => { saved.push(next); },
+            onSaveStateNow: handler => { saveNow = handler; return () => {}; },
+            stateSavedNow: () => { answered += 1; },
+          };
+          const root = bundle.module.createRoot(window.document.getElementById('root'));
+          const { act } = bundle.module;
+          try {
+            await act(async () => { root.render(bundle.module.React.createElement(bundle.module.InterviewHelperApp)); await new Promise(resolve => setTimeout(resolve, 20)); });
+            await act(async () => { await saveNow(); });
+            assert.equal(saved.length, 0, 'nothing is written while the saved list is still being read');
+            assert.equal(answered, 1, 'the main process is still told the window answered');
+            await act(async () => { finishLoad(); await new Promise(resolve => setTimeout(resolve, 20)); });
+            await act(async () => { await saveNow(); });
+            assert.equal(saved.length, 1, 'once loaded, a close writes the newest state');
+            assert.equal(saved[0].sessions.length, 1);
+          } finally { await act(async () => root.unmount()); }
+        });
+      } finally {
+        if (bundle) await bundle.dispose();
+        await fs.promises.rm(entryDirectory, { recursive: true, force: true });
+      }
+    },
+  },
 ];
 
 export default tests;

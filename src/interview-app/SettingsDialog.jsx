@@ -15,9 +15,9 @@ export function SettingsDialog({ onClose, onError }) {
     const api = window.interviewAppAPI;
     if (typeof api?.getPracticeVoice !== 'function') return undefined;
     let disposed = false;
-    api.getPracticeVoice().then(state => { if (!disposed) setVoice(state); }).catch(() => {});
+    api.getPracticeVoice().then(state => { if (!disposed) setVoice(state); }).catch(() => { if (!disposed) onError?.('Your voice setting could not be read.'); });
     return () => { disposed = true; };
-  }, []);
+  }, [onError]);
   useEffect(() => {
     const onKey = (event) => { if (event.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
