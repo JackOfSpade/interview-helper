@@ -721,3 +721,19 @@ test('buildMergedResearchText labels set B for Parallel, and Tavily by default',
   assert.throws(() => buildMergedResearchText({ second: 'google' }),
     error => error instanceof TypeError && error.message === 'MERGED_RESEARCH_NEEDS_SECOND');
 });
+
+test('a live run into an output directory that already holds transcripts is refused before any file guard is installed', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-live-guard-'));
+  try {
+    const [userData, bundle, out] = ['user-data', 'bundle', 'out'].map(name => path.join(root, name));
+    for (const directory of [userData, bundle, out]) fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(out, '001.response.txt'), 'earlier run');
+    const before = fs.writeFileSync;
+    const args = parseHarnessArgs(['--user-data', userData, '--snapshot-id', SNAPSHOT_ID, '--job-url', 'https://example.com/jobs/1',
+      '--bundle-dir', bundle, '--out', out]);
+    await assert.rejects(runHarness(args), error => error?.code === 'LIVE_OUTPUT_HAS_TRANSCRIPTS');
+    assert.equal(fs.writeFileSync, before, 'the write guard must not stay installed after the refusal');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

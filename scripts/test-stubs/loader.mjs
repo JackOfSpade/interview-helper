@@ -1,6 +1,6 @@
 // Node module-resolution hook: redirects bare 'electron' and 'electron-store'
 // imports to the stubs in this directory. Registered via register.mjs, which
-// is loaded with `node --import` before scripts/test-runner.js runs.
+// is loaded with `node --import` before scripts/run-tests.mjs runs.
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 

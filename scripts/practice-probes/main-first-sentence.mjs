@@ -10,8 +10,8 @@
 // sentence splitting (createReplyStreamParser), the one the engine feeds to the voice. The interviewer's own previous
 // reply (not the saved one) is what "[You last said ...]" carries, so the session stays self-consistent.
 import fs from 'node:fs/promises';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isMainModule } from '../lib/entrypoint.mjs';
 import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
 import { buildInterviewerInstructions, formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 import { connectedMarker } from '../../electron/interviewPracticeCallEngine.js';
@@ -96,4 +96,4 @@ async function main() {
   if (values.json) await fs.writeFile(values.json, JSON.stringify(rows, null, 2));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error?.message ?? error); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch(error => { console.error(error?.message ?? error); process.exit(1); });

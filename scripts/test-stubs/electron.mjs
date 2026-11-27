@@ -1,13 +1,12 @@
 // Minimal stand-in for the `electron` package, used only when running
-// scripts/test-runner.js under plain Node (never inside a real Electron
+// scripts/run-tests.mjs under plain Node (never inside a real Electron
 // process — the test runner is always invoked via `node`, not `electron`).
 //
 // Without this, importing `electron` in an environment where the Electron
 // binary hasn't been downloaded (e.g. a network-restricted sandbox) throws
 // synchronously at require-time, which cascades into every file that
 // transitively imports electron/logger.js — including otherwise pure-logic
-// modules the test runner exercises. See docs/code-quality-audit note in the
-// PR description for the full trace. This stub is wired in via
+// modules the test runner exercises. This stub is wired in via
 // scripts/test-stubs/register.mjs (a Node loader hook), not by editing
 // application source.
 import fs from 'node:fs';

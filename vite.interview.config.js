@@ -43,8 +43,8 @@ export default defineConfig({
         // `npm run dev:interview` starts this app's main file, not package.json's.
         onstart(options) { options.startup([`${ELECTRON_OUT_DIR}/main.cjs`, '--no-sandbox']) },
         vite: {
-          // Same reasons as the Infinite Canvas main bundle (see vite.config.js):
-          // CommonJS output with a .cjs name, and no import.meta in a CJS bundle.
+          // The main bundle is CommonJS with a .cjs name (package.json is "type": "module"),
+          // and a CJS bundle cannot contain import.meta, so it is defined away.
           define: { 'import.meta': '{}' },
           build: {
             outDir: ELECTRON_OUT_DIR,

@@ -2,7 +2,6 @@
 // it makes real Claude CLI calls (sequentially, no retries, no substitution). Tests inject stub sessions.
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { assertInterviewerConfig, createInterviewerSession } from '../electron/interviewPracticeTransport.js';
 import { buildInterviewerInstructions } from '../electron/interviewPracticeCallPrompt.js';
@@ -10,6 +9,8 @@ import {
   CLASSIFIER_CASES, CLASSIFIER_INSTRUCTIONS, SCENARIOS, SYNTHETIC_BRIEF, SYNTHETIC_PLAN, classifierMessage,
 } from './fixtures/interview-practice-scenarios.mjs';
 import { isPathInside, resolveThroughExistingParent } from './lib/outside-repo.mjs';
+import { mulberry32 } from './lib/prng.mjs';
+import { isMainModule } from './lib/entrypoint.mjs';
 
 const USAGE = `Usage: node scripts/interview-practice-benchmark.mjs --out <private dir outside the repo>
   [--models opus,sonnet,haiku] [--efforts low,medium,high] [--ultracode on,off]
@@ -183,16 +184,6 @@ function seedFrom(text) {
   let hash = 2166136261;
   for (const char of text) { hash ^= char.codePointAt(0); hash = Math.imul(hash, 16777619) >>> 0; }
   return hash >>> 0;
-}
-function mulberry32(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6D2B79F5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 /** Deterministic Fisher-Yates over sorted ids, seeded by the scenario name. */
 export function shuffleForScenario(ids, scenarioName) {
@@ -425,6 +416,6 @@ export async function main(argv = process.argv.slice(2)) {
   console.log(`Reports, transcripts and judge packets: ${outDir}`);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }

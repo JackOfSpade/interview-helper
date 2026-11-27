@@ -17,14 +17,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { wavHeader } from '../../electron/practiceCall/audio/wavFormat.js';
+import { resamplePcm16 } from '../lib/pcm.mjs';
 
 const [repo, outDir, steering = ''] = process.argv.slice(2);
+if (!repo || !outDir) {
+  console.error('usage: node --import ./scripts/test-stubs/register.mjs scripts/practice-probes/live-call.mjs "$PWD" <outDir> ["steering text"]');
+  process.exit(2);
+}
 const userData = path.join(os.homedir(), 'Library/Application Support/Interview Helper/interview-data');
 fs.mkdirSync(path.join(outDir, 'inbox'), { recursive: true });
 const logPath = path.join(outDir, 'log.jsonl');
 const talkPath = path.join(outDir, 'transcript.txt');
 const t00 = performance.now();
 const log = (kind, data = {}) => fs.appendFileSync(logPath, `${JSON.stringify({ t: +((performance.now() - t00) / 1000).toFixed(2), kind, ...data })}\n`);
+const stamp = () => ((performance.now() - t00) / 1000).toFixed(1);
 const say = line => fs.appendFileSync(talkPath, `${line}\n`);
 
 // What the candidate would hear: every interviewer PCM chunk placed on the call clock where the player
@@ -35,13 +41,7 @@ const say = line => fs.appendFileSync(talkPath, `${line}\n`);
 const EAR_RATE = 24000;
 const ear = { chunks: [], sends: [] };
 function earPlace(u, pcm, nowMs) {
-  const input = new Int16Array(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.length - (pcm.length % 2)));
-  const ratio = u.rate / EAR_RATE;
-  const out = new Int16Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < out.length; i += 1) {
-    const x = i * ratio; const a = Math.floor(x); const b = Math.min(input.length - 1, a + 1);
-    out[i] = Math.round(input[a] + (input[b] - input[a]) * (x - a));
-  }
+  const out = resamplePcm16(pcm, u.rate, EAR_RATE);
   const startMs = Math.max(u.earHead ?? 0, nowMs);
   u.earHead = startMs + (out.length / EAR_RATE) * 1000;
   ear.chunks.push({ startMs, samples: out });
@@ -215,19 +215,19 @@ service.onEvent(event => {
   log('event', event);
   // The helper-timeline time sits beside the wall time so a control can be lined up with the recording.
   if (['screen', 'screen-stop', 'pad', 'participant-joined'].includes(event?.type)) log('timeline', { type: event.type, id: event.id ?? event.speakerId, helperAtMs: event.atMs ?? null });
-  if (event?.type === 'screen') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === SCREEN by ${event.speakerId}: ${event.title} ===\n${event.content}\n   ===`);
-  if (event?.type === 'screen-stop') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === screen stopped ===`);
-  if (event?.type === 'overlay') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   >>> SPOKEN OVER by ${event.speakerId}: ${event.text}`);
-  if (event?.type === 'ended') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === call ended: ${event.reason}${event.cause ? ` (${event.cause})` : ''} ===`);
-  if (event?.type === 'pad') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === pad ${event.open ? `opened (${event.lang})` : 'closed'} ===`);
+  if (event?.type === 'screen') say(`[${stamp()}s]   === SCREEN by ${event.speakerId}: ${event.title} ===\n${event.content}\n   ===`);
+  if (event?.type === 'screen-stop') say(`[${stamp()}s]   === screen stopped ===`);
+  if (event?.type === 'overlay') say(`[${stamp()}s]   >>> SPOKEN OVER by ${event.speakerId}: ${event.text}`);
+  if (event?.type === 'ended') say(`[${stamp()}s]   === call ended: ${event.reason}${event.cause ? ` (${event.cause})` : ''} ===`);
+  if (event?.type === 'pad') say(`[${stamp()}s]   === pad ${event.open ? `opened (${event.lang})` : 'closed'} ===`);
   if (event?.kind === 'caption' && event.final) {
     // On a panel call the line is labelled with the interviewer who spoke last in it.
     const who = (service.getState().participants || []).find(item => item.id === event.speakerId);
-    say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] ${event.speaker === 'candidate' ? 'CANDIDATE' : `INTERVIEWER${who ? ` (${who.name})` : ''}`}: ${event.text}`);
+    say(`[${stamp()}s] ${event.speaker === 'candidate' ? 'CANDIDATE' : `INTERVIEWER${who ? ` (${who.name})` : ''}`}: ${event.text}`);
   }
-  if (event?.kind === 'speaker') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   (now speaking: ${event.speakerId})`);
-  if (event?.kind === 'participant-joined') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   *** ${event.name} joined the call ***`);
-  if (event?.kind === 'chat') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CHAT ${event.from || 'interviewer'}: ${event.text}`);
+  if (event?.kind === 'speaker') say(`[${stamp()}s]   (now speaking: ${event.speakerId})`);
+  if (event?.kind === 'participant-joined') say(`[${stamp()}s]   *** ${event.name} joined the call ***`);
+  if (event?.kind === 'chat') say(`[${stamp()}s] CHAT ${event.from || 'interviewer'}: ${event.text}`);
 });
 
 async function finish() {
@@ -245,6 +245,7 @@ async function finish() {
 }
 
 const seen = new Set();
+let typingBeat = null;
 setInterval(async () => {
   const files = fs.readdirSync(path.join(outDir, 'inbox')).filter(name => name.endsWith('.txt')).sort();
   for (const name of files) {
@@ -252,11 +253,11 @@ setInterval(async () => {
     seen.add(name);
     const text = fs.readFileSync(path.join(outDir, 'inbox', name), 'utf8').trim();
     try {
-      if (text === '#hangup') { log('cmd', { text }); await service.hangUp({ feedback: true }); }
-      else if (text === '#hangup-nofeedback') { log('cmd', { text }); await service.hangUp({ feedback: false }); }
-      else if (text.startsWith('#pad\n')) { log('cmd', { text: '#pad', chars: text.length - 5 }); say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CANDIDATE (pad): ${text.slice(5).replace(/\n/g, ' / ')}`); service.updatePad(text.slice(5)); }
-      else if (text === '#typing') { log('cmd', { text }); service.setTyping(true); clearInterval(globalThis.typingBeat); globalThis.typingBeat = setInterval(() => service.setTyping(true), 3000); }
-      else { say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] CANDIDATE (chat): ${text}`); log('send', { name, chars: text.length }); ear.sends.push({ atMs: performance.now() - t00, text }); clearInterval(globalThis.typingBeat); service.setTyping(false); service.sendChat(text); }
+      if (text === '#hangup') { log('cmd', { text }); clearInterval(typingBeat); await service.hangUp({ feedback: true }); }
+      else if (text === '#hangup-nofeedback') { log('cmd', { text }); clearInterval(typingBeat); await service.hangUp({ feedback: false }); }
+      else if (text.startsWith('#pad\n')) { log('cmd', { text: '#pad', chars: text.length - 5 }); say(`[${stamp()}s] CANDIDATE (pad): ${text.slice(5).replace(/\n/g, ' / ')}`); service.updatePad(text.slice(5)); }
+      else if (text === '#typing') { log('cmd', { text }); service.setTyping(true); clearInterval(typingBeat); typingBeat = setInterval(() => service.setTyping(true), 3000); }
+      else { say(`[${stamp()}s] CANDIDATE (chat): ${text}`); log('send', { name, chars: text.length }); ear.sends.push({ atMs: performance.now() - t00, text }); clearInterval(typingBeat); service.setTyping(false); service.sendChat(text); }
     } catch (error) { log('inbox-error', { name, message: String(error?.message || error) }); }
   }
 }, 300);
@@ -269,5 +270,10 @@ const args = {
   bundleArtifactDigest: d.interviewHelperApplicationBundle?.digest, ...(steering ? { steering } : {}),
 };
 log('start');
-const started = await service.start(args);
-log('start-returned', { phase: started.phase, error: started.error });
+try {
+  const started = await service.start(args);
+  log('start-returned', { phase: started.phase, error: started.error });
+} catch (error) {
+  log('start-failed', { message: String(error?.stack || error) });
+  process.exit(1);
+}

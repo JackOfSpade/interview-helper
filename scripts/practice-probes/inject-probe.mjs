@@ -5,11 +5,12 @@
 // Nothing is logged except counts, timings and the words of the synthetic test sentence (no real audio).
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const helperPath = process.argv[2];
 const outIdx = process.argv.indexOf('--out');
-const OUT = outIdx > 0 ? process.argv[outIdx + 1] : '/private/tmp/claude-501/inject-probe';
+const OUT = outIdx > 0 ? process.argv[outIdx + 1] : path.join(os.tmpdir(), 'inject-probe');
 if (!helperPath) { console.error('usage: inject-probe.mjs <helper> [--out DIR]'); process.exit(2); }
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -33,6 +34,7 @@ function readWav(file) {
     if (id === 'data') { if (p + 8 + size > b.length) size = b.length - p - 8; data = b.subarray(p + 8, p + 8 + size); break; }
     p += 8 + size + (size & 1);
   }
+  if (!data) throw new Error(`no data chunk in ${file}`);
   const n = data.length >> 1, s = new Float32Array(n);
   for (let i = 0; i < n; i++) s[i] = data.readInt16LE(i * 2) / 32768;
   return { rate, samples: s, pcm: Buffer.from(data) };
@@ -52,7 +54,7 @@ const rmsRange = (w, a, b) => { const s = Math.floor(a * w.rate / 1000), e = Mat
 const peak = (w) => { let m = 0; for (const v of w.samples) m = Math.max(m, Math.abs(v)); return m; };
 
 async function run(name, { cancelAfterMs, play }) {
-  const rec = path.join(OUT, `${name}.wav`.replace('.wav', '-rec.wav'));
+  const rec = path.join(OUT, `${name}-rec.wav`);
   try { fs.unlinkSync(rec); } catch { /* no recording left from an earlier run */ }
   const ev = [], t0 = Date.now(); let stderr = '';
   const child = spawn(helperPath, ['--parent-pid', String(process.pid), '--locale', 'en-US', '--recording', rec], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -66,7 +68,10 @@ async function run(name, { cancelAfterMs, play }) {
 
   await waitFor(() => ev.some((e) => e.type === 'status' && e.state === 'ready') || ev.some((e) => e.type === 'error') || exit, 30000);
   const readyEv = ev.find((e) => e.type === 'status' && e.state === 'ready');
-  if (!readyEv) return { name, failed: 'no ready', ev, stderr, exit };
+  if (!readyEv) {
+    if (!exit) child.kill('SIGKILL'); // never leave a helper that did not become ready running
+    return { name, failed: 'no ready', ev, stderr, exit };
+  }
   await sleep(1000); // let the noise floor settle
   const A = A_WAV;
   send({ type: 'inject', utteranceId: 'line1', sampleRate: 24000 });
