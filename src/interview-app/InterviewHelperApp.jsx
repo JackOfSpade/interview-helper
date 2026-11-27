@@ -170,7 +170,7 @@ export default function InterviewHelperApp() {
       </div>
     </aside>
     <main className="flex min-w-0 flex-1 flex-col">
-      {(notice) && <p role="status" className="flex items-start gap-2 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-100"><span className="flex-1">{notice}</span><button type="button" className="underline" onClick={() => setNotice(null)}>Dismiss</button></p>}
+      {notice && <p role="status" className="flex items-start gap-2 border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-100"><span className="flex-1">{notice}</span><button type="button" className="underline" onClick={() => setNotice(null)}>Dismiss</button></p>}
       <div className="space-y-2 px-4 pt-3 empty:hidden"><ClaudePauseNotice /><JobRunStatusSection /></div>
       <div className="min-h-0 flex-1 overflow-y-auto lg:overflow-hidden">
         {state.sessions.map(session => <InterviewHost key={session.id} session={session} visible={session.id === selectedId} commit={commit} appliedJobsFolder={state.appliedJobsFolder} onChooseAppliedJobsFolder={chooseFolder} />)}

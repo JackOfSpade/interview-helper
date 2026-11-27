@@ -74,7 +74,7 @@ export function runStatusTimeLines(entry, now = Date.now()) {
 }
 
 /** Whose Pause & save covers this module: a Board running it, otherwise the module itself. */
-export function pauseOwnerStatus(nodeId, statuses = snapshot) {
+function pauseOwnerStatus(nodeId, statuses = snapshot) {
   const key = `node:${nodeId}`;
   return statuses.find(entry => entry.nodeId !== nodeId && pausable(entry) && entry.pauseKeys.includes(key))
     || statuses.find(entry => entry.nodeId === nodeId)
@@ -123,55 +123,7 @@ export function showsOwnPauseButton(entry, handoffNodeId = null, statuses = snap
   return !handoffNodeId || pauseOwnerStatus(handoffNodeId, statuses)?.nodeId !== entry.nodeId;
 }
 
-/**
- * Does this running module belong to the handoff owned by `handoffNodeId`?
- * A module belongs to its own node, and a Board also owns every search it is
- * running for itself — those searches are listed by `node:<searchId>` in the
- * Board's pauseKeys, the same keys Pause & save travels along.
- */
-export function runStatusBelongsToHandoff(entry, handoffNodeId) {
-  if (typeof handoffNodeId !== 'string' || !handoffNodeId) return false;
-  if (entry?.nodeId === handoffNodeId) return true;
-  if (Array.isArray(entry?.relatedNodeIds) && entry.relatedNodeIds.includes(handoffNodeId)) return true;
-  return Array.isArray(entry?.pauseKeys) && entry.pauseKeys.includes(`node:${handoffNodeId}`);
-}
-
-/**
- * Split the store into one list per pending handoff plus the runs no handoff
- * owns. Store order is kept, a run related to several handoffs appears under
- * each of them, and empty or repeated handoff ids are tolerated — several
- * queued prompts can share one hub.
- */
-export function partitionRunStatusesForHandoffs(statuses, handoffNodeIds) {
-  const ids = [];
-  const seen = new Set();
-  for (const value of handoffNodeIds || []) {
-    if (typeof value !== 'string' || !value || seen.has(value)) continue;
-    seen.add(value);
-    ids.push(value);
-  }
-  const byHandoff = new Map(ids.map(id => [id, []]));
-  const unrelated = [];
-  for (const entry of statuses || []) {
-    let related = false;
-    for (const id of ids) {
-      if (!runStatusBelongsToHandoff(entry, id)) continue;
-      byHandoff.get(id).push(entry);
-      related = true;
-    }
-    if (!related) unrelated.push(entry);
-  }
-  return { byHandoff, unrelated };
-}
-
 export function subscribeJobRunStatuses(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
-}
-
-// Test seam: the store is module-level.
-export function __resetJobRunStatusForTests() {
-  entries.clear();
-  listeners.clear();
-  snapshot = Object.freeze([]);
 }

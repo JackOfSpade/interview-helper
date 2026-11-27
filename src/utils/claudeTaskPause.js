@@ -51,7 +51,7 @@ const LIMIT_HEADLINES = Object.freeze({
 });
 
 /** Pure: 'pro' -> 'Pro', 'max' -> 'Max'; null when Claude did not say. */
-export function claudePlanLabel(subscriptionType) {
+function claudePlanLabel(subscriptionType) {
   if (typeof subscriptionType !== 'string' || !subscriptionType) return null;
   return subscriptionType.slice(0, 40).charAt(0).toUpperCase() + subscriptionType.slice(0, 40).slice(1);
 }
