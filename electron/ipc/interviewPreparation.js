@@ -1592,10 +1592,10 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     } finally {
       // A newer run for the same key owns the activity entry now; only the
       // current run may clear it, or it would wipe the newer run's status.
-      if (typedJobRuns.get(typedRunKey) === cancel) {
-        typedJobRuns.delete(typedRunKey);
-        standaloneClaudeActivity.remove(typedActivityKey);
-      }
+      const current = typedJobRuns.get(typedRunKey);
+      if (current === cancel) typedJobRuns.delete(typedRunKey);
+      // No newer run left means no one else will clear a late status this run set.
+      if (!current || current === cancel) standaloneClaudeActivity.remove(typedActivityKey);
     }
   }, { validateArgs: validateTypedJobArgs });
   // Cancel one typed-job run. A run that already ended is simply not there.
