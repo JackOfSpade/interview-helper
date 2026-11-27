@@ -82,7 +82,7 @@ function snapshotOf(doc) {
  * The calibration file contains only known board/rule ids, versions, counters
  * and timestamps. No page text, job identity, URL or title is persisted.
  */
-export function createListingLivenessCalibrationStore(root) {
+function createListingLivenessCalibrationStore(root) {
   if (typeof root !== 'string' || !root.trim()) throw new TypeError('Calibration root is required');
   const file = root.endsWith('.json') ? root : path.join(root, FILE_NAME);
   const lock = createFifoLock({ name: 'listingLivenessCalibration' });
@@ -174,18 +174,7 @@ export function createListingLivenessCalibrationStore(root) {
 }
 
 let productionStore = null;
-export function __setListingLivenessCalibrationStoreForTests(store) {
-  if (!store || typeof store.snapshot !== 'function') throw new TypeError('A calibration store is required');
-  const previous = productionStore;
-  productionStore = store;
-  let restored = false;
-  return () => {
-    if (restored) return;
-    productionStore = previous;
-    restored = true;
-  };
-}
-export function getListingLivenessCalibrationStore() {
+function getListingLivenessCalibrationStore() {
   if (!productionStore) productionStore = createListingLivenessCalibrationStore(electronPkg.app.getPath('userData'));
   return productionStore;
 }

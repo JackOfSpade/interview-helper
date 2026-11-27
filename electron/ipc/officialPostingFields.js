@@ -2,21 +2,15 @@
 // the same field list. Scraped identity fields remain separate from these.
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, officialPostingNegativeNeedsRecheck } from './officialPostingNegativePolicy.js';
 export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
-export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
-// Generation receipts cover the final queue boundary; search/cache retention
-// is separate and never extends this short-lived source check.
-export const OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS = 5 * 60 * 1_000;
-export const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
+const OFFICIAL_POSTING_LEVELS = Object.freeze(['L1', 'L2', 'L3', 'L4', 'L5', 'L6']);
 // Levels whose source is the employer's own page, and the subset whose full text is stored.
-export const OFFICIAL_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
-export const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
-export const CLOSED_POSTING_TEXT = /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu;
-export const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
+const OFFICIAL_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
+const OFFICIAL_POSTING_OUTCOMES = Object.freeze(['found', 'link-only', 'not-found', 'ambiguous', 'unreadable', 'closed', 'failed']);
 export const OFFICIAL_FETCH_FAILURE_REASONS = Object.freeze(['access-denied', 'rate-limited', 'server-error', 'network-error', 'dns-error']);
 const FETCH_FAILURE_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']);
-export const OFFICIAL_FETCH_FAILURE_LIMIT = 8;
-export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
-export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
+const OFFICIAL_FETCH_FAILURE_LIMIT = 8;
+const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
+const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
   'comparative-match', 'comparative-equivalent', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
 ]);
 // The second attempt reached the same doubt, so nothing more will come from retrying.
@@ -24,7 +18,7 @@ export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
 // page markup. It stays a known code but means nothing, so those cards get one more try.
 const OFFICIAL_POSTING_EXHAUSTED_TRAIL = 'lookup-exhausted';
 const RETIRED_RETRY_PAUSED_TRAIL = 'retry-paused';
-export const OFFICIAL_POSTING_TRAIL = Object.freeze([
+const OFFICIAL_POSTING_TRAIL = Object.freeze([
   OFFICIAL_POSTING_EXHAUSTED_TRAIL, RETIRED_RETRY_PAUSED_TRAIL, 'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
   'worker-research', 'worker-timeout', 'worker-unavailable', 'worker-aborted', 'research-miss',
@@ -39,32 +33,6 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
     .map(choice => `comparative-${run}-${choice}`)),
 ]);
 
-/** Bounded decisions only: no quotes, reasons, prompts or conversation ids. */
-export function officialPostingComparativeTrail({ validA = false, validB = false, choiceA, choiceB } = {}) {
-  const choiceCode = value => ['none', 'uncertain'].includes(value) || /^P[1-8]$/u.test(String(value || '')) ? String(value).toLowerCase() : '';
-  const a = choiceCode(choiceA); const b = choiceCode(choiceB);
-  return [`comparative-a-${validA === true ? 'valid' : 'invalid'}`, `comparative-b-${validB === true ? 'valid' : 'invalid'}`,
-    ...(a ? [`comparative-a-${a}`] : []), ...(b ? [`comparative-b-${b}`] : []),
-    ...(validA === true && validB === true && a && a === b ? [`comparative-choice-${a}`] : [])];
-}
-
-const DURABILITY_TRAIL_CODES = new Set([OFFICIAL_POSTING_EXHAUSTED_TRAIL, RETIRED_RETRY_PAUSED_TRAIL, 'worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
-  'source-unproven',
-  ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor', 'reverify-failed',
-  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
-/** Host trail compaction must retain the evidence that prevents persistence. */
-export function boundedOfficialPostingTrail(values) {
-  const codes = [...new Set((Array.isArray(values) ? values : []).filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
-  if (codes.length <= 32) return codes;
-  // A judge fact split decides which facts a frozen application may take from the record, so it is kept like proof.
-  const durableProof = code => ['semantic-match-v1', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'judge-location-split', 'judge-salary-split'].includes(code);
-  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code) || durableProof(code));
-  const comparison = codes.filter(code => code.startsWith('comparative-') && !DURABILITY_TRAIL_CODES.has(code));
-  const required = [...durability, ...comparison].slice(0, 32);
-  const room = 32 - required.length;
-  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && !durableProof(code) && !code.startsWith('comparative-'));
-  return [...required, ...(room ? others.slice(-room) : [])];
-}
 export const OFFICIAL_POSTING_LABELS = Object.freeze({
   L1: 'Official careers site', L2: 'ATS linked from careers page', L3: "Employer's ATS",
   L4: 'Official link, listing text', L5: 'Original listing', L6: 'Original listing (employer unknown)',
@@ -101,27 +69,13 @@ function shortString(value, max = 500) {
     && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 }
 /** Diagnostic metadata only: never retain response bodies or raw error messages. */
-export function normalizeOfficialPostingFetchFailure(value) {
+function normalizeOfficialPostingFetchFailure(value) {
   if (!onlyKnownKeys(value, ['url', 'code', 'reason', 'statusCode']) || !FETCH_FAILURE_CODES.includes(value.code)) return null;
   const url = officialHttpsUrl(value.url);
   if (!url || (value.reason !== undefined && (value.code !== 'fetch-failed' || !OFFICIAL_FETCH_FAILURE_REASONS.includes(value.reason)))
     || (value.statusCode !== undefined && (!Number.isInteger(value.statusCode) || value.statusCode < 100 || value.statusCode > 599))) return null;
   return { url, code: value.code, ...(value.reason ? { reason: value.reason } : {}),
     ...(value.statusCode !== undefined ? { statusCode: value.statusCode } : {}) };
-}
-export function officialPostingFetchFailure(error, requestedUrl) {
-  const code = error?.code;
-  const statusCode = error?.statusCode;
-  const reason = code !== 'fetch-failed' ? undefined
-    : [401, 403].includes(statusCode) ? 'access-denied' : statusCode === 429 ? 'rate-limited'
-      : statusCode >= 500 && statusCode <= 599 ? 'server-error'
-        : OFFICIAL_FETCH_FAILURE_REASONS.includes(error?.reason) ? error.reason : undefined;
-  return normalizeOfficialPostingFetchFailure({ url: officialHttpsUrl(error?.url) || requestedUrl, code,
-    ...(reason ? { reason } : {}), ...(Number.isInteger(statusCode) ? { statusCode } : {}) });
-}
-/** Bounded source text only; semantic employer identity belongs to AI. */
-export function officialPostingEmployerText(value) {
-  return shortString(value, 120) ? value.trim() : '';
 }
 function normalizeOfficialSalary(value) {
   if (!onlyKnownKeys(value, ['text', 'provenance']) || !shortString(value.text, 500) || !SALARY_PROVENANCES.includes(value.provenance)) return null;
@@ -208,50 +162,20 @@ export function normalizeOfficialPosting(value) {
   return result;
 }
 
-// A job board's detail page said the listing is gone. That is evidence about the
-// board, never the final word: the employer's own posting may still be live, so
-// the row travels to the official-posting resolver carrying this bounded marker.
-export const BOARD_CLOSED_REASONS = Object.freeze([
-  'detail-page-not-found', 'ziprecruiter-closed-job-redirect',
-  'indeed-page-unavailable', 'indeed-job-unavailable', 'linkedin-no-longer-accepting',
-  'http-not-found', 'ai-confirmed-closed', 'workday-posting-unavailable',
-]);
 const BOARD_LABELS = Object.freeze({
   linkedin: 'LinkedIn', indeed: 'Indeed', ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor', dice: 'Dice',
   google: 'Google', remoteok: 'RemoteOK', weworkremotely: 'WWRemotely',
 });
-export const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
-/** Bounded board links only; scraped identity and page evidence are separate. */
-export function normalizeAlternateListings(value) {
-  const links = []; const seen = new Set();
-  for (const item of Array.isArray(value) ? value : []) {
-    if (!onlyKnownKeys(item, ['board', 'url']) || !['board', 'url'].every(key => Object.hasOwn(item, key))
-      || typeof item.board !== 'string' || !BOARD_ID_RE.test(item.board)) continue;
-    const url = officialHttpsUrl(item.url);
-    if (!url || seen.has(url)) continue;
-    seen.add(url); links.push({ board: item.board, url });
-    if (links.length === 3) break;
-  }
-  return links;
-}
+const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 export function boardClosedBoardLabel(board) {
   if (typeof board !== 'string' || !BOARD_ID_RE.test(board)) return '';
   return BOARD_LABELS[board] || board.charAt(0).toUpperCase() + board.slice(1);
-}
-/** Exact keys, a source id, an enumerated reason and a real instant. Anything else is not a board-closed row. */
-export function normalizeBoardClosed(value) {
-  if (!onlyKnownKeys(value, ['board', 'reason', 'at']) || !['board', 'reason', 'at'].every(key => Object.hasOwn(value, key))) return null;
-  if (typeof value.board !== 'string' || !BOARD_ID_RE.test(value.board) || !BOARD_CLOSED_REASONS.includes(value.reason)) return null;
-  if (!shortString(value.at, 40)) return null;
-  const instant = Date.parse(value.at);
-  if (!Number.isFinite(instant)) return null;
-  return { board: value.board, reason: value.reason, at: new Date(instant).toISOString() };
 }
 
 const LISTING_LIVENESS_VERDICTS = Object.freeze(['open', 'closed', 'pending', 'unclear']);
 const LISTING_LIVENESS_BASES = Object.freeze(['open-marker', 'structural', 'ai', 'closed-marker', 'neither', 'both']);
 /** A bounded observation, never a copy of page text or a URL. */
-export function normalizeListingLiveness(value) {
+function normalizeListingLiveness(value) {
   if (!onlyKnownKeys(value, ['verdict', 'basis', 'board', 'at'])
     || !['verdict', 'basis', 'board', 'at'].every(key => Object.hasOwn(value, key))) return null;
   if (!LISTING_LIVENESS_VERDICTS.includes(value.verdict) || !LISTING_LIVENESS_BASES.includes(value.basis)
@@ -261,29 +185,14 @@ export function normalizeListingLiveness(value) {
   return { verdict: value.verdict, basis: value.basis, board: value.board, at: new Date(instant).toISOString() };
 }
 
-/** Stable source-copy preference; legacy boardClosed alone is still unconfirmed. */
-export function listingStateRank(job) {
-  const state = normalizeListingLiveness(job?.listingLiveness);
-  if (state?.verdict === 'closed') return 4;
-  if (state?.verdict === 'open' && !normalizeBoardClosed(job?.boardClosed)) return 1;
-  if (state?.verdict === 'pending' && ['closed-marker', 'both'].includes(state.basis)) return 3;
-  if (!state && normalizeBoardClosed(job?.boardClosed)) return 3;
-  return 2;
-}
-
-/** A card's own addresses earlier judges cited: on an unsettled card nothing else remembers them, since such a result is not stored. Leads only. */
-export function officialPostingCitedLeadUrls(posting) {
-  return (posting?.alternatives || []).filter(item => item?.title?.startsWith('Unconfirmed · cited')).map(item => item.url).slice(0, 3);
-}
-
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
-export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
+const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'judge-title-split', 'judge-employer-split', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
-export function officialResearchSettled(value) {
+function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;
   if (!posting || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
   if (officialPostingNegativeNeedsRecheck(posting)) return false;
@@ -377,26 +286,19 @@ function officialPostingResearchInconclusive(value) {
 
 /** Two attempts ended without a conclusion: a settled end state, not unfinished
  * work. Only a person's explicit recheck runs it again. */
-export function officialPostingExhausted(value) {
+function officialPostingExhausted(value) {
   const posting = normalizeOfficialPosting(value);
   return Boolean(posting?.trail?.includes(OFFICIAL_POSTING_EXHAUSTED_TRAIL)) && officialPostingResearchInconclusive(posting);
 }
 
-/** The marker never reaches the shared store: it describes one card's own attempts. */
-export function officialPostingAfterRepeatAttempt(previous, next) {
-  const posting = normalizeOfficialPosting(next);
-  if (!posting || !officialPostingResearchInconclusive(previous) || !officialPostingResearchInconclusive(posting)) return next;
-  return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), OFFICIAL_POSTING_EXHAUSTED_TRAIL]) };
-}
-
 /** Judged on the page as a person sees it. An older closure may rest on a download that could not see the page, so it is rechecked. */
-export function officialPostingClosureReadFullPage(posting) {
+function officialPostingClosureReadFullPage(posting) {
   return (posting?.trail || []).includes('closure-page-read');
 }
 
 /** A confirmed official posting says this job is closed: the source of truth. A third party's closed verdict never counts,
  * and neither does a lookup below official level or one from before the current checks. */
-export function officialPostingStatesClosed(value) {
+function officialPostingStatesClosed(value) {
   const posting = normalizeOfficialPosting(value);
   return Boolean(posting) && OFFICIAL_LEVELS.has(posting.level) && Boolean(posting.sourceUrl)
     && (posting.trail || []).includes('semantic-match-v1') && officialPostingClosureReadFullPage(posting)
