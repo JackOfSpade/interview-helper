@@ -38,6 +38,16 @@ function removeStructuralTrailingCommas(value) {
   return result;
 }
 
+// The text from the first of `opens` to the last of `closes`, or null when there is no such span.
+function jsonSpan(raw, opens, closes) {
+  const starts = opens.map(char => raw.indexOf(char)).filter(index => index !== -1);
+  const ends = closes.map(char => raw.lastIndexOf(char)).filter(index => index !== -1);
+  if (!starts.length || !ends.length) return null;
+  const start = Math.min(...starts);
+  const end = Math.max(...ends);
+  return end > start ? raw.substring(start, end + 1) : null;
+}
+
 // Line/column of the position a V8 JSON error message names, or null.
 function jsonErrorPosition(error, source) {
   const positionMatch = String(error?.message || '').match(/(?:at\s+)?position\s+(\d+)/i);
@@ -102,33 +112,7 @@ export function parseAiJson(raw) {
     jsonStr = match[1];
   } else {
     // If no markdown block, try to find the first { or [ and the last } or ]
-    const firstBrace = raw.indexOf('{');
-    const firstBracket = raw.indexOf('[');
-    const lastBrace = raw.lastIndexOf('}');
-    const lastBracket = raw.lastIndexOf(']');
-
-    let start = -1;
-    let end = -1;
-
-    if (firstBrace !== -1 && firstBracket !== -1) {
-      start = Math.min(firstBrace, firstBracket);
-    } else if (firstBrace !== -1) {
-      start = firstBrace;
-    } else if (firstBracket !== -1) {
-      start = firstBracket;
-    }
-
-    if (lastBrace !== -1 && lastBracket !== -1) {
-      end = Math.max(lastBrace, lastBracket);
-    } else if (lastBrace !== -1) {
-      end = lastBrace;
-    } else if (lastBracket !== -1) {
-      end = lastBracket;
-    }
-
-    if (start !== -1 && end !== -1 && end > start) {
-      jsonStr = raw.substring(start, end + 1);
-    }
+    jsonStr = jsonSpan(raw, ['{', '['], ['}', ']']) ?? raw;
   }
 
   // Clean structural trailing commas that V8's JSON.parse chokes on without
@@ -146,11 +130,10 @@ export function parseAiJson(raw) {
     // brace-only then bracket-only span. This runs ONLY after the primary parse
     // already threw, so it can never regress a response that parsed cleanly.
     for (const [open, close] of [['{', '}'], ['[', ']']]) {
-      const s = raw.indexOf(open);
-      const e = raw.lastIndexOf(close);
-      if (s !== -1 && e > s) {
+      const span = jsonSpan(raw, [open], [close]);
+      if (span !== null) {
         try {
-          const recovered = JSON.parse(removeStructuralTrailingCommas(raw.substring(s, e + 1)).trim());
+          const recovered = JSON.parse(removeStructuralTrailingCommas(span).trim());
           // Reject a trivially-empty literal here. This loop runs ONLY after the
           // primary parse already failed (mis-bracketed prose), so an empty {}/[]
           // almost always came from a STRAY delimiter pair in the prose — e.g.

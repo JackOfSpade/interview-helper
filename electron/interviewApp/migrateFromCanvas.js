@@ -7,6 +7,7 @@
 // repeated by deleting the marker file.
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 
 export const MIGRATION_MARKER = '.copied-from-infinite-canvas.json';
 // Everything the interview features read or write, by its name in the data folder.
@@ -54,21 +55,21 @@ export async function migrateQuestionCounts({ dataRoot }) {
   }
   if (!Object.keys(shared).length) return false;
   jobs.general = { counts: shared, updatedAt: Date.now() };
-  const tmp = `${historyFile}.${process.pid}.migrate.tmp`;
-  await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, jobs }), { encoding: 'utf8', mode: 0o600 });
-  await fs.promises.rename(tmp, historyFile);
+  await atomicWriteFile(historyFile, JSON.stringify({ version: 1, jobs }));
   return true;
 }
 
 /**
  * Copies the interview data once. Returns `{ copied: [...names], skipped }`.
- * An entry that already exists in the new folder is never overwritten.
+ * An entry that already exists in the new folder is never overwritten. The marker that
+ * ends the copy is left unwritten while an entry failed to copy.
  */
 export async function migrateInterviewDataFromCanvas({ legacyRoot, dataRoot, logger = null } = {}) {
   if (typeof dataRoot !== 'string' || !path.isAbsolute(dataRoot)) throw new TypeError('Interview data migration needs the data folder.');
   const marker = path.join(dataRoot, MIGRATION_MARKER);
   if (await exists(marker)) return { copied: [], skipped: true };
   const copied = [];
+  let failed = 0;
   const legacy = typeof legacyRoot === 'string' && path.isAbsolute(legacyRoot) && path.resolve(legacyRoot) !== path.resolve(dataRoot) && await exists(legacyRoot) ? legacyRoot : null;
   if (legacy) {
     for (const name of MIGRATED_ENTRIES) {
@@ -81,11 +82,15 @@ export async function migrateInterviewDataFromCanvas({ legacyRoot, dataRoot, log
         await fs.promises.cp(from, to, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true, mode: fs.constants.COPYFILE_FICLONE });
         copied.push(name);
       } catch (error) {
+        failed += 1;
+        // A half-copied entry would look finished next time; remove it so the copy is tried again.
+        await fs.promises.rm(to, { recursive: true, force: true }).catch(() => {});
         logger?.warn?.(`[InterviewApp] could not copy ${name} from the Infinite Canvas folder: ${error?.code || error?.message || error}`);
       }
     }
     try { await migrateQuestionCounts({ dataRoot }); } catch (error) { logger?.warn?.(`[InterviewApp] practice counts not converted: ${error?.message || error}`); }
   }
-  await fs.promises.writeFile(marker, JSON.stringify({ version: 1, at: new Date().toISOString(), from: legacy, copied }), { encoding: 'utf8', mode: 0o600 });
+  // The marker is written only when every entry was copied, so a failed copy is tried again on the next start.
+  if (!failed) await atomicWriteFile(marker, JSON.stringify({ version: 1, at: new Date().toISOString(), from: legacy, copied }));
   return { copied, skipped: false };
 }

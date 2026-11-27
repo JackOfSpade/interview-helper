@@ -277,11 +277,17 @@ export function registerRendererPrivateAppRoot(rootPath) {
   }
 }
 
+// A path with its separators unified, outer separators dropped and its case fully folded.
+// Fold through upper case so spellings a case-insensitive volume resolves identically
+// (for example U+017F for 's') cannot evade the component checks.
+function foldedPathBody(rawPath) {
+  return String(rawPath).replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toUpperCase().toLowerCase();
+}
+
 // One definition of "this path names an app-private store directory" for both
 // isSensitivePath and isRendererPrivateAppPath, with the same full case fold.
 function matchesAppPrivateStoreComponent(rawPath) {
-  const normalizedPath = String(rawPath).replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toUpperCase().toLowerCase();
-  const verificationPath = `/${normalizedPath}/`;
+  const verificationPath = `/${foldedPathBody(rawPath)}/`;
   return SENSITIVE_APP_PRIVATE_STORE_COMPONENTS.some(component => verificationPath.includes(`/${component}/`));
 }
 
@@ -310,9 +316,7 @@ export function isSensitivePath(resolvedPath, { includeAppPrivate = true } = {})
   // Pad both ends with a separator so directory patterns also match the exact
   // directory itself (`/Users/x/.ssh`, `/etc`, `C:\Users\x\.aws`), not only a
   // child path with a trailing slash after the sensitive component.
-  // Fold through upper case so spellings a case-insensitive volume resolves
-  // identically (for example U+017F for 's') cannot evade the component checks.
-  const normalizedPath = rawPath.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '').toUpperCase().toLowerCase();
+  const normalizedPath = foldedPathBody(rawPath);
   const verificationPath = `/${normalizedPath}/`;
   const exactPath = `/${normalizedPath}`;
   const isUnixRoot = /^\/+$/u.test(rawPath);
