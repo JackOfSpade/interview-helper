@@ -15,6 +15,7 @@ const WINDOW_CHANNELS = Object.freeze([
 // The call window's own event lines kept for bug reports (newest last), in memory only.
 // Enough for a whole run, for bug reports.
 const WINDOW_EVENTS_KEPT = 20_000;
+const WINDOW_EVENTS_SLACK = 500;
 
 // While the service is in one of these phases a call is in progress or being wrapped up.
 const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'missed', 'calling', 'connecting', 'in-call', 'ended', 'analyzing']);
@@ -218,10 +219,14 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'close']() { if (windowAlive()) win.close(); return null; },
     async [WINDOW_PREFIX + 'log-event'](line) {
       if (typeof line !== 'string' || !line) return null;
-      const text = line;
-      windowEvents.push(text);
-      if (windowEvents.length > WINDOW_EVENTS_KEPT) { windowEvents.shift(); windowEventsDropped += 1; }
-      try { service.logWindowEvent?.(text); } catch { /* diagnostics only */ }
+      windowEvents.push(line);
+      // Trimmed in steps, so an array this long is not shifted on every line.
+      if (windowEvents.length > WINDOW_EVENTS_KEPT + WINDOW_EVENTS_SLACK) {
+        const excess = windowEvents.length - WINDOW_EVENTS_KEPT;
+        windowEvents.splice(0, excess);
+        windowEventsDropped += excess;
+      }
+      try { service.logWindowEvent?.(line); } catch { /* diagnostics only */ }
       return null;
     },
   };
@@ -303,7 +308,10 @@ export function createPracticeCallController(deps = {}) {
   return Object.freeze({
     service, store, openWindow, shutdown,
     /** The call window's recent event lines (all windows since the app started), for bug reports. */
-    windowEvents: () => ({ events: [...windowEvents], eventsDropped: windowEventsDropped }),
+    windowEvents: () => {
+      const excess = Math.max(0, windowEvents.length - WINDOW_EVENTS_KEPT);
+      return { events: windowEvents.slice(excess), eventsDropped: windowEventsDropped + excess };
+    },
     getWindow: () => (windowAlive() ? win : null),
     dispose() {
       if (registerIpc) {

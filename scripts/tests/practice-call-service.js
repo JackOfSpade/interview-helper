@@ -1154,6 +1154,41 @@ test('R3 failing the engine stops helper, ear and sessions, then a fresh start w
   assert.equal((await service.answer()).phase, 'in-call');
 });
 
+test('a helper still starting when the call is hung up is stopped again once it is up', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-late-helper-'));
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let began;
+  const startedHelper = new Promise(resolve => { began = resolve; });
+  let stops = 0;
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    helperFactory: () => ({ start: async () => { began(); await gate; return { ok: false, code: 'mic-denied' }; }, play() {}, pushAudio() {}, endUtterance() {}, cancel() {}, mute() {}, stop: async () => { stops += 1; } }),
+  } });
+  const service = createPracticeCallService(deps);
+  const starting = service.start(ARGS);
+  await startedHelper;
+  await service.hangUp({ feedback: false });
+  assert.equal(stops, 1);
+  release();
+  const state = await starting;
+  assert.equal(stops, 2, 'the helper that came up after the teardown is stopped too');
+  assert.notEqual(state.error?.code, 'mic-denied', 'a refusal after the teardown is no failure of a call that is gone');
+});
+
+test('hanging up while the ring is being dialled clears that timer', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-ready-clear-'));
+  const { deps } = makeDeps({ tmp, modelReady: true });
+  const timers = [];
+  const cleared = [];
+  const service = createPracticeCallService({ ...deps, readyGate: undefined, random: () => 0.5, clock: { now: () => 1000, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout: handle => cleared.push(handle) } });
+  await service.start(ARGS);
+  service.ready();
+  const ringHandle = timers.findIndex(timer => timer.ms === 5000) + 1;
+  assert.ok(ringHandle > 0);
+  await service.hangUp({ feedback: false });
+  assert.ok(cleared.includes(ringHandle), 'the dial-in timer is cleared with the call');
+});
+
 test('R4 a refused helper start fails the call with the helper code', async () => {
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-r4-'));
   const { deps } = makeDeps({ tmp, modelReady: true, deps: {
