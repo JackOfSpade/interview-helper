@@ -85,6 +85,8 @@ export function createPracticeInference({
     } catch (error) {
       return Promise.reject(error);
     }
+    // Transferring a view detaches its whole buffer, so a view into a larger one is copied out first.
+    if (array.byteOffset !== 0 || array.buffer.byteLength !== array.byteLength) array = array.slice();
     if (array.length === 0) return Promise.reject(new Error(`${kind} needs at least one sample`));
     const id = nextId;
     nextId += 1;

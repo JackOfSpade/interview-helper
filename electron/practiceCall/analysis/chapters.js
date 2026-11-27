@@ -36,10 +36,10 @@ function pauseMarkers(candidateProsodyByTurn) {
       const startMs = ms(entry?.startMs);
       const endMs = ms(entry?.endMs);
       if (startMs === null || endMs === null || endMs - startMs < 2000) continue;
-      const key = "pause:" + startMs;
+      const key = `pause:${startMs}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      markers.push({ atMs: startMs, kind: "pause", label: "Long pause " + ((endMs - startMs) / 1000).toFixed(1) + "s" });
+      markers.push({ atMs: startMs, kind: 'pause', label: `Long pause ${((endMs - startMs) / 1000).toFixed(1)}s` });
     }
   }
   return markers;

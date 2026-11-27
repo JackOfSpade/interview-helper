@@ -1510,33 +1510,33 @@ final class SilentMic: @unchecked Sendable {
     /// allowDownload false (no microphone): use the speech assets only if they are already installed, so a call
     /// without microphone access never waits on a download before it is ready.
     private func prepareAnalysis(allowDownload: Bool = true) async throws -> (transcriber: SpeechTranscriber, analyzer: SpeechAnalyzer, format: AVAudioFormat) {
-            guard SpeechTranscriber.isAvailable,
-                  let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
-                throw HelperFailure.code("unsupported-locale")
-            }
-            let transcriber = SpeechTranscriber(locale: supportedLocale, transcriptionOptions: [],
-                reportingOptions: [.volatileResults, .fastResults], attributeOptions: [])
-            // Only language-model assets may be downloaded.
-            if await AssetInventory.status(forModules: [transcriber]) != .installed {
-                guard allowDownload else { throw HelperFailure.code("speech-assets") }
-                do {
-                    if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                        try await install.downloadAndInstall()
-                    } else if await AssetInventory.status(forModules: [transcriber]) != .installed {
-                        throw HelperFailure.code("speech-assets")
-                    }
-                } catch { throw HelperFailure.code("speech-assets") }
-            }
-            try Task.checkCancellation()
-            guard !stopped, await AssetInventory.status(forModules: [transcriber]) == .installed,
-                  let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
-                throw HelperFailure.code("speech-assets")
-            }
-            let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .whileInUse))
-            self.analyzer = analyzer
-            try await analyzer.prepareToAnalyze(in: format)
-            try Task.checkCancellation()
-            guard !stopped else { throw CancellationError() }
+        guard SpeechTranscriber.isAvailable,
+              let supportedLocale = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+            throw HelperFailure.code("unsupported-locale")
+        }
+        let transcriber = SpeechTranscriber(locale: supportedLocale, transcriptionOptions: [],
+            reportingOptions: [.volatileResults, .fastResults], attributeOptions: [])
+        // Only language-model assets may be downloaded.
+        if await AssetInventory.status(forModules: [transcriber]) != .installed {
+            guard allowDownload else { throw HelperFailure.code("speech-assets") }
+            do {
+                if let install = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                    try await install.downloadAndInstall()
+                } else if await AssetInventory.status(forModules: [transcriber]) != .installed {
+                    throw HelperFailure.code("speech-assets")
+                }
+            } catch { throw HelperFailure.code("speech-assets") }
+        }
+        try Task.checkCancellation()
+        guard !stopped, await AssetInventory.status(forModules: [transcriber]) == .installed,
+              let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw HelperFailure.code("speech-assets")
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .whileInUse))
+        self.analyzer = analyzer
+        try await analyzer.prepareToAnalyze(in: format)
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
         return (transcriber, analyzer, format)
     }
 

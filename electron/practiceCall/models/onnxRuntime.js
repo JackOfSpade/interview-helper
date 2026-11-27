@@ -33,11 +33,16 @@ export function createSessionHandle({ modelPath, ort } = {}) {
   async function get() {
     if (closed) throw new Error('model session is closed');
     if (!runtime) runtime = await loadOrt(ort);
+    // close() may have run while the runtime loaded: a session made now would never be released.
+    if (closed) throw new Error('model session is closed');
     if (!sessionPromise) {
       sessionPromise = Promise.resolve(runtime.InferenceSession.create(modelPath));
       sessionPromise.catch(() => { sessionPromise = null; });
     }
-    return { runtime, session: await sessionPromise };
+    const session = await sessionPromise;
+    // Closed while the session was being created: close() releases it, so it is not handed out.
+    if (closed) throw new Error('model session is closed');
+    return { runtime, session };
   }
   return {
     get,

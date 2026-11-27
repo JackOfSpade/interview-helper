@@ -110,12 +110,10 @@ function pitchSummary(samples, sampleRate) {
 }
 
 function wordsInsideTurn(words, startMs, endMs) {
-  const outside = words ?? [];
-  const inside = outside.filter(word => {
+  return (words ?? []).filter(word => {
     const midpoint = ((word?.startMs ?? 0) + (word?.endMs ?? 0)) / 2;
     return midpoint >= startMs && midpoint < endMs;
   });
-  return inside;
 }
 
 export function turnProsody({ samples, sampleRate, startMs = 0, words = [] }) {

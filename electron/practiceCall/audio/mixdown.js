@@ -1,6 +1,6 @@
 // Mix candidate and interviewer WAVs into one 24 kHz mono 16-bit track.
 // Streamed in ~10 s blocks so a 45 minute call never sits in memory at once.
-import { HEADER_BYTES, TWO_POW_15, wavHeader, pcm16FrameCount, readPcm16MonoHeader } from './wavFormat.js';
+import { HEADER_BYTES, wavHeader, pcm16FrameCount, readPcm16Floats, readPcm16MonoHeader } from './wavFormat.js';
 
 const OUT_RATE = 24000;
 const BLOCK_SECONDS = 10;
@@ -14,19 +14,11 @@ function openTrack(path, fs, label) {
   } catch (error) { fs.closeSync(fd); throw error; }
 }
 
-// Reads source frames [startFrame, startFrame + count) as Float32.
+// Reads source frames [startFrame, startFrame + count) as Float32, zero past the end of the track.
 function readFrames(track, fs, startFrame, count) {
   const out = new Float32Array(count);
   const available = Math.max(0, Math.min(count, track.frames - startFrame));
-  if (available <= 0) return out;
-  const raw = Buffer.alloc(available * 2);
-  let got = 0;
-  while (got < raw.length) {
-    const read = fs.readSync(track.fd, raw, got, raw.length - got, HEADER_BYTES + (startFrame + got / 2) * 2);
-    if (read <= 0) break;
-    got += read;
-  }
-  for (let i = 0; i < got >> 1; i += 1) out[i] = raw.readInt16LE(i * 2) / TWO_POW_15;
+  out.set(readPcm16Floats(track.fd, fs, startFrame, available));
   return out;
 }
 
@@ -80,9 +72,11 @@ export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) 
       position += chunk.length;
     }
   } finally {
-    if (outFd !== undefined) fs.closeSync(outFd);
-    fs.closeSync(candidate.fd);
-    fs.closeSync(interviewer.fd);
+    // Every descriptor is closed even when an earlier close throws.
+    for (const fd of [outFd, candidate.fd, interviewer.fd]) {
+      if (fd === undefined) continue;
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
   }
   return { durationMs, sampleRate: OUT_RATE, frames: totalFrames };
 }

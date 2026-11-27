@@ -21,9 +21,8 @@ export function countWords(text) {
 
 function prosodyFor(source, index) {
   if (!source) return [];
-  if (source instanceof Map) return [source.get(index)].flat().filter(Boolean);
-  if (Array.isArray(source)) return [source[index]].flat().filter(Boolean);
-  return [source[index]].flat().filter(Boolean);
+  const found = source instanceof Map ? source.get(index) : source[index];
+  return [found].flat().filter(Boolean);
 }
 
 // Uniform word positions across the answer; deterministic without Scribe words.

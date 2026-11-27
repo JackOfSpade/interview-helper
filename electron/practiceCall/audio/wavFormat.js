@@ -46,3 +46,21 @@ export function readPcm16MonoHeader(fd, fs, { prefix, subject = '' } = {}) {
   }
   return { sampleRate, channels };
 }
+
+/**
+ * Reads `count` frames of an open PCM16 mono WAV, starting at frame `startFrame`, as floats in [-1, 1).
+ * A short read (the file is still growing, or ended early) returns only the frames that were there.
+ */
+export function readPcm16Floats(fd, fs, startFrame, count) {
+  if (!(count > 0)) return new Float32Array(0);
+  const raw = Buffer.alloc(count * 2);
+  let got = 0;
+  while (got < raw.length) {
+    const n = fs.readSync(fd, raw, got, raw.length - got, HEADER_BYTES + startFrame * 2 + got);
+    if (n <= 0) break;
+    got += n;
+  }
+  const out = new Float32Array(got >> 1);
+  for (let i = 0; i < out.length; i += 1) out[i] = raw.readInt16LE(i * 2) / TWO_POW_15;
+  return out;
+}

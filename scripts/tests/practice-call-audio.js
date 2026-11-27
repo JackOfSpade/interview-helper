@@ -616,7 +616,8 @@ export default [
         assert.ok(text.includes('export default'), `${name} has a default export`);
       }
       assert.ok(source('wavReader.js').includes('fs = nodeFs'), 'wavReader defaults to node:fs and accepts an injected fs');
-      assert.ok(source('wavReader.js').includes('readSync'), 'wavReader reads through fs');
+      assert.ok(source('wavReader.js').includes('readPcm16Floats(fd, fs'), 'wavReader reads through the injected fs');
+      assert.ok(source('wavFormat.js').includes('fs.readSync'), 'the shared frame reader reads through fs');
       assert.equal(source('mixdown.js').includes('node:fs'), false, 'mixdown touches only the fs it is given');
       assert.ok(source('mixdown.js').includes('mixTracks requires fs'), 'mixdown requires an injected fs');
       assert.ok(source('mixdown.js').includes('writeSync'), 'mixdown streams through fs');

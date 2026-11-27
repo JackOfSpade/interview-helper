@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   extractWhisperFeatures, N_MELS, N_FRAMES, SAMPLE_COUNT,
 } from '../../electron/practiceCall/models/whisperFeatures.js';
+import { createSessionHandle } from '../../electron/practiceCall/models/onnxRuntime.js';
 import { createSmartTurn } from '../../electron/practiceCall/models/smartTurn.js';
 import { createToneModel } from '../../electron/practiceCall/models/toneModel.js';
 import { MODEL_SPECS, createModelStore } from '../../electron/practiceCall/models/modelStore.js';
@@ -619,7 +620,39 @@ const realWorkerFixture = {
   },
 };
 
+const workerViewFixture = {
+  name: 'practice call models: inference host copies a view so transferring it leaves the caller\'s buffer alone',
+  async run() {
+    const factory = fakeWorkerFactory();
+    const inference = createPracticeInference({ smartTurnPath: '/m/a.onnx', tonePath: '/m/b.onnx', createWorker: factory });
+    const worker = factory.workers[0];
+    const backing = new Float32Array(1000).fill(0.5);
+    const view = backing.subarray(100, 300);
+    const pending = inference.endOfTurn(view);
+    assert.equal(worker.messages[0].samples.length, 200);
+    assert.notEqual(worker.messages[0].samples.buffer, backing.buffer, 'the message carries its own buffer');
+    assert.equal(backing.buffer.byteLength, 4000, 'the caller\'s buffer was not transferred');
+    await pending;
+    await inference.close();
+  },
+};
+
+const sessionCloseFixture = {
+  name: 'practice call models: a session handle closed while its runtime loads makes no session',
+  async run() {
+    let created = 0;
+    const ort = { InferenceSession: { create: async () => { created += 1; return { release: async () => {} }; } } };
+    const slow = createSessionHandle({ modelPath: '/m/a.onnx', ort });
+    const pending = slow.get();
+    await slow.close();
+    await assert.rejects(pending, /closed/);
+    await assert.rejects(slow.get(), /closed/);
+    assert.equal(created, 0, 'no session is created once closed');
+  },
+};
+
 tests.push(
+  workerViewFixture, sessionCloseFixture,
   workerPriorityFixture, workerHostFixture, workerErrorFixture, workerPathFixture, realWorkerFixture,
 );
 
