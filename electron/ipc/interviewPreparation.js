@@ -1,8 +1,3 @@
-import { validationFailure } from './validationFailure.js';
-export const INTERVIEW_EXACT_COPY_SUFFIX = "--- EXACT COPY CHECK ---\nIf an item cannot satisfy these exact-copy rules, omit that item: empty companyFacts, recentContext and applicationPositioning arrays are valid, and warnings should state what could not be sourced. sourceDate is date text of at most 80 characters and never a URL; sourceUrl must be an http(s) URL.";
-import { collector, templatesFor } from './validationLines.js';
-export const TEXT_CORRECTION_TEMPLATES = templatesFor('text.');
-export const INTERVIEW_CORRECTION_TEMPLATES = templatesFor('interview.');
 /**
  * Read-only application-bundle intake and separate interview artifacts.
  *
@@ -51,6 +46,12 @@ import {
 } from '../utils/pathSafety.js';
 import { sha256Hex } from '../utils/sha256Hex.js';
 import { INTERVIEW_RUN_ID_RE } from '../../src/utils/interviewRunIdGrammar.js';
+import { validationFailure } from './validationFailure.js';
+import { collector, templatesFor } from './validationLines.js';
+
+export const INTERVIEW_EXACT_COPY_SUFFIX = "--- EXACT COPY CHECK ---\nIf an item cannot satisfy these exact-copy rules, omit that item: empty companyFacts, recentContext and applicationPositioning arrays are valid, and warnings should state what could not be sourced. sourceDate is date text of at most 80 characters and never a URL; sourceUrl must be an http(s) URL.";
+export const TEXT_CORRECTION_TEMPLATES = templatesFor('text.');
+export const INTERVIEW_CORRECTION_TEMPLATES = templatesFor('interview.');
 
 const { app } = electronPkg;
 
@@ -353,8 +354,8 @@ const JOB_FROM_LISTING = 'job details read from the saved listing';
 // A typed source has no application bundle: only a listing, read from a live
 // posting page ('typed-posting') or written by the AI as a stand-in
 // ('typed-generated'). These statuses say so plainly everywhere they show.
- const TYPED_POSTING_STATUS = 'typed-posting';
- const TYPED_GENERATED_STATUS = 'typed-generated';
+const TYPED_POSTING_STATUS = 'typed-posting';
+const TYPED_GENERATED_STATUS = 'typed-generated';
 const TYPED_STATUSES = Object.freeze([TYPED_POSTING_STATUS, TYPED_GENERATED_STATUS]);
 function isTypedStatus(status) { return TYPED_STATUSES.includes(status); }
 const ABSENT_PDF_NAMES = new Map([['resume-pdf', EXPECTED_FILES.resumePdf], ['cover-letter-pdf', EXPECTED_FILES.coverPdf]]);
@@ -887,7 +888,7 @@ const GENERATED_LISTING_WARNING = "The job listing used here is an AI-generated 
  * What the bundle's listing really is, stated to the model next to the listing
  * ('' for a captured application bundle, whose wording is unchanged).
  */
- function interviewListingSourceNote(bundle) {
+function interviewListingSourceNote(bundle) {
   const status = bundle?.verification?.status;
   if (status === TYPED_GENERATED_STATUS) return "SOURCE OF THE LISTING: the listing below is an AI-generated stand-in listing, not the employer's text; do not treat its specifics as facts about the employer. No application documents exist for this job. The canonical job URL is the employer's careers or official site, not a page for this listing, so a difference between that page and this listing is expected; research the company and the real role instead.";
   if (status === TYPED_POSTING_STATUS) return 'SOURCE OF THE LISTING: the listing below was read from the job posting page; no application documents were submitted for this job.';
@@ -922,7 +923,7 @@ const positioningItemSchema = Object.freeze({
     evidenceQuote: boundedStringSchema,
   },
 });
- const INTERVIEW_BRIEF_SCHEMA = Object.freeze({
+const INTERVIEW_BRIEF_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false, required: ['role', 'roleThemes', 'companyFacts', 'recentContext', 'likelyQuestions', 'questionsToAsk', 'applicationPositioning', 'warnings'],
   properties: {
     role: { type: 'object', additionalProperties: false, required: ['title', 'company', 'location', 'summary'], properties: { title: boundedStringSchema, company: boundedStringSchema, location: boundedStringSchema, summary: { type: 'string', maxLength: MAX_BRIEF_TEXT } } },
@@ -1589,8 +1590,12 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       if (typeof error?.code === 'string' && error.code.startsWith('typed-job-') && typeof error.userMessage === 'string' && error.userMessage) throw new Error(error.userMessage);
       throw new Error('That job could not be set up. Check the link, or the company and role, and try again.');
     } finally {
-      if (typedJobRuns.get(typedRunKey) === cancel) typedJobRuns.delete(typedRunKey);
-      standaloneClaudeActivity.remove(typedActivityKey);
+      // A newer run for the same key owns the activity entry now; only the
+      // current run may clear it, or it would wipe the newer run's status.
+      if (typedJobRuns.get(typedRunKey) === cancel) {
+        typedJobRuns.delete(typedRunKey);
+        standaloneClaudeActivity.remove(typedActivityKey);
+      }
     }
   }, { validateArgs: validateTypedJobArgs });
   // Cancel one typed-job run. A run that already ended is simply not there.
