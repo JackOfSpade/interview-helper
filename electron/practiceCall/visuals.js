@@ -213,7 +213,7 @@ const SVG_ELEMENTS = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', '
 export function safeSvg(value) {
   const svg = String(value ?? '').trim().replace(/^<\?xml[^>]*\?>\s*/u, '');
   if (!svg.startsWith('<svg') || !svg.endsWith('</svg>') || svg.length > MAX_SVG_CHARS) return null;
-  if (/<!|<\?|\bon[a-z]+\s*=|javascript:|\bdata:[a-z]+\/|@import|<style/iu.test(svg)) return null;
+  if (/<!|<\?|\bon[a-z]+\s*=|javascript:|\bdata:(?:[a-z0-9.+-]+\/|;|,)|@import|<style/iu.test(svg)) return null;
   for (const match of svg.matchAll(/<\/?\s*([a-zA-Z][\w:-]*)/gu)) if (!SVG_ELEMENTS.has(match[1].toLowerCase())) return null;
   for (const match of svg.matchAll(/(?:xlink:)?href\s*=\s*["']([^"']*)["']/giu)) if (!match[1].startsWith('#')) return null;
   for (const match of svg.matchAll(/url\(\s*([^)]*)\)/giu)) if (!match[1].replace(/["'\s]/gu, '').startsWith('#')) return null;
