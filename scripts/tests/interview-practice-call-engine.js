@@ -974,6 +974,16 @@ async function shortOverlap(rig, text = 'right', segmentId = 'o1') {
 
 const cancelsOf = (rig, id) => rig.opsOf('cancel').filter(item => item.id === id).length;
 
+test('a cancel the helper wrapper made itself (backpressure, no position) trims the reply to the last known position', async () => {
+  const rig = makeRig();
+  await greet(rig);
+  await toPlaying(rig);
+  rig.h.playback('utt2', 'position', 900);
+  rig.engine.helperEvent({ type: 'playback', utteranceId: 'utt2', state: 'cancelled', reason: 'backpressure' });
+  await flush();
+  assert.deepEqual(rig.of('interrupted'), [{ type: 'interrupted', heardText: 'Right, got it.' }]);
+});
+
 test('a candidate answer that starts talking over the reply with more words than allowed stops it at once and notes what was heard', async () => {
   const rig = makeRig();
   await greet(rig);

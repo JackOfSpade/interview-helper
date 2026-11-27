@@ -136,7 +136,6 @@ const LIVE_LOOK_RETRY_MS = 1000;
 // A question was practised once this much followed it; fewer words is a greeting, a "say that again?" or nothing.
 const ANSWER_MIN_WORDS = 15;
 const ANSWER_MIN_PAD_CHARS = 20;
-// A line answered with <listen/> joins the candidate's next speech when it resumes within this long: one thought.
 const SCREEN_TITLE_CAP = 120;
 // Starting to share takes a moment (finding the window, clicking share); swapping what is already shared is quick.
 const SCREEN_FIRST_DELAY = { minMs: 2000, maxMs: 20000, defaultMs: 6000 };
@@ -211,16 +210,16 @@ function heardFor(reply, positionMs) {
   return reply.words.filter(word => word.endMs <= positionMs).map(word => word.word).join(' ').replace(/\[[^[\]\n]{0,80}$/, '');
 }
 
-/**
- * A voice line cut short, message by message: the sent messages it was made of, each with the words of it that
- * were heard (word counts, since the heard text is the voice's timed words with tags removed). Messages heard
- * whole are left out; one never reached has heard ''. Only messages with a chat id are listed.
- */
 /** The chat ids of the sent messages a candidate-voice line was made from (messages without one are left out). */
 function chatIdsOf(texts) {
   return (texts || []).map(entry => entry?.chatId).filter(id => typeof id === 'string' && id);
 }
 
+/**
+ * A voice line cut short, message by message: the sent messages it was made of, each with the words of it that
+ * were heard (word counts, since the heard text is the voice's timed words with tags removed). Messages heard
+ * whole are left out; one never reached has heard ''. Only messages with a chat id are listed.
+ */
 function heardByMessage(texts, heard) {
   let left = tokens(heard).length;
   const out = [];
@@ -572,8 +571,12 @@ export function createPracticeCallEngine({
     unschedule(reply.gateTimer);
     reply.gateTimer = null;
     unschedule(reply.openerTimer);
-    cancelJoinFlush(reply);
     reply.openerTimer = null;
+    unschedule(reply.holdTimer);
+    reply.holdTimer = null;
+    unschedule(reply.sentenceTimer);
+    reply.sentenceTimer = null;
+    cancelJoinFlush(reply);
     reply.voiceQueue = [];
     reply.buffered = [];
     attempt(() => reply.ctl.opener.abort());
@@ -611,13 +614,6 @@ export function createPracticeCallEngine({
   }
 
   /**
-   * A line the interviewer answered with only <pass/> is finished and needs no reply ("okay", "thanks"): it is kept in the
-   * transcript as its own entry and the message that carried it counts as delivered. It is never joined to what the
-   * candidate says next, never resent, never carried by a later typed message. The interviewer's last <wait> stays in
-   * force unless this reply wrote its own. (<listen/> is the other silence: the line is unfinished and is not kept here.)
-   * A typed line follows the same rule: a sent message is finished, so <listen/> on it counts as <pass/>.
-   */
-  /**
    * A typed turn is answered: the sent messages still queued are let go. Without a voice they are in the turn already;
    * with one they were never spoken (speakTyped takes what it says), so their chat entries are marked unsaid.
    */
@@ -627,6 +623,13 @@ export function createPracticeCallEngine({
     if (candidateVoice && dropped.length) emit({ type: 'candidate-voice', state: 'cut', heardChars: 0, messages: heardByMessage(dropped, '') });
   }
 
+  /**
+   * A line the interviewer answered with only <pass/> is finished and needs no reply ("okay", "thanks"): it is kept in the
+   * transcript as its own entry and the message that carried it counts as delivered. It is never joined to what the
+   * candidate says next, never resent, never carried by a later typed message. The interviewer's last <wait> stays in
+   * force unless this reply wrote its own. (<listen/> is the other silence: the line is unfinished and is not kept here.)
+   * A typed line follows the same rule: a sent message is finished, so <listen/> on it counts as <pass/>.
+   */
   function keepPassedLine(reply) {
     const span = candidateSpan();
     noteAnswer(reply.candidates);
@@ -1353,8 +1356,8 @@ export function createPracticeCallEngine({
   /**
    * A written pause is held until words follow it: one with no words before it, or with nothing spoken after it by the
    * end of the reply, adds only dead air and is never sent to the voice (a gap cannot be taken back once sent).
+   * `pendingChars`: parser characters already counted for a sentence that will be sent after this pause.
    */
-  /** `pendingChars`: parser characters already counted for a sentence that will be sent after this pause. */
   function flushHeldPause(reply, pendingChars = 0) {
     if (reply.heldPause === null) return;
     const delayMs = reply.heldPause;
@@ -1385,7 +1388,7 @@ export function createPracticeCallEngine({
     return Number.isInteger(number) && number >= 1 ? number : null;
   }
 
-    function noteUnknownScreen(reply, ref) {
+  function noteUnknownScreen(reply, ref) {
     if (!reply.unknownScreens.includes(ref)) reply.unknownScreens.push(ref);
     if (reply.committed && !unknownScreens.includes(ref)) unknownScreens.push(ref);
   }
@@ -1942,11 +1945,6 @@ export function createPracticeCallEngine({
     return fresh > th.cutInStaleHardWords || (fresh > th.cutInStaleWords && now() - reply.spec.at > th.cutInStaleMs);
   };
 
-  /**
-   * A cut-in the watcher asked for is ready to commit. While the candidate is mid-sentence it waits for the next breath (the
-   * VAD end commits it), at most cutInHoldMs; then, if more than cutInStaleWords words have been said since the look began,
-   * it is about something said sentences ago: dropped unspoken, and the watcher is asked again at once. Returns whether to commit.
-   */
   /** What was heard ends a sentence (a final or caption ending in . ? !). */
   const endsSentence = value => /[.?!…]["'”’)\]]*$/u.test(String(value ?? '').trim());
 
@@ -1954,6 +1952,9 @@ export function createPracticeCallEngine({
    * The watcher chose when the person comes in (cutInInfo.when), from how they interrupt. "now": at the next breath, at
    * most cutInHoldMs. "sentence-end": once what was heard ends a sentence (a final ending in . ? ! during the hold, or a
    * breath after such a word), at most cutInSentenceMaxMs, after which it comes in at the next breath as "now" does.
+   * A cut-in the watcher asked for is ready to commit: this returns whether to. While the candidate is mid-sentence it waits
+   * for the next breath (the VAD end commits it), at most cutInHoldMs; then, if more than cutInStaleWords words have been said
+   * since the look began, it is about something said sentences ago: dropped unspoken, and the watcher is asked again at once.
    * Both are judged only from what the microphone path hears, so the injected voice is treated exactly as live speech
    * (owner's request: the AI voice stands in for a real one, nothing special about it). Only a cut-in still fresh when the
    * hold begins waits; one already stale goes the "now" way and is dropped there. Words said while waiting for the
@@ -2431,8 +2432,9 @@ export function createPracticeCallEngine({
       return finishReply(reply, event.atMs);
     }
     if (event.state === 'cancelled') {
-      // Not requested by the engine (for example helper backpressure): trim to what was heard.
-      finishInterrupted(reply, event.positionMs, event.atMs);
+      // Not requested by the engine (for example helper backpressure, which reports no position): trim to what was
+      // heard, by the last position known.
+      finishInterrupted(reply, Number.isFinite(event.positionMs) ? event.positionMs : reply.positionMs, event.atMs);
     }
   }
 
@@ -2639,7 +2641,6 @@ export function createPracticeCallEngine({
       record.maxPausedTimer = schedule(th.maxPausedMs, () => onMaxPaused(record));
       if (clearInterruption(record)) return stopFromOverlap(record);
       if (!record.speaking && tokens(overlapText(record)).length >= 1) classify(record, reply, overlapText(record));
-      return;
     };
     const delay = boundaryDelay(reply);
     if (delay <= 0) pause();
@@ -2787,16 +2788,16 @@ export function createPracticeCallEngine({
     requestEndOfTurn(atMs);
   }
 
-  /**
-   * Smart Turn: ask the ear, right away, whether the audio that just ended sounds like a finished turn.
-   * A held end pushes both timers out (still measured from the vad end) and flags the opener as unfinished audio.
-   */
   /** The vad end at atMs is the end of a line in the candidate's own injected voice, heard whole just now. */
   function injectEnds(atMs) {
     if (injectFinishedAt === null) return false;
     return Math.abs(injectFinishedAt - (toClock(atMs) ?? now())) <= INJECT_END_MS;
   }
 
+  /**
+   * Smart Turn: ask the ear, right away, whether the audio that just ended sounds like a finished turn.
+   * A held end pushes both timers out (still measured from the vad end) and flags the opener as unfinished audio.
+   */
   function requestEndOfTurn(atMs) {
     injectTurn = false;
     if (injectEnds(atMs)) { injectTurn = true; return; }
@@ -2931,12 +2932,6 @@ export function createPracticeCallEngine({
     });
   }
 
-  /**
-   * Pad progress: the interviewer watches the candidate write, so it gets the pad text every padProgressMs while
-   * the text keeps changing (from the last time it had the text), and once when typing stops for padIdleMs.
-   * Not a check-in (not counted, nothing acknowledged first). When it is held back (the interviewer speaking,
-   * a reply being made, the candidate speaking, a pause) it is simply tried again when that ends, so at most one is pending.
-   */
   /** The candidate is typing in the open pad right now (it changed within padTypingMs). */
   function padTypingNow() {
     return padState.open && !paused && padEditedAt !== null && now() - padEditedAt < th.padTypingMs;
@@ -2947,6 +2942,12 @@ export function createPracticeCallEngine({
     return padState.open && padHaltText !== null && padHaltText === padText && padHaltReplies < PAD_HALT_TURNS;
   }
 
+  /**
+   * Pad progress: the interviewer watches the candidate write, so it gets the pad text every padProgressMs while
+   * the text keeps changing (from the last time it had the text), and once when typing stops for padIdleMs.
+   * Not a check-in (not counted, nothing acknowledged first). When it is held back (the interviewer speaking,
+   * a reply being made, the candidate speaking, a pause) it is simply tried again when that ends, so at most one is pending.
+   */
   function padProgressDueAt() {
     if (!padDirty || !padText || padText === padSent || padEditedAt === null) return null;
     const base = Math.max(padSentAt ?? -Infinity, padDirtySince ?? -Infinity);
@@ -3031,7 +3032,6 @@ export function createPracticeCallEngine({
       && answerSince !== null && tokens(candidateText()).length > 0 && stillTalking();
   }
 
-  /** Next check: the first at cutInFirstMs into the answer, then at least every watchEveryMs from the start of the last one. */
   /** When the main declined this answer's last cut-in, the next watcher check waits (unless much new has been said). */
   function vetoBackoffUntil() {
     const veto = watch.veto;
@@ -3040,6 +3040,7 @@ export function createPracticeCallEngine({
     return veto.at + th.watchVetoBackoffMs;
   }
 
+  /** Next check: the first at cutInFirstMs into the answer, then at least every watchEveryMs from the start of the last one. */
   const watchDueAt = () => Math.max(answerSince + th.cutInFirstMs, watch.lastStartAt === null ? -Infinity : watch.lastStartAt + th.watchEveryMs, vetoBackoffUntil());
 
   function armWatch() {
@@ -3446,15 +3447,6 @@ export function createPracticeCallEngine({
     if (event.final) relookIfRevised();
   }
 
-  /**
-   * The helper keys a result by the start of its audio range, and a later result for the same speech can start a little
-   * earlier or later. A volatile result that a newer one covers is replaced, not kept beside it: found live on
-   * 2026-11-21, where every sentence reached the interviewer twice ("First, prevention. First, prevention.").
-   * Only volatile results are dropped. A final replaces every volatile result that overlaps its range, even one that
-   * runs wider than the final or does not nest in it (found live again the same day: the real ranges did not nest, so
-   * the 90% cover test below kept both copies); a volatile that begins at or after the final's end is the next
-   * sentence and stays. A volatile event replaces only the volatile results it nearly covers.
-   */
   /** Most of a guess's words are in the final (case and punctuation aside): it is the same speech, heard twice. */
   function mostlySameWords(guess, final) {
     const norm = value => tokens(String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/'s\b/gu, ' is'));
@@ -3464,6 +3456,15 @@ export function createPracticeCallEngine({
     return heard.filter(word => settled.has(word)).length / heard.length >= 0.6;
   }
 
+  /**
+   * The helper keys a result by the start of its audio range, and a later result for the same speech can start a little
+   * earlier or later. A volatile result that a newer one covers is replaced, not kept beside it: found live on
+   * 2026-11-21, where every sentence reached the interviewer twice ("First, prevention. First, prevention.").
+   * Only volatile results are dropped. A final replaces every volatile result that overlaps its range, even one that
+   * runs wider than the final or does not nest in it (found live again the same day: the real ranges did not nest, so
+   * the 90% cover test below kept both copies); a volatile that begins at or after the final's end is the next
+   * sentence and stays. A volatile event replaces only the volatile results it nearly covers.
+   */
   function dropSupersededVolatile(event) {
     const start = Number(event.startMs);
     const end = Number(event.endMs);
@@ -3922,7 +3923,6 @@ export function createPracticeCallEngine({
     if (yielding) yieldInjected(); // the second try gives way to the interviewer as the first would have
   }
 
-  /** As candidateVoiceLost: the interviewer only ever hears the candidate, so a line the voice could not say is never passed on as text. */
   /**
    * A vad end that came while a line was still playing armed nothing (scheduleTurnEnd). When that line ends without
    * being heard whole (cut, stalled or lost), the candidate's turn still has to end: it is scheduled now, the usual
@@ -3935,6 +3935,7 @@ export function createPracticeCallEngine({
     return true;
   }
 
+  /** As candidateVoiceLost: the interviewer only ever hears the candidate, so a line the voice could not say is never passed on as text. */
   function injectLost(texts, tries) {
     if (phase === 'ended') return;
     if (tries < 2) {
@@ -3977,17 +3978,17 @@ export function createPracticeCallEngine({
     if (event.state === 'cancelled') return endInjected(utterance, event.reason ? utterance.positionMs : event.positionMs);
   }
 
-  /**
-   * An interviewer reply has started playing: a line the candidate was already in the middle of makes them stop like a
-   * person. They carry on for a reaction time, then to the end of the word being said, then stop with a short fade.
-   * A line that began over an interviewer is never stopped here: the interruption rules decide.
-   */
   /** A person's reaction time before giving way to someone who started speaking (candidateYieldMinMs..MaxMs). */
   function yieldDelayMs() {
     const span = Math.max(0, th.candidateYieldMaxMs - th.candidateYieldMinMs);
     return th.candidateYieldMinMs + clamp(Number(random()) || 0, 0, 1) * span;
   }
 
+  /**
+   * An interviewer reply has started playing: a line the candidate was already in the middle of makes them stop like a
+   * person. They carry on for a reaction time, then to the end of the word being said, then stop with a short fade.
+   * A line that began over an interviewer is never stopped here: the interruption rules decide.
+   */
   function yieldInjected(delay = yieldDelayMs()) {
     const utterance = injecting;
     if (!utterance || utterance.holding || utterance.ending || utterance.overInterviewer || utterance.yieldTimer || utterance.boundaryTimer) return;
@@ -4393,7 +4394,7 @@ export function createPracticeCallEngine({
     for (const handle of [...handles]) { handles.delete(handle); attempt(() => clock.clearTimeout(handle)); }
     for (const controller of classifierControllers) attempt(() => controller.abort());
     classifierControllers.clear();
-    named.spec = null; named.commit = null; named.silence = null; named.typing = null; named.padIdle = null; named.padTyping = null; named.liveLook = null; named.watch = null;
+    for (const name of Object.keys(named)) named[name] = null;
     attempt(() => watch.controller?.abort());
     watch.controller = null; watch.running = false;
     liveCut = null;

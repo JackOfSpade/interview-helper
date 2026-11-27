@@ -123,7 +123,11 @@ export function createWarmProcess(handle, outputLimit) {
       try { event = JSON.parse(line); } catch { fail('TRANSPORT_INVALID_RESPONSE'); return; }
       if (!event || typeof event !== 'object' || Array.isArray(event)) { fail('TRANSPORT_INVALID_RESPONSE'); return; }
       if (event.session_id) sessionId = event.session_id;
-      if (event.type === 'stream_event') { pending?.onEvent?.(event.event); continue; }
+      if (event.type === 'stream_event') {
+        // A throwing consumer must not escape this data handler (an uncaught exception in the main process).
+        try { pending?.onEvent?.(event.event); } catch { /* the consumer's fault, not the transport's */ }
+        continue;
+      }
       if (event.type === 'assistant') {
         if (!Array.isArray(event.message?.content) || event.message.content.some(block => !block || typeof block !== 'object')) { fail('TRANSPORT_INVALID_RESPONSE'); return; }
         if (event.message.content.some(block => block.type === 'tool_use')) { fail('TRANSPORT_TOOL_USE'); return; }
