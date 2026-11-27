@@ -217,6 +217,34 @@ export default [
     },
   },
   {
+    name: 'offload stage: a multi-byte character split across stdout chunks is decoded intact',
+    async run() {
+      const line = Buffer.from(`${OK('caf\u00e9 \u65e5\u672c')}\n`, 'utf8');
+      const cut = line.indexOf(Buffer.from('\u65e5', 'utf8')) + 1;
+      const t = setup([(request, child) => {
+        setImmediate(() => {
+          child.stdout.write(line.subarray(0, cut));
+          setImmediate(() => { child.stdout.write(line.subarray(cut)); child.emit('close', 0, null); });
+        });
+        return 'hang';
+      }]);
+      const result = await t.run({ text: 'x', stage: 'convert', sessionId: SESSION, resume: false });
+      assert.equal(result.text, 'caf\u00e9 \u65e5\u672c');
+    },
+  },
+  {
+    name: 'offload stage: a cancelled call whose CLI exits without a result is CLAUDE_CANCELLED, not unavailable',
+    async run() {
+      const t = setup(['hang']);
+      const controller = new AbortController();
+      const promise = t.run({ text: 'x', stage: 'convert', sessionId: SESSION, resume: false, signal: controller.signal });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      t.calls[0].child.kill = () => { setImmediate(() => t.calls[0].child.emit('close', null, 'SIGTERM')); return true; };
+      controller.abort();
+      assert.equal((await rejection(promise)).code, 'CLAUDE_CANCELLED');
+    },
+  },
+  {
     name: 'offload stage: aborting the signal sends SIGTERM and surfaces the cancelled result',
     async run() {
       const t = setup(['hang']);
