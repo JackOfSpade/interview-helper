@@ -310,4 +310,11 @@ test('images from stock libraries that watermark their previews are never downlo
   assert(prompt.includes('rule out every image with ANY watermark') && prompt.includes('never acceptable, however well it fits'));
 });
 
+test('a label that merely contains the word data is a safe svg, a data URL is not', () => {
+  const labelled = SVG.replace('Egress', 'Data: egress per hour');
+  assert.equal(safeSvg(labelled), labelled);
+  assert.equal(safeSvg(SVG.replace('<line', '<image href="data:image/png;base64,AAAA"/><line')), null);
+  assert.equal(safeSvg(SVG.replace('<text', '<text style="fill:url(data:image/svg+xml;base64,AAAA)"')), null);
+});
+
 export default cases;

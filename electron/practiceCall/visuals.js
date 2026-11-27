@@ -16,6 +16,8 @@
  * and not measured. Both run during setup, before the call rings.
  */
 
+import { clipText } from './clipText.js';
+
 export const VISUAL_PICK_STAGE = 'practice-call-visual-pick';
 export const VISUAL_DIAGRAM_STAGE = 'practice-call-diagram';
 export const COMMONS_API_URL = 'https://commons.wikimedia.org/w/api.php';
@@ -36,7 +38,7 @@ const IMAGE_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
 const FREE_LICENCE = /public domain|^pd\b|cc0|cc[ -]?by|creative commons|gfdl|attribution/iu;
 
 const stripHtml = value => String(value ?? '').replace(/<[^>]*>/gu, ' ').replace(/&nbsp;/gu, ' ').replace(/&amp;/gu, '&').replace(/&quot;/gu, '"').replace(/&#0?39;/gu, "'").replace(/&lt;/gu, '<').replace(/&gt;/gu, '>').replace(/\s+/gu, ' ').trim();
-const clip = (value, max) => { const text = String(value ?? '').trim(); return text.length <= max ? text : `${text.slice(0, max - 1)}…`; };
+const clip = clipText;
 
 /** The query URL for a Commons file search with image details (thumbnail, licence, author). */
 export function commonsSearchUrl(query, { limit = 12, width = THUMB_WIDTH } = {}) {
@@ -211,7 +213,7 @@ const SVG_ELEMENTS = new Set(['svg', 'g', 'rect', 'circle', 'ellipse', 'line', '
 export function safeSvg(value) {
   const svg = String(value ?? '').trim().replace(/^<\?xml[^>]*\?>\s*/u, '');
   if (!svg.startsWith('<svg') || !svg.endsWith('</svg>') || svg.length > MAX_SVG_CHARS) return null;
-  if (/<!|<\?|\bon[a-z]+\s*=|javascript:|data:|@import|<style/iu.test(svg)) return null;
+  if (/<!|<\?|\bon[a-z]+\s*=|javascript:|\bdata:[a-z]+\/|@import|<style/iu.test(svg)) return null;
   for (const match of svg.matchAll(/<\/?\s*([a-zA-Z][\w:-]*)/gu)) if (!SVG_ELEMENTS.has(match[1].toLowerCase())) return null;
   for (const match of svg.matchAll(/(?:xlink:)?href\s*=\s*["']([^"']*)["']/giu)) if (!match[1].startsWith('#')) return null;
   for (const match of svg.matchAll(/url\(\s*([^)]*)\)/giu)) if (!match[1].replace(/["'\s]/gu, '').startsWith('#')) return null;
