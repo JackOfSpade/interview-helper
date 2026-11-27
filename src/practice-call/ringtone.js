@@ -99,56 +99,21 @@ export function startRingback(win) {
   });
 }
 
-// Soft two-note chime for a colleague joining the call. Never throws: a
-// window without audio (or a blocked context) just stays silent.
-export function playJoinChime(win) {
+// Two quick notes on a throwaway context. Never throws: a window without audio (or a blocked context) just stays silent.
+function playChime(win, notes, peak, seconds) {
   try {
     const AudioContextClass = win?.AudioContext || win?.webkitAudioContext;
     if (typeof AudioContextClass !== 'function') return;
     const context = new AudioContextClass();
     try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the chime stays silent */ }
     const now = context.currentTime;
-    [[660, 0], [880, 0.14]].forEach(([hertz, offset]) => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const at = now + offset;
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(hertz, at);
-      gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(0.08, at + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(at);
-      oscillator.stop(at + 0.32);
-    });
+    for (const [hertz, offset] of notes) partial(context, context.destination, now + offset, hertz, seconds, peak);
     setTimeout(() => { try { context.close(); } catch { /* already closed */ } }, 800);
   } catch { /* no audio available */ }
 }
 
-// Softer, falling two-note chime for someone leaving the call: the join chime reversed and
-// quieter. Never throws: a window without audio just stays silent.
-export function playLeaveChime(win) {
-  try {
-    const AudioContextClass = win?.AudioContext || win?.webkitAudioContext;
-    if (typeof AudioContextClass !== 'function') return;
-    const context = new AudioContextClass();
-    try { Promise.resolve(context.resume?.()).catch(() => {}); } catch { /* autoplay policy: the chime stays silent */ }
-    const now = context.currentTime;
-    [[784, 0], [523, 0.14]].forEach(([hertz, offset]) => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const at = now + offset;
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(hertz, at);
-      gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(0.05, at + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.28);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(at);
-      oscillator.stop(at + 0.3);
-    });
-    setTimeout(() => { try { context.close(); } catch { /* already closed */ } }, 800);
-  } catch { /* no audio available */ }
-}
+// Soft two-note chime for a colleague joining the call.
+export const playJoinChime = win => playChime(win, [[660, 0], [880, 0.14]], 0.08, 0.3);
+
+// Softer, falling two-note chime for someone leaving the call: the join chime reversed and quieter.
+export const playLeaveChime = win => playChime(win, [[784, 0], [523, 0.14]], 0.05, 0.28);

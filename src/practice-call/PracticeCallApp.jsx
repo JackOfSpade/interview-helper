@@ -68,11 +68,14 @@ export default function PracticeCallApp() {
     if (typeof api?.getReplay !== 'function') return undefined;
     let live = true;
     const failed = (error) => { logEvent('ERROR replay could not be loaded:', error?.message || error || 'unknown'); if (live) setReplay(replayLoadFailed()); };
+    // Loads can overlap (the service says the replay changed while one is out): only the newest answer counts.
+    let latest = 0;
     const load = () => {
+      const request = latest += 1;
       try {
-        Promise.resolve(api.getReplay()).then(value => { if (live && value && typeof value === 'object') setReplay(value); })
-          .catch(failed);
-      } catch { failed(); }
+        Promise.resolve(api.getReplay()).then(value => { if (live && request === latest && value && typeof value === 'object') setReplay(value); })
+          .catch(error => { if (request === latest) failed(error); });
+      } catch (error) { failed(error); }
     };
     load();
     const off = typeof api.onReplayUpdated === 'function' ? api.onReplayUpdated(load) : null;
@@ -103,37 +106,37 @@ export default function PracticeCallApp() {
   // Keyed by stage of the session so each hand-over (call, processing, feedback) fades in.
   const stageKey = phase === 'ended' || phase === 'analyzing' ? 'processing' : phase;
   const renderPhase = () => {
-  switch (phase) {
-    case 'consent': return <ConsentScreen onAgree={agree} busy={busy} sizes={state.modelDownload?.sizes} />;
-    case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
-    case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} microphoneUnavailable={!!state.microphoneUnavailable}
-      onReady={() => invoke('ready')} onCancel={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
-    case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('decline')} />;
-    case 'missed': return <MissedCall persona={state.persona} missed={state.missed} onCallBack={() => invoke('callBack')} onClose={() => invoke('close')} />;
-    case 'calling': return <OutgoingCall persona={state.persona} onCancel={() => invoke('cancelCallBack')} />;
-    case 'connecting': return <ConnectingScreen persona={state.persona} />;
-    case 'in-call': return <InCall state={state} api={{
-      setMuted: value => invoke('setMuted', value),
-      leave: () => invoke('leave'),
-      getPreparedCards: () => invoke('getPreparedCards'),
-      sendChat: (text, options) => invoke('sendChat', text, options),
-      setTyping: value => invoke('setTyping', value),
-      setPaused: value => invoke('setPaused', value),
-      updatePad: (text, sheet) => invoke('updatePad', text, sheet),
-      // Without it the pad shows no Language dropdown (missing from this list in the call of 2026-11-22).
-      ...(typeof readApi()?.setPadLanguage === 'function' ? { setPadLanguage: name => invoke('setPadLanguage', name) } : {}),
-      openMicrophoneSettings: () => invoke('openMicrophoneSettings'),
-      ...(typeof readApi()?.reconnectMicrophone === 'function' ? { reconnectMicrophone: () => invoke('reconnectMicrophone') } : {}),
-      ...(typeof readApi()?.getVoice === 'function' ? { getVoice: () => invoke('getVoice'), setVoice: gender => invoke('setVoice', gender) } : {}),
-      // Testing aid: the button shows only when the bridge has the call.
-      ...(typeof readApi()?.draftAnswer === 'function' ? { draftAnswer: () => invoke('draftAnswer') } : {}),
-    }} />;
-    case 'ended':
-    case 'analyzing': return <EndedScreen state={state} onChooseFeedback={wants => invoke('chooseFeedback', wants)} />;
-    case 'replay': return <Replay replay={replay} api={{ deleteRecording: () => invoke('deleteRecording'), ...(typeof readApi()?.retryAnalysis === 'function' ? { retryAnalysis: () => invoke('retryAnalysis') } : {}) }} />;
-    case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
-    default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: 'Something went wrong with this window. Close it and start the call again.' }} onClose={() => invoke('close')} />;
-  }
+    switch (phase) {
+      case 'consent': return <ConsentScreen onAgree={agree} busy={busy} sizes={state.modelDownload?.sizes} />;
+      case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
+      case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} setup={state.setup} microphoneUnavailable={!!state.microphoneUnavailable}
+        onReady={() => invoke('ready')} onCancel={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
+      case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('decline')} />;
+      case 'missed': return <MissedCall persona={state.persona} missed={state.missed} onCallBack={() => invoke('callBack')} onClose={() => invoke('close')} />;
+      case 'calling': return <OutgoingCall persona={state.persona} onCancel={() => invoke('cancelCallBack')} />;
+      case 'connecting': return <ConnectingScreen persona={state.persona} />;
+      case 'in-call': return <InCall state={state} api={{
+        setMuted: value => invoke('setMuted', value),
+        leave: () => invoke('leave'),
+        getPreparedCards: () => invoke('getPreparedCards'),
+        sendChat: (text, options) => invoke('sendChat', text, options),
+        setTyping: value => invoke('setTyping', value),
+        setPaused: value => invoke('setPaused', value),
+        updatePad: (text, sheet) => invoke('updatePad', text, sheet),
+        // Without it the pad shows no Language dropdown (missing from this list in the call of 2026-11-22).
+        ...(typeof readApi()?.setPadLanguage === 'function' ? { setPadLanguage: name => invoke('setPadLanguage', name) } : {}),
+        openMicrophoneSettings: () => invoke('openMicrophoneSettings'),
+        ...(typeof readApi()?.reconnectMicrophone === 'function' ? { reconnectMicrophone: () => invoke('reconnectMicrophone') } : {}),
+        ...(typeof readApi()?.getVoice === 'function' ? { getVoice: () => invoke('getVoice'), setVoice: gender => invoke('setVoice', gender) } : {}),
+        // Testing aid: the button shows only when the bridge has the call.
+        ...(typeof readApi()?.draftAnswer === 'function' ? { draftAnswer: () => invoke('draftAnswer') } : {}),
+      }} />;
+      case 'ended':
+      case 'analyzing': return <EndedScreen state={state} onChooseFeedback={wants => invoke('chooseFeedback', wants)} />;
+      case 'replay': return <Replay replay={replay} api={{ deleteRecording: () => invoke('deleteRecording'), ...(typeof readApi()?.retryAnalysis === 'function' ? { retryAnalysis: () => invoke('retryAnalysis') } : {}) }} />;
+      case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} onOpenMicrophoneSettings={() => invoke('openMicrophoneSettings')} />;
+      default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: 'Something went wrong with this window. Close it and start the call again.' }} onClose={() => invoke('close')} />;
+    }
   };
   return <div key={stageKey} className="pc-fade">{renderPhase()}</div>;
 }
