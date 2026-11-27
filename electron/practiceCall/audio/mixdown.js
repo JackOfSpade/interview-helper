@@ -72,11 +72,13 @@ export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) 
       position += chunk.length;
     }
   } finally {
-    // Every descriptor is closed even when an earlier close throws.
+    // Every descriptor is closed even when an earlier close throws; the first close error is then rethrown.
+    let closeError = null;
     for (const fd of [outFd, candidate.fd, interviewer.fd]) {
       if (fd === undefined) continue;
-      try { fs.closeSync(fd); } catch { /* already closed */ }
+      try { fs.closeSync(fd); } catch (error) { closeError ??= error; }
     }
+    if (closeError) throw closeError;
   }
   return { durationMs, sampleRate: OUT_RATE, frames: totalFrames };
 }
