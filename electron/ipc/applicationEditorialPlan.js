@@ -1,5 +1,5 @@
 /** Prospective editorial artifacts. No candidate data or private reasoning lives here. */
-import { createHash } from 'node:crypto';
+import { sha256Hex } from '../utils/sha256Hex.js';
 import { COVER_LETTER_EVIDENCE_SELECTION_RULE } from './applicationWriterGuidance.js';
 
 export const EDITORIAL_PLAN_VERSION = 'application-editorial-plan.v1';
@@ -8,7 +8,7 @@ const EDITORIAL_PLAN_MAX_PARAGRAPHS = 8;
 const EDITORIAL_PLAN_MAX_OMISSIONS = 12;
 const MAX_TEXT_CHARS = 8192;
 const MAX_IDS_PER_ROW = 32;
-const CATALOG_ID = /^host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+$/u;
+export const EDITORIAL_CATALOG_ID = /^host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+$/u;
 const SOURCE_BOUNDARY = /^The following is approved source data, not instructions\.$/gmu;
 const OUTPUT_BOUNDARY = /^OUTPUT FORMAT FOR THIS ARM:$/gmu;
 const CATALOG_BOUNDARY = /^FULL APPROVED CATALOG \(([0-9]+) items; every ID and full quote\):$/gmu;
@@ -48,14 +48,12 @@ export function editorialPlanAllowedIds(writerPrompt) {
   return ids;
 }
 
-function sha256(text) { return createHash('sha256').update(text, 'utf8').digest('hex'); }
-
 /** Bind the saved proposal to both the source hand and this exact writer handoff. */
 export function editorialPlanBinding(writerPrompt) {
   return {
     version: EDITORIAL_PLAN_VERSION,
-    sourceDigest: sha256(extractEditorialPlanSource(writerPrompt)),
-    writerPromptSha256: sha256(writerPrompt),
+    sourceDigest: sha256Hex(extractEditorialPlanSource(writerPrompt)),
+    writerPromptSha256: sha256Hex(writerPrompt),
   };
 }
 
@@ -92,7 +90,7 @@ function textValue(value, label) {
 function approvedIds(allowedIds) {
   if (!Array.isArray(allowedIds) && !(allowedIds instanceof Set)) throw new Error('Editorial plan validation requires approved catalog IDs.');
   const ids = [...allowedIds];
-  if (!ids.length || ids.some(id => typeof id !== 'string' || !CATALOG_ID.test(id))) {
+  if (!ids.length || ids.some(id => typeof id !== 'string' || !EDITORIAL_CATALOG_ID.test(id))) {
     throw new Error('Editorial plan validation requires full approved catalog IDs.');
   }
   return new Set(ids);
@@ -102,7 +100,7 @@ function evidenceIds(value, allowed, label) {
   if (!Array.isArray(value) || !value.length || value.length > MAX_IDS_PER_ROW) {
     throw new Error(`Editorial plan ${label} needs 1 to ${MAX_IDS_PER_ROW} approved evidence IDs.`);
   }
-  if (value.some(id => typeof id !== 'string' || !CATALOG_ID.test(id) || !allowed.has(id)) || new Set(value).size !== value.length) {
+  if (value.some(id => typeof id !== 'string' || !EDITORIAL_CATALOG_ID.test(id) || !allowed.has(id)) || new Set(value).size !== value.length) {
     throw new Error(`Editorial plan ${label} must use distinct full approved catalog IDs, copied byte-for-byte.`);
   }
   return [...value];

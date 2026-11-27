@@ -93,8 +93,6 @@ export function drainClaudeCalls(key) {
 
 // A usage limit stops every Claude call at once. Accepted answers are already
 // saved, so nothing is torn down: all work waits here and continues at the reset.
-const USAGE_PROBE_MS = CLAUDE_LIMIT_PROBE_MS;
-const USAGE_RESET_GRACE_MS = CLAUDE_LIMIT_RESET_GRACE_MS;
 let usageLimit = null;
 let usageTimer = null;
 const usageWaiters = new Set();
@@ -120,7 +118,7 @@ export function clearClaudeUsageLimit(reason = 'reset-timer') {
 
 /** The wait for a limit: until its reset when Claude said when, else one probe interval. */
 export function claudeUsageWaitMs(resetsAt, now = Date.now()) {
-  return Number.isFinite(resetsAt) && resetsAt > now ? resetsAt - now + USAGE_RESET_GRACE_MS : USAGE_PROBE_MS;
+  return Number.isFinite(resetsAt) && resetsAt > now ? resetsAt - now + CLAUDE_LIMIT_RESET_GRACE_MS : CLAUDE_LIMIT_PROBE_MS;
 }
 
 function armUsageTimer(ms) {
@@ -158,7 +156,7 @@ export function reportClaudeUsageLimit({ resetsAt = null, task = null, accountId
   }
   const resumeAt = state.limited.length
     ? Math.min(...state.limited.map(item => item.limitedUntil))
-    : now + USAGE_PROBE_MS;
+    : now + CLAUDE_LIMIT_PROBE_MS;
   // Later failures from calls already running can only extend a known reset.
   if (usageLimit && usageLimit.resumeAt >= resumeAt) return { paused: true, resumeAt: usageLimit.resumeAt };
   usageLimit = {

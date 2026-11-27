@@ -1,4 +1,5 @@
 import { StringDecoder } from 'node:string_decoder';
+import { sha256Hex } from '../utils/sha256Hex.js';
 import { applicationProgressStageLabel } from '../../src/utils/applicationProgress.js';
 import { isClaudeHeld, trackClaudeCall, waitForClaudeRelease } from './claudePause.js';
 import { clipText, createClaudeTaskActivity, describeClaudeSdkMessage } from './claudeTaskActivity.js';
@@ -717,7 +718,6 @@ function applicationError(error) {
   return new ClaudeRunnerError(
     'APPLICATION_ERROR',
     clipText(error?.message || String(error || 'Application step failed.')) || 'Application step failed.',
-    error?.code,
   );
 }
 
@@ -965,17 +965,19 @@ export function createClaudeApplicationRunner({
 
   // What a retry of this stage will run on, for the failed state's buttons.
   function retryProfile(jobId, stage) {
-    if (!nonEmptyString(stage)) return {};
-    const { model, effort } = jobStageProfile(jobId, stage);
-    return { retryModel: MODEL_FAMILIES[model]?.label || model, retryEffort: effort };
+    return profileLabels(jobId, stage, 'retry');
   }
 
   // The call that actually failed. Differs from the retry profile when a
   // failure in a side call (the editorial plan) fails the write stage.
   function failedCallProfile(jobId, stage) {
+    return profileLabels(jobId, stage, 'failed');
+  }
+
+  function profileLabels(jobId, stage, prefix) {
     if (!nonEmptyString(stage)) return {};
     const { model, effort } = jobStageProfile(jobId, stage);
-    return { failedModel: MODEL_FAMILIES[model]?.label || model, failedEffort: effort };
+    return { [`${prefix}Model`]: MODEL_FAMILIES[model]?.label || model, [`${prefix}Effort`]: effort };
   }
 
   function laneFor(jobId, laneKey) {
@@ -1314,8 +1316,8 @@ export function createClaudeApplicationRunner({
         queuedAt: new Date(queuedAt).toISOString(), queueWaitMs: Math.max(0, acquiredAt - queuedAt),
         provider, ...(route ? { route, reasoning } : {}),
         requestedModel: route ?? profile.model, requestedEffort: route ? reasoning : profile.effort,
-        handoffSha256: crypto.createHash('sha256').update(String(handoffCodeOf(handoff) ?? '')).digest('hex'),
-        promptSha256: crypto.createHash('sha256').update(text).digest('hex'), promptChars: text.length,
+        handoffSha256: sha256Hex(String(handoffCodeOf(handoff) ?? '')),
+        promptSha256: sha256Hex(text), promptChars: text.length,
         pageImages: pageImages.length,
         ...(editorialPlan ? { editorialPlan } : {}),
       };
@@ -1332,29 +1334,32 @@ export function createClaudeApplicationRunner({
         await logRun(jobId, canvasFilePath, { ...record, event: 'started', ...(capturePrompts ? { prompt: text } : {}) });
         try {
           const callEnded = trackClaudeCall(pauseKey);
-          const result = await (route ? offloadStage : stageRunner)({
-            text, pageImages, signal, stage, sessionId, resume, model: route ?? profile.model, effort: route ? reasoning : profile.effort,
-            ...(route ? { route, reasoning } : {}),
-            onActivity: event => touchActivity(jobId, event, actionShown()),
-            onThinkingSummary: summary => {
-              if (!acceptingSummaries) return Promise.reject(new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned a diagnostic summary after its run had ended.'));
-              const write = summaryChain.then(async () => {
-                if (typeof summary?.text !== 'string' || !summary.text.trim() || summary.thinkingDisplay !== 'summarized'
-                  || typeof summary.model !== 'string' || !answeringModel(profile.model, [summary.model])) {
-                  throw new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned an invalid diagnostic summary. The application was stopped before submission.');
-                }
-                // Project only this public content. Never serialize the callback
-                // argument itself: it may contain signatures or redacted blocks.
-                const safe = { text: summary.text, model: summary.model, index: summaryCount + 1, thinkingDisplay: 'summarized' };
-                await logRun(jobId, canvasFilePath, { ...record, event: 'thinking-summary', summary: safe, provisional: true });
-                summaryCount += 1;
-                summaryChars += summary.text.length;
-              });
-              summaryChain = write;
-              write.catch(() => {});
-              return write;
-            },
-          }).finally(callEnded);
+          let result;
+          try {
+            result = await (route ? offloadStage : stageRunner)({
+              text, pageImages, signal, stage, sessionId, resume, model: route ?? profile.model, effort: route ? reasoning : profile.effort,
+              ...(route ? { route, reasoning } : {}),
+              onActivity: event => touchActivity(jobId, event, actionShown()),
+              onThinkingSummary: summary => {
+                if (!acceptingSummaries) return Promise.reject(new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned a diagnostic summary after its run had ended.'));
+                const write = summaryChain.then(async () => {
+                  if (typeof summary?.text !== 'string' || !summary.text.trim() || summary.thinkingDisplay !== 'summarized'
+                    || typeof summary.model !== 'string' || !answeringModel(profile.model, [summary.model])) {
+                    throw new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned an invalid diagnostic summary. The application was stopped before submission.');
+                  }
+                  // Project only this public content. Never serialize the callback
+                  // argument itself: it may contain signatures or redacted blocks.
+                  const safe = { text: summary.text, model: summary.model, index: summaryCount + 1, thinkingDisplay: 'summarized' };
+                  await logRun(jobId, canvasFilePath, { ...record, event: 'thinking-summary', summary: safe, provisional: true });
+                  summaryCount += 1;
+                  summaryChars += summary.text.length;
+                });
+                summaryChain = write;
+                write.catch(() => {});
+                return write;
+              },
+            });
+          } finally { callEnded(); }
           acceptingSummaries = false;
           await summaryChain;
           // Keep returned text before submission, cancellation or transcript cleanup.
@@ -1372,7 +1377,7 @@ export function createClaudeApplicationRunner({
           try { await summaryChain; } catch (logError) { cause = logError; }
           const failure = cause instanceof ClaudeRunnerError
             ? cause
-            : new ClaudeRunnerError('CLAUDE_ERROR', clipText(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
+            : new ClaudeRunnerError('CLAUDE_ERROR', clipText(cause?.message || 'Claude run failed.') || 'Claude run failed.');
           // A parallel lane or planning call can differ from entry.stage.
           failure.failedStage = stage;
           await logRun(jobId, canvasFilePath, { ...record, event: 'failed', error: auditFailure(failure),
@@ -1408,7 +1413,7 @@ export function createClaudeApplicationRunner({
         try {
           const binding = editorialPlanBinding(handoff.prompt);
           const allowedIds = editorialPlanAllowedIds(handoff.prompt);
-          const archiveArgs = { canvasFilePath, jobId, laneKey, contextKey: key ?? `handoff:${crypto.createHash('sha256').update(String(handoffCodeOf(handoff) ?? '')).digest('hex')}`,
+          const archiveArgs = { canvasFilePath, jobId, laneKey, contextKey: key ?? `handoff:${sha256Hex(String(handoffCodeOf(handoff) ?? ''))}`,
             sourceDigest: binding.sourceDigest, allowedIds };
           let saved = await loadEditorialPlan(archiveArgs);
           if (!saved && lane.started && !lane.editorialPlanned && !needsFreshSession(lane, handoff, key, provider)) {

@@ -3,7 +3,7 @@ import { sha256Hex } from '../utils/sha256Hex.js';
 export const SAME_RULE_STOP_LIMIT = 5;
 export const SAME_RULE_STOP_REASONS = Object.freeze(['same-rule-repeat', 'run-budget']);
 export const APPLICATION_ROUTE_CLAUDE_RUNNER = 'claude-runner';
- const UNCHANGED_NOTICE_PREFIX = 'Unchanged reply:';
+const UNCHANGED_NOTICE_PREFIX = 'Unchanged reply:';
 const FAMILIES = Object.freeze({ write: 'write', convert: 'documents', 'verify-correction': 'documents', 'fit-correction': 'documents', pick: 'pick', 'fact-check': 'fact-check', 'fact-recheck': 'fact-check', 'fact-correction': 'fact-correction', requirements: 'requirements', 'requirements-audit': 'requirements-audit', 'requirements-adjudication': 'requirements-adjudication' });
 const SUBJECT = /^[a-z0-9][a-z0-9-]{0,47}$/u;
 const ID = /^[a-z][a-z0-9-]{0,63}$/u;
