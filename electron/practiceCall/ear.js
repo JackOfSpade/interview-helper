@@ -78,6 +78,21 @@ export function createPracticeEar({
   // A synthetic voice's tone model scores drift more than a person's, so its baseline is built from more speech.
   const voicedMinSpeechMs = Number.isFinite(voicedMinOption) && voicedMinOption > 0 ? voicedMinOption : minSpeechMs * 3;
 
+  // Background work settle() can wait for; it leaves the set when it ends, however it ends.
+  function track(work) {
+    inflight.add(work);
+    const done = () => { inflight.delete(work); };
+    work.then(done, done);
+    return work;
+  }
+  /** A measured turn with its pace added when the word count and the speech time are known. */
+  function withPace(measured, words) {
+    const spoken = Number(measured?.speechMs) || 0;
+    return words > 0 && spoken > 0
+      ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
+      : measured;
+  }
+
   let opening = null;
   function reader() {
     // One shared attempt: two callers arriving together must not each open the file, or the
@@ -159,13 +174,10 @@ export function createPracticeEar({
       if (!samples || !samples.length) return;
       await noteLoaded;
       const measure = await prosodyOf();
+      if (closed) return;
       const measured = measure({ samples, sampleRate: 16000, startMs, endMs, words: [] });
       // The measure has no word timings here, so pace is the segment's word count over its speech time.
-      const spoken = Number(measured?.speechMs) || 0;
-      const words = Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : 0;
-      const turn = words > 0 && spoken > 0
-        ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
-        : measured;
+      const turn = withPace(measured, Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : 0);
       measuredTurns.push({ ...turn, startMs, endMs, ...(voiced ? { voiced: true } : {}) });
       // Only the first ~minSpeechMs of candidate speech defines the baseline;
       // later answers are measured against it rather than moving it. A segment the caller says is the synthetic
@@ -176,6 +188,7 @@ export function createPracticeEar({
       if (feedsBaseline) active.add(turn, voiced ? voicedLatestTone : latestTone);
       const workerNow = await workerOf();
       for (let offset = 0; offset < endMs - startMs; offset += TONE_CHUNK_MS) {
+        if (closed) return;
         const chunkStart = startMs + offset;
         const chunkEnd = Math.min(endMs, chunkStart + TONE_CHUNK_MS);
         if (chunkEnd - chunkStart < 1000) continue;
@@ -191,10 +204,7 @@ export function createPracticeEar({
         } catch { /* tone is best effort */ }
       }
     };
-    const work = run();
-    inflight.add(work);
-    const done = () => { inflight.delete(work); };
-    work.then(done, done);
+    track(run());
   }
 
   /** R12: resolve once background tone/prosody work is done, or after the timeout. */
@@ -204,13 +214,14 @@ export function createPracticeEar({
     while (inflight.size) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return;
+      let timer = null;
       await Promise.race([
         Promise.allSettled([...inflight]),
-        new Promise(resolveWaited => { const timer = setTimeout(resolveWaited, remaining); timer?.unref?.(); }),
+        new Promise(resolveWaited => { timer = setTimeout(resolveWaited, remaining); timer?.unref?.(); }),
       ]);
+      clearTimeout(timer);
     }
   }
-
 
   /** Tone scores for the 6 s chunks of one voiced line, kept with their offset into the line. */
   async function voicedTone(line) {
@@ -244,21 +255,15 @@ export function createPracticeEar({
         };
         voicedLines.set(id, line);
         // The conversion is quick; the tone scores keep running on their own and settle() still waits for them.
-        line.tone = voicedTone(line);
-        inflight.add(line.tone);
-        const doneTone = () => { inflight.delete(line.tone); };
-        line.tone.then(doneTone, doneTone);
+        line.tone = track(voicedTone(line));
       };
       if (voicedLines.has(id)) return;
       // The line is known at once so a note asked for while it converts waits for it rather than missing it.
       const placeholder = {};
       voicedLines.set(id, placeholder);
-      const work = run().catch(() => {});
+      const work = track(run().catch(() => {}));
       // Until the conversion has made the line, the placeholder holds the wait; run() replaces it.
       if (voicedLines.get(id) === placeholder) placeholder.pending = work;
-      inflight.add(work);
-      const done = () => { inflight.delete(work); };
-      work.then(done, done);
     } catch { /* the ear never breaks the call */ }
   }
 
@@ -290,11 +295,7 @@ export function createPracticeEar({
    */
   // Tracked like the other background work, so settle() before the record is written waits for the last line's measures.
   function voicedNote(args = {}) {
-    const work = measureVoiced(args);
-    inflight.add(work);
-    const done = () => { inflight.delete(work); };
-    work.then(done, done);
-    return work;
+    return track(measureVoiced(args));
   }
 
   async function measureVoiced({ id, startMs, endMs, heardMs } = {}) {
@@ -319,10 +320,7 @@ export function createPracticeEar({
       const measured = measure({ samples: part, sampleRate: EAR_SAMPLE_RATE, startMs, endMs, words: [] });
       // Pace over the heard part: the line's word count scaled by how much of it was heard.
       const words = line.wordCount > 0 ? Math.round(line.wordCount * Math.min(1, heard / line.durationMs)) : 0;
-      const spoken = Number(measured?.speechMs) || 0;
-      const turn = words > 0 && spoken > 0
-        ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
-        : measured;
+      const turn = withPace(measured, words);
       const heardChunks = line.chunks.filter(chunk => chunk.offset < heard);
       const tone = heardChunks.length ? heardChunks[heardChunks.length - 1] : voicedLatestTone;
       if (heardChunks.length) voicedLatestTone = tone;
@@ -358,10 +356,7 @@ export function createPracticeEar({
       : whole;
     // Pace needs the words of this span: use the caller's count, else the one noted for the same span.
     const known = Number.isFinite(wordCount) ? wordCount : measuredTurns.find(item => !item.voiced && item.startMs === startMs && item.endMs === endMs)?.wordCount;
-    const spoken = Number(measured?.speechMs) || 0;
-    const turn = known > 0 && spoken > 0
-      ? { ...measured, wordCount: known, wordsPerMinute: Math.round((known / spoken) * 60000 * 10) / 10 }
-      : measured;
+    const turn = withPace(measured, known);
     let tone = latestTone;
     for (const sample of toneSamples) if (sample.atMs >= startMs && sample.atMs < endMs) tone = sample;
     return note(base.relative(turn, tone));

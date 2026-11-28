@@ -17,6 +17,8 @@
  * matters most, and a wrong tag costs little.
  */
 
+import { clipText } from './clipText.js';
+
 export const CANDIDATE_VOICE_STAGE = 'practice-call-candidate-voice';
 export const CANDIDATE_VOICE_GENDERS = Object.freeze(['female', 'male']);
 export const DEFAULT_CANDIDATE_VOICE_GENDER = 'male';
@@ -32,10 +34,7 @@ const TURN_MAX = 600;
 const REPLY_LOGGED_MAX = 400;
 const TAG = /\[[^[\]\n]{1,80}\]/gu;
 
-const clip = (value, max) => {
-  const text = String(value ?? '').trim();
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-};
+const clip = clipText;
 
 export const normalizeCandidateVoiceGender = value => (CANDIDATE_VOICE_GENDERS.includes(value) ? value : DEFAULT_CANDIDATE_VOICE_GENDER);
 

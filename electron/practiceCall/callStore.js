@@ -86,7 +86,10 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     await ensureRoot();
     const dir = path.join(rootDir, id);
     const existing = await assertRealDirectory(fs, dir);
-    if (!existing) await fs.mkdir(dir, { mode: 0o700 });
+    if (!existing) {
+      // Two writers creating the same call folder together: the loser finds it made.
+      try { await fs.mkdir(dir, { mode: 0o700 }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+    }
     await fs.chmod(dir, 0o700);
     return dir;
   }
@@ -225,7 +228,9 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     const pruned = [];
     for (const callId of (await recordedCallsNewestFirst()).slice(Math.max(0, keep))) {
       if (callId === protect) continue;
-      const { deleted } = await api.deleteRecording(callId);
+      let deleted;
+      // One call whose audio cannot be removed never stops the others from being pruned.
+      try { ({ deleted } = await api.deleteRecording(callId)); } catch { continue; }
       if (!deleted.length) continue;
       const record = await readJson(callId, 'call.json');
       if (record && record.recordingPruned !== true) await writeJson(callId, 'call.json', { ...record, recordingPruned: true });
@@ -382,12 +387,12 @@ export function createCallStore({ rootDir, fs = fsPromises } = {}) {
     async list(nodeId) {
       if (typeof nodeId !== 'string' || !nodeId) return [];
       const calls = [];
-      for (const callId of await this.knownCallIds()) {
+      for (const callId of await api.knownCallIds()) {
         const record = await readJson(callId, 'call.json');
         if (!record || record.nodeId !== nodeId) continue;
         const analysis = await readJson(callId, 'analysis.json');
         const item = summarize(callId, record, analysis);
-        item.hasAudio = await this.hasAudio(callId);
+        item.hasAudio = await api.hasAudio(callId);
         calls.push(item);
       }
       calls.sort((left, right) => (right.startedAt || 0) - (left.startedAt || 0));

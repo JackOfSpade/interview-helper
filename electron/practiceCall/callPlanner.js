@@ -44,7 +44,6 @@ const QUIET_DESCRIPTION = 'How this person deals with a candidate who goes quiet
 const SCREEN_CONTENT_LIMIT = 6000;
 const str = (min, description, max) => ({ type: 'string', minLength: min, ...(max ? { maxLength: max } : {}), ...(description ? { description } : {}) });
 
-/** The JSON schema given to the model; it mirrors the plan object validatePlan checks. */
 const PERSON_NAME_DESCRIPTION = "The person's full name, a first name and a surname written by you for this call, fitting the region the voice's accent suggests and the voice's gender.";
 /** The longest name kept for a person on the call. */
 export const PERSON_NAME_MAX = 60;
@@ -53,6 +52,7 @@ const NAME_PARTICLES = new Set(['de', 'da', 'di', 'do', 'du', 'la', 'le', 'el', 
 /** The words of a name, lower case, for comparing names: "Ana-Maria O'Neil" gives ana-maria, o'neil. */
 export const nameParts = value => clean(value).toLowerCase().split(/\s+/u).filter(Boolean);
 
+/** The JSON schema given to the model; it mirrors the plan object validatePlan checks. */
 export const PLAN_SCHEMA = Object.freeze({
   type: 'object',
   additionalProperties: false,
@@ -477,10 +477,8 @@ export function validatePlan(raw, { pool, voices, candidateName, candidateVoices
     });
   }
 
-  {
-    const total = questions.reduce((sum, question) => sum + (Number.isFinite(question.minutes) ? question.minutes : 0), 0);
-    if (total > MINUTES_SLACK * callMinutes) bad(`the question minutes add up to ${Number(total.toFixed(2))}, more than ${MINUTES_SLACK} times the call length of ${callMinutes} minutes (${Number((MINUTES_SLACK * callMinutes).toFixed(2))}); shorten the budgets or ask fewer questions, or make callMinutes longer`);
-  }
+  const totalMinutes = questions.reduce((sum, question) => sum + (Number.isFinite(question.minutes) ? question.minutes : 0), 0);
+  if (totalMinutes > MINUTES_SLACK * callMinutes) bad(`the question minutes add up to ${Number(totalMinutes.toFixed(2))}, more than ${MINUTES_SLACK} times the call length of ${callMinutes} minutes (${Number((MINUTES_SLACK * callMinutes).toFixed(2))}); shorten the budgets or ask fewer questions, or make callMinutes longer`);
 
   const problemsOut = [];
   if (!Array.isArray(raw.problems)) bad('problems must be an array (empty when no question needs the shared screen)');
@@ -552,7 +550,6 @@ export function validatePlan(raw, { pool, voices, candidateName, candidateVoices
 }
 
 const isAbort = (error, signal) => Boolean(signal?.aborted) || error?.name === 'AbortError' || error?.code === 'aborted' || error?.code === 'ABORT_ERR';
-
 
 /**
  * Makes the plan, asking again with the problems found when an attempt does not validate.

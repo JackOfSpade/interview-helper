@@ -9,6 +9,8 @@
  * accuracy is not checked; Sonnet low already writes the call's spoken acknowledgements without
  * leaking content, and Haiku is the setting that drops supplied detail elsewhere in this app.
  */
+import { clipText } from './clipText.js';
+
 export const DRAFT_ANSWER_STAGE = 'practice-call-draft-answer';
 // Hard backstop only (about 180 words): the prompt sets the real length. Audited call: follow-ups came back at 140 to 210 words and were cut in on.
 export const DRAFT_ANSWER_MAX_CHARS = 1100;
@@ -22,10 +24,7 @@ const PAD_MAX = 4000;
 const SCREEN_MAX = 8000;
 const SVG_MAX = 12000;
 
-const clip = (value, max) => {
-  const text = String(value ?? '').trim();
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-};
+const clip = clipText;
 const list = values => (Array.isArray(values) ? values : []).filter(item => typeof item === 'string' && item.trim());
 
 /**
