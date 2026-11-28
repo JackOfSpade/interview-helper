@@ -110,6 +110,17 @@ function interviewerRuns(entries) {
   return runs;
 }
 
+// A run can hold more than the question (a remark or a reaction before it). The candidate came in before the
+// question finished unless they started over interviewer speech that is not its last turn: then they talked over
+// the interviewer rather than cutting into the question.
+function talkedOverEarlierSpeech(entries, run, startMs) {
+  for (let index = run.firstIndex; index < run.lastIndex; index += 1) {
+    const turn = entries[index];
+    if (turn?.speaker === 'interviewer' && startMs >= turn.startMs && startMs < turn.endMs) return true;
+  }
+  return false;
+}
+
 // Paused time inside [fromMs, toMs]: the recording ran through a pause, but the candidate was not on the clock.
 function pausedOverlapMs(pauseSpans, fromMs, toMs) {
   return (Array.isArray(pauseSpans) ? pauseSpans : []).reduce((sum, span) => (
@@ -254,7 +265,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ca
       interviewerFirstIndex: run.firstIndex,
       interviewerEndMs: run.endMs,
       overlapMs: Math.max(0, run.endMs - entry.startMs),
-      beforeQuestionFinished: entry.startMs < run.endMs,
+      beforeQuestionFinished: !talkedOverEarlierSpeech(entries, run, entry.startMs),
     });
   });
 
