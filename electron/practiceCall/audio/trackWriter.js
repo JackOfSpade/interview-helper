@@ -1,7 +1,8 @@
 // Interviewer track rebuilt from what the engine sent and what the helper
 // reported. Each utterance keeps its own PCM; events place the played spans on
 // the helper timeline. File I/O only happens in finalize.
-import { TWO_POW_15, wavHeader } from './wavFormat.js';
+import { HEADER_BYTES, TWO_POW_15, wavHeader } from './wavFormat.js';
+import { pcm16ToFloat } from './resample.js';
 
 const SILENCE = 0;
 
@@ -11,11 +12,7 @@ function toSamples(pcm16le) {
   let bytes = pcm16le;
   if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
   if (!bytes || typeof bytes.length !== 'number') throw new Error('trackWriter: pcm16le must be a byte buffer');
-  const view = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? bytes.length);
-  const count = Math.floor(view.length / 2);
-  const out = new Float32Array(count);
-  for (let i = 0; i < count; i += 1) out[i] = view.readInt16LE(i * 2) / TWO_POW_15;
-  return out;
+  return pcm16ToFloat(bytes);
 }
 
 const msToFrames = (ms, rate) => Math.round((ms * rate) / 1000);
@@ -24,9 +21,9 @@ export function writePcm16Wav(filePath, samples, sampleRate, { fs }) {
   const fd = fs.openSync(filePath, 'w');
   try {
     const frames = samples.length;
-    fs.writeSync(fd, wavHeader(frames * 2, sampleRate), 0, 44, 0);
+    fs.writeSync(fd, wavHeader(frames * 2, sampleRate), 0, HEADER_BYTES, 0);
     const blockFrames = sampleRate;
-    let position = 44;
+    let position = HEADER_BYTES;
     for (let start = 0; start < frames; start += blockFrames) {
       const count = Math.min(blockFrames, frames - start);
       const chunk = Buffer.alloc(count * 2);
@@ -44,7 +41,7 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
   if (!(sampleRate > 0)) throw new Error('trackWriter: sampleRate must be positive');
   const utterances = new Map();
 
-  const require = id => {
+  const utteranceOf = id => {
     const utterance = utterances.get(id);
     if (!utterance) throw new Error(`trackWriter: unknown utterance ${String(id)}`);
     return utterance;
@@ -65,32 +62,32 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
       utterances.set(id, { samples, sampleRate: rate, durationMs, segments: existing?.segments ?? [], open: existing?.open ?? null });
     },
     started(id, atMs) {
-      const utterance = require(id);
+      const utterance = utteranceOf(id);
       if (utterance.open) closeSegment(utterance, utterance.durationMs);
       utterance.open = { wallStartMs: Math.max(0, atMs ?? 0), audioStartMs: 0 };
     },
     paused(id, positionMs, atMs) {
-      const utterance = require(id);
+      const utterance = utteranceOf(id);
       if (!utterance.open) throw new Error('trackWriter: paused before started');
       const position = Math.min(utterance.durationMs, Math.max(utterance.open.audioStartMs, positionMs ?? 0));
       closeSegment(utterance, position);
       utterance.resume = { positionMs: position, atMs: Math.max(0, atMs ?? 0) };
     },
     resumed(id, atMs) {
-      const utterance = require(id);
+      const utterance = utteranceOf(id);
       const resume = utterance.resume ?? { positionMs: utterance.segments.at(-1)?.audioEndMs ?? 0, atMs: 0 };
       utterance.resume = null;
       utterance.open = { wallStartMs: Math.max(0, atMs ?? resume.atMs), audioStartMs: resume.positionMs };
     },
     ended(id, positionMs, atMs) {
-      const utterance = require(id);
+      const utterance = utteranceOf(id);
       if (!utterance.open) return;
       const position = Math.min(utterance.durationMs, Math.max(utterance.open.audioStartMs, positionMs ?? utterance.durationMs));
       closeSegment(utterance, position);
       utterance.endedAtMs = Math.max(0, atMs ?? 0);
     },
     segments(id) {
-      const utterance = require(id);
+      const utterance = utteranceOf(id);
       return utterance.segments.map(segment => ({ ...segment }));
     },
     finalize(path, { durationMs, fs } = {}) {

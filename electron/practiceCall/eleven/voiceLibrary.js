@@ -16,7 +16,7 @@ import {
 
 export { SUBSCRIPTION_URL };
 
- const SHARED_VOICES_URL = 'https://api.elevenlabs.io/v1/shared-voices';
+const SHARED_VOICES_URL = 'https://api.elevenlabs.io/v1/shared-voices';
 export const ACCOUNT_VOICES_URL = 'https://api.elevenlabs.io/v1/voices';
 
 /**
@@ -24,7 +24,7 @@ export const ACCOUNT_VOICES_URL = 'https://api.elevenlabs.io/v1/voices';
  * studio quality. Measured on 2026-11-17 it keeps 558 of the 2,961 otherwise eligible voices, with
  * a median yearly use about seven times the whole pool's. The owner chose it that day.
  */
- const LIBRARY_TIER = 'high_quality';
+const LIBRARY_TIER = 'high_quality';
 
 const MAX_LAST_USED = 50;
 
@@ -71,7 +71,7 @@ const caseLabelsOf = voice => {
 };
 
 /** One shared-voices row → the library shape, or null when it is not a usable candidate. */
- function normalizeLibraryVoice(voice) {
+function normalizeLibraryVoice(voice) {
   const voiceId = String(voice?.voice_id ?? voice?.voiceId ?? '').trim();
   const publicOwnerId = String(voice?.public_owner_id ?? voice?.publicOwnerId ?? '').trim();
   if (!voiceId || !publicOwnerId) return null;

@@ -14,8 +14,8 @@ function frameRms(samples, start, length) {
   return Math.sqrt(sum / count);
 }
 
-function differenceFunction(samples, start, windowSamples, tauMin, tauMax) {
-  const d = new Float64Array(tauMax + 1);
+// Fills `d` (reused across frames) for tau in [tauMin, tauMax]; entries below tauMin are never written and stay 0.
+function differenceFunction(d, samples, start, windowSamples, tauMin, tauMax) {
   for (let tau = tauMin; tau <= tauMax; tau += 1) {
     let sum = 0;
     for (let j = 0; j < windowSamples; j += 1) {
@@ -27,15 +27,13 @@ function differenceFunction(samples, start, windowSamples, tauMin, tauMax) {
   return d;
 }
 
-function cumulativeMeanNormalised(d, tauMax) {
-  const cmnd = new Float64Array(tauMax + 1);
+function cumulativeMeanNormalised(cmnd, d, tauMax) {
   cmnd[0] = 1;
   let running = 0;
   for (let tau = 1; tau <= tauMax; tau += 1) {
     running += d[tau] ?? 0;
     cmnd[tau] = running > 0 ? (d[tau] ?? 0) * tau / running : 1;
   }
-  return cmnd;
 }
 
 function pickPeriod(cmnd, tauMin, tauMax) {
@@ -67,12 +65,14 @@ export function trackPitch(samples, sampleRate, { hopMs = 10, minHz = 60, maxHz 
   const frameCount = total === 0 ? 0 : total <= frameLength ? 1 : 1 + Math.floor((total - frameLength) / hop);
   const f0 = new Float32Array(frameCount);
   const floorAmplitude = dbfsToAmplitude(UNVOICED_DBFS);
+  const d = new Float64Array(tauMax + 1);
+  const cmnd = new Float64Array(tauMax + 1);
 
   for (let frame = 0; frame < frameCount; frame += 1) {
     const start = frame * hop;
     if (frameRms(samples, start, windowSamples) < floorAmplitude) { f0[frame] = 0; continue; }
-    const d = differenceFunction(samples, start, windowSamples, tauMin, tauMax);
-    const cmnd = cumulativeMeanNormalised(d, tauMax);
+    differenceFunction(d, samples, start, windowSamples, tauMin, tauMax);
+    cumulativeMeanNormalised(cmnd, d, tauMax);
     const found = pickPeriod(cmnd, tauMin, tauMax);
     if (!found) { f0[frame] = 0; continue; }
     const period = parabolicPeriod(cmnd, found.tau);

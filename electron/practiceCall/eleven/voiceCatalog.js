@@ -6,8 +6,8 @@
 import { classifyFailure, voiceError, redact } from './voiceErrors.js';
 
 export const VOICES_URL = 'https://api.elevenlabs.io/v2/voices';
- const PAGE_SIZE = 100;
- const MAX_PAGES = 20;
+const PAGE_SIZE = 100;
+const MAX_PAGES = 20;
 
 export const normalizeGender = value => {
   const text = String(value ?? '').trim().toLowerCase();
@@ -18,7 +18,7 @@ export const normalizeGender = value => {
   return 'neutral';
 };
 
- const labelUseCases = labels => String(labels?.use_case ?? labels?.useCase ?? '')
+const labelUseCases = labels => String(labels?.use_case ?? labels?.useCase ?? '')
   .split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
 
 export const isConversational = voice => {
@@ -52,7 +52,7 @@ export const hasKnownGender = voice => {
 export const textOf = value => String(value ?? '').trim().toLowerCase();
 
 /** Verified language codes, from raw API voices (objects) or normalized voices (strings). */
- const verifiedLanguagesOf = voice => {
+const verifiedLanguagesOf = voice => {
   const list = Array.isArray(voice?.verifiedLanguages) ? voice.verifiedLanguages
     : Array.isArray(voice?.verified_languages) ? voice.verified_languages : [];
   return list.map(item => (typeof item === 'string' ? item : item?.language)).map(textOf).filter(Boolean);
