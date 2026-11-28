@@ -7,6 +7,7 @@ import fsDefault from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import electronPkg from 'electron';
+import { findClaudeBinaryCandidate } from './claudeBinaryCandidates.js';
 import { CLAUDE_LIMIT_PROBE_MS, CLAUDE_LIMIT_RESET_GRACE_MS, CLAUDE_LIMIT_TYPES } from './claudeLimitConstants.js';
 
 export const DEFAULT_CLAUDE_ACCOUNT_ID = 'default';
@@ -34,11 +35,7 @@ function executableExists(fs, filePath) {
 }
 
 function findClaudeBinary({ env = process.env, home = os.homedir(), fs = fsDefault } = {}) {
-  const candidates = [];
-  for (const entry of String(env?.PATH || '').split(path.delimiter)) if (entry) candidates.push(path.join(entry, 'claude'));
-  if (home) candidates.push(path.join(home, '.local', 'bin', 'claude'));
-  candidates.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
-  return candidates.find(candidate => executableExists(fs, candidate)) || null;
+  return findClaudeBinaryCandidate({ env, home, isExecutable: candidate => executableExists(fs, candidate) });
 }
 
 function parseAuthStatus(text) {

@@ -20,6 +20,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { findClaudeBinaryCandidate } from './claudeBinaryCandidates.js';
 import { CLAUDE_OUTPUT_TOKENS, CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
 import { APPLICATION_STAGE_PROFILES, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL, COVER_ONLY_WRITE_PROFILE } from './careerWritingCore.js';
 import { OFFLOAD_REASONING_LEVELS, applicationStageProviders, offloadStagesDisabled } from './aiCallProviders.js';
@@ -322,17 +323,8 @@ function defaultIsExecutable(filePath) {
 }
 
 export function resolveClaudeBinary({ env = process.env, homedir = '', isExecutable = defaultIsExecutable } = {}) {
-  const candidates = [];
-  for (const entry of String(env?.PATH || '').split(path.delimiter)) {
-    if (entry) candidates.push(path.join(entry, 'claude'));
-  }
-  if (homedir) candidates.push(path.join(homedir, '.local', 'bin', 'claude'));
-  candidates.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
-  for (const candidate of candidates) {
-    let ok = false;
-    try { ok = isExecutable(candidate) === true; } catch { ok = false; }
-    if (ok) return candidate;
-  }
+  const found = findClaudeBinaryCandidate({ env, home: homedir, isExecutable });
+  if (found) return found;
   throw new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing);
 }
 
