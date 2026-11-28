@@ -278,6 +278,32 @@ export default [
     },
   },
   {
+    name: 'practice call audio: track writer gives identical output for audio appended in chunks as for the whole line',
+    run() {
+      const dir = tempDir();
+      const whole = Buffer.alloc(24000 * 2);
+      for (let i = 0; i < 24000; i += 1) whole.writeInt16LE(Math.round(Math.sin(i / 7) * 20000), i * 2);
+      const render = (name, feed) => {
+        const track = createInterviewerTrack({ sampleRate: 24000 });
+        feed(track);
+        track.started('a', 100);
+        track.paused('a', 300, 400);
+        track.resumed('a', 700);
+        track.ended('a', 900, 1500);
+        const out = path.join(dir, name);
+        track.finalize(out, { durationMs: 1800, fs });
+        return fs.readFileSync(out);
+      };
+      const reference = render('whole.wav', track => track.addUtterance('a', whole, 24000));
+      // Odd-sized chunks split samples across boundaries, as a stream does.
+      const chunked = render('chunked.wav', track => {
+        track.appendUtterance('a', Buffer.alloc(0), 24000);
+        for (let at = 0; at < whole.length; at += 1001) track.appendUtterance('a', whole.subarray(at, at + 1001), 24000);
+      });
+      assert.ok(chunked.equals(reference), 'chunked input renders the same bytes as the whole line');
+    },
+  },
+  {
     name: 'practice call audio: track writer aligns played spans to the helper timeline sample by sample',
     run() {
       const dir = tempDir();

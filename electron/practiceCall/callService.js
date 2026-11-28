@@ -1255,7 +1255,14 @@ export function createPracticeCallService(deps = {}) {
       if (!codec) return null;
       try { const tail = codec.flush?.(); return tail && tail.length ? Buffer.from(tail) : null; } catch { return null; }
     };
+    // A track that takes chunks as they come joins and converts them once; any other gets the whole line each time.
+    const appends = typeof track?.appendUtterance === 'function';
     const record = (id, buffer, rate) => {
+      if (appends) {
+        rates.set(id, rate);
+        safe(() => track.appendUtterance(id, buffer, rate));
+        return;
+      }
       const list = chunks.get(id) || [];
       list.push(Buffer.from(buffer));
       chunks.set(id, list);
@@ -1275,7 +1282,8 @@ export function createPracticeCallService(deps = {}) {
         const rate = sampleRate || rates.get(id) || 24000;
         rates.set(id, rate);
         chunks.set(id, chunks.get(id) || []);
-        register(id, Buffer.alloc(0), rate);
+        if (appends) safe(() => track.appendUtterance(id, Buffer.alloc(0), rate));
+        else register(id, Buffer.alloc(0), rate);
         return result;
       },
       pushAudio(id, pcm, sampleRate) {
@@ -1296,7 +1304,7 @@ export function createPracticeCallService(deps = {}) {
       endUtterance(id) {
         const tail = drainCodec(id);
         if (tail) { record(id, tail, rates.get(id) || 24000); helper.pushAudio?.(id, tail, rates.get(id) || 24000); }
-        register(id, Buffer.concat(chunks.get(id) || []), rates.get(id) || 24000);
+        if (!appends) register(id, Buffer.concat(chunks.get(id) || []), rates.get(id) || 24000);
         free(id);
         return helper.endUtterance?.(id);
       },
