@@ -19,6 +19,7 @@ export function TextSizeControl({ onError }) {
   if (!size) return null;
   const index = size.steps.indexOf(size.percent);
   const change = async (percent) => {
+    if (!Number.isFinite(percent)) return;
     try { setSize(await window.interviewAppAPI.setTextSize({ percent })); }
     catch (error) { onError?.(error?.message || 'The text size could not be changed.'); }
   };

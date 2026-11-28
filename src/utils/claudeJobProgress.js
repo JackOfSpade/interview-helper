@@ -1,6 +1,5 @@
-// The runner supplies the current action and host-verified candidate counts.
-// No ordered stepper: writing and correction can repeat for every candidate.
-import { applicationProgressContext, applicationProgressStageLabel, normalizeApplicationProgress } from './applicationProgress.js';
+// What the status card says about a handoff the Claude task worker holds: the
+// current action, recent steps and separately labelled clocks.
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const time = value => Number.isFinite(value) && value >= 0 ? value : null;
@@ -79,53 +78,6 @@ function taskLiveCounts(task) {
     Number.isSafeInteger(task.rejections) && task.rejections > 0 ? `${task.rejections} rejected` : '',
     Number.isSafeInteger(task.maxTurns) ? `Web research turn ${task.toolTurns || 0} of ${task.maxTurns}` : countOf(task.toolTurns, 'tool turns'),
   ].filter(Boolean);
-}
-
-function deriveInner(input) {
-  const run = object(input.run), item = object(input.item);
-  const stage = applicationProgressStageLabel(run.stage) ? run.stage : item.stage;
-  const label = applicationProgressStageLabel(stage);
-  const progress = normalizeApplicationProgress(run.progress) || normalizeApplicationProgress(item.progress);
-  const context = applicationProgressContext(progress);
-  const waiting = run.activity === 'waiting';
-  const held = input.held === true;
-  if (input.usageLimited === true && waiting) {
-    return { kind: 'claude-queued', steps: taskSteps(object(run.live)), tone: 'attention', contextLabel: context.label, summary: context.summary,
-      headline: 'Paused until Claude usage resets', detail: 'Finished stages are saved. This bundle continues from them.', since: time(run.updatedAt), startedAt: context.startedAt ?? time(run.startedAt), lastHeard: null, action: null, actionLabel: null };
-  }
-  if (held && waiting) {
-    return { kind: 'claude-queued', steps: taskSteps(object(run.live)), tone: 'attention', contextLabel: context.label, summary: context.summary,
-      headline: CLAUDE_PAUSED_HEADLINE, detail: CLAUDE_PAUSED_DETAIL, since: time(run.updatedAt), startedAt: context.startedAt ?? time(run.startedAt), lastHeard: null, action: null, actionLabel: null };
-  }
-  const checking = stage === 'host-verification';
-  const corrections = Array.isArray(item.corrections) ? item.corrections.filter(Boolean).length : 0;
-  const correcting = ['verify-correction', 'fit-correction', 'fact-correction'].includes(stage);
-  const parallel = Number.isSafeInteger(run.activeCalls) && Number.isSafeInteger(run.waitingCalls)
-    && run.activeCalls + run.waitingCalls > 1 ? `${run.activeCalls} tasks running · ${run.waitingCalls} waiting for a slot` : '';
-  // What the stream shows right now; absent until this action has reported.
-  const live = object(run.live);
-  const streaming = !waiting && !checking && live.state === 'running';
-  const [liveHeadline, liveDetail] = streaming ? taskRunningCopy(live) : ['', ''];
-  const liveLine = liveDetail ? `${liveHeadline}: ${liveDetail}` : liveHeadline;
-  return {
-    kind: waiting ? 'claude-queued' : correcting ? 'claude-fixing' : checking ? 'claude-checking' : 'claude-writing',
-    steps: taskSteps(live), tone: streaming && live.phase === 'api-retry' ? 'attention' : 'working', contextLabel: context.label,
-    summary: [held ? CLAUDE_PAUSING_NOTE : '', context.summary, ...taskLiveCounts(live), parallel].filter(Boolean).join(' · '),
-    headline: waiting ? 'Waiting for an available Claude slot' : label || 'Preparing application',
-    detail: waiting ? (label ? `Next action: ${label.toLowerCase()}.` : '')
-      : checking ? 'The app is validating this response before continuing.'
-        : correcting && corrections ? `${corrections} ${corrections === 1 ? 'finding' : 'findings'} to address in this candidate.`
-          : liveLine || 'Running on this computer.',
-    since: time(run.updatedAt), startedAt: context.startedAt ?? time(run.startedAt),
-    lastHeard: checking || waiting ? null : time(run.lastActivityAt),
-    action: null, actionLabel: null,
-  };
-}
-
-export function deriveClaudeJobProgress(input) {
-  try { return deriveInner(object(input)); }
-  catch { return { kind: 'claude-writing', steps: [], tone: 'working', contextLabel: 'Application generation',
-    summary: '', headline: 'Preparing application', detail: '', since: null, startedAt: null, lastHeard: null, action: null, actionLabel: null }; }
 }
 
 function deriveTaskInner({ activity, requestId }) {

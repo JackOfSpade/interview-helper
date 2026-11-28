@@ -15,7 +15,7 @@ const optionalCount = value => Number.isSafeInteger(value) && value >= 0 ? value
 const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
 /** Pure: only bounded, known fields of one tracked Claude call. */
-export function normalizeClaudeActivityEntry(raw) {
+function normalizeClaudeActivityEntry(raw) {
   if (!isObject(raw) || !STATES.has(raw.state)) return null;
   const failure = isObject(raw.failure) ? { label: text(raw.failure.label), retryAt: time(raw.failure.retryAt) } : null;
   const apiRetry = isObject(raw.apiRetry) ? {

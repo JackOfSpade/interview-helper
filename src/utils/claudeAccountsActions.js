@@ -1,30 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-// The one sentence that explains the whole multi-account behaviour, kept here
-// so the settings panel and any future surface cannot drift apart.
-export const CLAUDE_ACCOUNTS_HELP = 'The app uses the first signed-in account that has usage left and switches automatically when one reaches its limit.';
-
 const CLAUDE_ACCOUNT_ADD_UNAVAILABLE = 'Adding Claude accounts is not available in this build.';
 
 const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const emailOf = value => (typeof value === 'string' && value ? value : null);
-
-/** Pure: the account list from the main process, or [] when the bridge cannot answer. */
-export async function listClaudeAccounts() {
-  try {
-    const list = await globalThis.window?.electronAPI?.listClaudeAccounts?.();
-    return Array.isArray(list) ? list.filter(isObject) : [];
-  } catch { return []; }
-}
-
-/** Pure: true only when the main process confirmed the removal. */
-export async function removeClaudeAccount(id) {
-  if (typeof id !== 'string' || !id) return false;
-  try {
-    const result = await globalThis.window?.electronAPI?.removeClaudeAccount?.(id);
-    return result?.ok === true;
-  } catch { return false; }
-}
 
 /**
  * Pure: the one-line result of a finished addClaudeAccount call, or null when
@@ -78,5 +57,3 @@ export function useClaudeAccountAddFlow({ onAdded } = {}) {
 
   return { pending, message, addAccount, cancelLogin };
 }
-
-export default useClaudeAccountAddFlow;

@@ -1,7 +1,6 @@
 import React, { useSyncExternalStore } from 'react';
 import { useProgressClock } from '../hooks/useProgressClock';
-import { CLAUDE_PROGRESS_COPY, HEADLINE_CLASS, TONE_CLASS, claudeProgressTimeLines, deriveClaudeJobProgress, deriveClaudeTaskProgress, formatProgressDuration } from '../utils/claudeJobProgress';
-import { getClaudeApplicationRun, subscribeClaudeApplicationRuns } from '../utils/claudeApplicationRuns';
+import { CLAUDE_PROGRESS_COPY, HEADLINE_CLASS, TONE_CLASS, claudeProgressTimeLines, deriveClaudeTaskProgress, formatProgressDuration } from '../utils/claudeJobProgress';
 import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
 import { Loader2 } from 'lucide-react';
 
@@ -84,22 +83,6 @@ function presentView(view, now) {
 }
 
 const hasClock = view => view.since !== null || view.startedAt !== null || view.lastHeard !== null;
-
-// One current action, scoped candidate counts, and separately labelled clocks.
-export function ClaudeProgress({ run, item }) {
-  const jobId = item?.jobId;
-  // The dock item's run is a discovery-time snapshot; activity-only updates
-  // land in the store, so read the live run from there.
-  const liveRun = useSyncExternalStore(
-    subscribeClaudeApplicationRuns,
-    () => getClaudeApplicationRun(jobId),
-    () => getClaudeApplicationRun(jobId),
-  );
-  const activity = useSyncExternalStore(subscribeClaudeTaskActivity, getClaudeTaskActivity, getClaudeTaskActivity);
-  const view = deriveClaudeJobProgress({ run: liveRun || run, item, held: (activity.held || []).includes(`application:${jobId}`), usageLimited: Boolean(activity.usageLimit) });
-  const now = useProgressClock(hasClock(view));
-  return <ClaudeProgressCard {...presentView(view, now)} />;
-}
 
 // A handoff the local Claude worker is answering: its live steps and clocks, no
 // controls. Used by the dock for every handoff released to the worker.

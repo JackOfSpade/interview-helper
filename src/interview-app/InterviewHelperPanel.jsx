@@ -27,13 +27,17 @@ const safeFilename = value => boundedText(value, 180);
 const sameSafeFilenames = (left, right) => Array.isArray(left) && Array.isArray(right)
   && left.length === right.length && left.every((value, index) => value === right[index]);
 
+// The usable file paths of a drop or choice. A macOS app bundle is a folder, not a document.
+const careerFilePaths = files => (Array.isArray(files) ? files : []).map(file => file?.filePath || file?.path).filter(path => typeof path === 'string' && path.trim() && !/\.app[\\/]*$/iu.test(path));
+// Fire a cancel request whose reply nobody waits for.
+const sendAndForget = request => { try { Promise.resolve(request()).catch(() => {}); } catch { /* the reply is ignored either way */ } };
+
 const TYPED_JOB_MAX = 2000;
 const TYPED_KINDS = ['link', 'found', 'generated'];
 const typedJobKind = value => TYPED_KINDS.includes(value) ? value : null;
 const typedJobNotes = value => (Array.isArray(value) ? value : []).map(note => boundedText(note, 400)).filter(Boolean).slice(0, 6);
 const clearTypedJobResult = () => ({ interviewHelperTypedJobKind: null, interviewHelperTypedJobNotes: null });
 const clearPreparationState = () => ({ interviewHelperPreparation: null, interviewHelperPreparationRecordId: null, interviewHelperPreparationInputBinding: null, interviewHelperPreparationInputDigest: null, interviewHelperPreparationRunId: null });
-const clearDependentState = () => ({ ...clearPreparationState() });
 const clearCareerImportState = () => ({ interviewHelperCareerGeneration: null, interviewHelperCareerCompilation: null, interviewHelperCareerSnapshotId: null, interviewHelperCareerFingerprint: null, interviewHelperCareerFilenames: [] });
 function projectBundle(reply) {
   const value = reply?.bundle || reply?.artifact || reply;
@@ -381,7 +385,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     if (recoverableCareerRunId && !await retireRecoverableManualAiRun('career', recoverableCareerRunId)) return;
     if (recoverablePreparationRunId && !await retireRecoverableManualAiRun('preparation', recoverablePreparationRunId)) return;
     invalidateCareer(); invalidatePreparation();
-    persist({ interviewHelperCareerMode: 'none', interviewHelperSourceNodeId: null, interviewHelperSourceSnapshotId: null, ...clearCareerImportState(), ...clearDependentState() });
+    persist({ interviewHelperCareerMode: 'none', interviewHelperSourceNodeId: null, interviewHelperSourceSnapshotId: null, ...clearCareerImportState(), ...clearPreparationState() });
   }, [data.interviewHelperCareerMode, data.locked, invalidateCareer, invalidatePreparation, persist, recoverableCareerRunId, recoverablePreparationRunId, retireRecoverableManualAiRun]);
   // Shared by the folder picker and the typed job: validate the reply, then
   // adopt it exactly the same way. Returns false when a newer operation won.
@@ -451,7 +455,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     typedRunRef.current = null; setTypedRunId(null);
     bundleOperationRef.current += 1;
     setTypedBusy(false); setTypedError(null);
-    try { Promise.resolve(window.interviewAppAPI?.cancelInterviewTypedJob?.({ nodeId: id, runId })).catch(() => {}); } catch { /* the reply is ignored either way */ }
+    sendAndForget(() => window.interviewAppAPI?.cancelInterviewTypedJob?.({ nodeId: id, runId }));
   }, [id]);
   // Reached through the dropdown's "None" option; nothing on disk is touched.
   const clearBundle = useCallback(async () => {
@@ -467,7 +471,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     return true;
   }, [data.interviewHelperApplicationBundle, data.locked, invalidatePreparation, persist, recoverablePreparationRunId, retireRecoverableManualAiRun]);
   const compileCareerFiles = useCallback(async files => {
-    let filePaths = (Array.isArray(files) ? files : []).map(file => file?.filePath || file?.path).filter(path => typeof path === 'string' && path.trim() && !/\.app[\\/]*$/iu.test(path));
+    let filePaths = careerFilePaths(files);
     let filenames = filePaths.map(path => safeFilename(path.split(/[\\/]/u).pop())).filter(Boolean);
     if (data.locked || manualAiStartBlocked || manualAiOperationRef.current || localCareerRunRef.current || !filePaths.length || !window.electronAPI?.parseCareerData) return;
     if (filenames.length !== filePaths.length) {
@@ -506,7 +510,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     setManualAiBusy(true);
     localCareerRunRef.current = manualAiRunId;
     invalidatePreparation();
-    persist({ interviewHelperCareerMode: 'import', interviewHelperSourceNodeId: null, interviewHelperSourceSnapshotId: null, interviewHelperCareerGeneration: generation, interviewHelperCareerCompilation: receipt, interviewHelperCareerSnapshotId: null, interviewHelperCareerFingerprint: null, interviewHelperCareerFilenames: filenames, ...clearDependentState() });
+    persist({ interviewHelperCareerMode: 'import', interviewHelperSourceNodeId: null, interviewHelperSourceSnapshotId: null, interviewHelperCareerGeneration: generation, interviewHelperCareerCompilation: receipt, interviewHelperCareerSnapshotId: null, interviewHelperCareerFingerprint: null, interviewHelperCareerFilenames: filenames, ...clearPreparationState() });
     try {
       const reply = await window.electronAPI.parseCareerData({ filePaths, nodeId: id, manualAiRunId });
       const approved = reply?.success && approveCareerImportCompilation(receipt, { generation, attemptId: receipt.attemptId, careerSnapshotId: reply.careerSnapshotId, profileFingerprint: reply.fingerprint });
@@ -535,7 +539,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
   // Any file type may be dropped: each is converted to plain text first, then
   // the converted (or pass-through .txt/.md) files go through the unchanged compile.
   const startCareerFiles = useCallback(async files => {
-    const dropped = (Array.isArray(files) ? files : []).map(file => file?.filePath || file?.path).filter(path => typeof path === 'string' && path.trim() && !/\.app[\\/]*$/iu.test(path));
+    const dropped = careerFilePaths(files);
     if (!dropped.length || data.locked || manualAiStartBlocked || manualAiOperationRef.current || localCareerRunRef.current || careerConvertingRef.current) return;
     const convert = window.interviewAppAPI?.convertCareerFiles;
     if (typeof convert !== 'function' || dropped.every(path => isPassThroughCareerName(path))) { setCareerConversion(null); await compileCareerFiles(files); return; }
@@ -628,7 +632,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
     preparationOperationRef.current += 1;
     persist({ interviewHelperPreparation: before?.preparation ?? null, interviewHelperPreparationRecordId: before?.recordId ?? null, interviewHelperPreparationInputBinding: before?.binding ?? null, interviewHelperPreparationRunId: null });
     setPrepareNotice('Preparation cancelled. Anything already written was kept.');
-    try { Promise.resolve(window.interviewAppAPI?.cancelInterviewBrief?.({ nodeId: id, runId })).catch(() => {}); } catch { /* the reply is ignored either way */ }
+    sendAndForget(() => window.interviewAppAPI?.cancelInterviewBrief?.({ nodeId: id, runId }));
     // A cancelled run may be paused: its hold has nothing left to resume, so it ends with the run.
     void resumeClaude([claudeInterviewPauseKey(runId)]);
   }, [id, persist]);
@@ -668,7 +672,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
         {typedError && <div role="alert" data-testid="typed-job-error" className="rounded-md border border-amber-400/40 bg-amber-500/10 p-2 text-[11px] text-amber-100"><p className="font-semibold">This job was not used.</p><p>{typedError}</p>{persistedBundle?.label && <p className="mt-1 text-amber-100/70">Still selected: {persistedBundle.label}</p>}</div>}
         {typedKind === 'generated' && <p role="status" data-testid="typed-job-generated" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">Generated listing: no open posting was found, so this job description was written by AI as a realistic stand-in. It is not the employer's text.</p>}
         {shownTypedNotes.map((note, index) => <p key={index} role="status" className="text-[11px] text-white/60">{note}</p>)}
-        {data.interviewHelperApplicationBundle && <><p className="text-[11px] text-white/60">{persistedBundle?.label || 'Selected application bundle'}{persistedBundle?.integritySummary ? ` · ${persistedBundle.integritySummary}` : ''}{bundleLoadStatus === 'loading' ? ' · checking…' : ''}</p></>}
+        {data.interviewHelperApplicationBundle && <p className="text-[11px] text-white/60">{persistedBundle?.label || 'Selected application bundle'}{persistedBundle?.integritySummary ? ` · ${persistedBundle.integritySummary}` : ''}{bundleLoadStatus === 'loading' ? ' · checking…' : ''}</p>}
         {bundlePickerError && <p role="alert" className="text-[11px] text-red-200">{bundlePickerError}</p>}{bundleLoadStatus === 'error' && <p role="alert" className="text-[11px] text-red-200">The selected application bundle is unavailable, changed, or cannot be checked in this app version. Replace it to prepare.</p>}
         {persistedBundle && !canonicalInterviewJobUrl(data.interviewHelperJobUrl) && <p role="status" className="text-[11px] text-amber-100">This application has no job posting link, so preparation cannot research it. Regenerate the application, then choose it again.</p>}
         {/* Which listing Prepare will use, for whatever is selected now. */}

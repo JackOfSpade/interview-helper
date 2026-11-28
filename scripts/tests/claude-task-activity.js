@@ -7,7 +7,6 @@ import { CLAUDE_STALE_AFTER_MS, claudeProgressTimeLines, deriveClaudeTaskProgres
 import { normalizeClaudeTaskActivity } from '../../src/utils/claudeTaskActivityStore.js';
 import { claudeUsageLimitNotice } from '../../src/utils/claudeTaskPause.js';
 import { __resetClaudePauseFlowsForTests, getClaudePauseFlow, resumeClaude, startClaudePause } from '../../src/utils/claudePauseFlow.js';
-import { deriveClaudeJobProgress } from '../../src/utils/claudeJobProgress.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
@@ -526,7 +525,7 @@ export default [
     },
   },
   {
-    name: 'claude status views: paused, pausing and usage-limited each say so, for tasks and for bundles',
+    name: 'claude status views: paused, pausing and usage-limited each say so, for tasks',
     run() {
       const task = state => deriveClaudeTaskProgress({ activity: { held: ['node:hub'], tasks: { a: { state, nodeId: 'hub', phase: 'writing', model: 'opus' } } }, requestId: 'a' });
       assert.equal(task('queued').headline, 'Paused');
@@ -535,14 +534,6 @@ export default [
       assert.match(task('running').summary, /Pausing after this call finishes/u);
       const limited = deriveClaudeTaskProgress({ activity: { usageLimit: { resumeAt: 1 }, tasks: { a: { state: 'queued' } } }, requestId: 'a' });
       assert.equal(limited.headline, 'Paused until Claude usage resets');
-      const bundle = extra => deriveClaudeJobProgress({ run: { status: 'running', stage: 'write', activity: 'waiting' }, ...extra });
-      assert.equal(bundle({ held: true }).headline, 'Paused');
-      assert.equal(bundle({ usageLimited: true }).headline, 'Paused until Claude usage resets');
-      const live = deriveClaudeJobProgress({ run: { status: 'running', stage: 'write', live: { state: 'running', phase: 'tool', tool: 'WebSearch', target: 'Acme', toolTurns: 2, steps: [{ at: 1, label: 'Write application' }] } } });
-      assert.equal(live.headline, 'Write application');
-      assert.equal(live.detail, 'Searching the web: Acme');
-      assert.match(live.summary, /2 tool turns/u);
-      assert.deepEqual(live.steps.map(step => step.label), ['Write application']);
     },
   },
   {
