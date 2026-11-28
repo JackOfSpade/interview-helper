@@ -20,7 +20,7 @@ const PARTIAL_TITLE_REGEX = new RegExp(
  * no longer start one. `scanFrom` is the value returned by the previous call.
  * @returns {{ match: RegExpExecArray|null, scanFrom: number }}
  */
-export function scanForTitle(text, scanFrom = 0) {
+function scanForTitle(text, scanFrom = 0) {
   const tail = text.slice(scanFrom);
   const match = TITLE_REGEX.exec(tail);
   if (match) return { match, scanFrom };

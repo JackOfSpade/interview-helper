@@ -14,12 +14,7 @@ const FILE_NAME = 'scrape-alarms.json';
 const MAX_ALARMS = 64;
 const MAX_TEXT = 300;
 const EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
-export const SCRAPE_ALARMS_CHANGED_CHANNEL = 'scrape-alarms-changed';
-
-/** True only when a share is high on a sample big enough to mean something, so a few bad pages never fire. */
-export function scrapeShareBroken({ attempts, bad, minAttempts, minBad, maxShare }) {
-  return attempts >= minAttempts && bad >= minBad && bad / attempts > maxShare;
-}
+const SCRAPE_ALARMS_CHANGED_CHANNEL = 'scrape-alarms-changed';
 
 const text = value => String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, MAX_TEXT);
 const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
@@ -32,7 +27,7 @@ function normalizeAlarm(value, now) {
     bad: count(value.bad), at, firstAt: Number.isFinite(Number(value.firstAt)) ? Number(value.firstAt) : at };
 }
 
-export function createScrapeAlarmStore(filePath, { now = Date.now, onChange = () => {} } = {}) {
+function createScrapeAlarmStore(filePath, { now = Date.now, onChange = () => {} } = {}) {
   let alarms = null;
   let writes = Promise.resolve();
   const load = () => {
@@ -49,7 +44,11 @@ export function createScrapeAlarmStore(filePath, { now = Date.now, onChange = ()
     }
     return alarms;
   };
-  const list = () => [...load().values()].sort((a, b) => b.at - a.at);
+  const list = () => {
+    // Alarms that aged out while the app kept running must not be reported either.
+    for (const alarm of [...load().values()]) if (now() - alarm.at >= EXPIRY_MS) load().delete(alarm.key);
+    return [...load().values()].sort((a, b) => b.at - a.at);
+  };
   const save = () => {
     const payload = { version: 1, alarms: list() };
     writes = writes.then(() => atomicWriteJson(filePath, payload, { ensureDir: true }))
@@ -95,30 +94,7 @@ function sharedStore() {
   return shared;
 }
 
-/** Never lets alarm bookkeeping disturb the scrape that called it. */
-export function reportScrapeHealth(report) {
-  try { sharedStore().report(report); } catch (error) { logger.warn(`[ScrapeAlarms] Could not record ${report?.key}: ${error?.message || error}`); }
-}
-
 export function listScrapeAlarms() {
   try { return sharedStore().list(); } catch { return []; }
 }
 
-/**
- * For the bug report. It states what is on record, not a diagnosis.
- * `jobSourceHealth` adds this process's live per-job-site failures (already
- * reduced to known field names and counts by the caller) so a search whose
- * report toast fired is never represented by "None on record" alone.
- */
-export function scrapeAlarmsMarkdown(alarms = listScrapeAlarms(), jobSourceHealth = []) {
-  const jobLines = (Array.isArray(jobSourceHealth) ? jobSourceHealth : [])
-    .map(item => ({ site: text(item?.site), text: text(item?.text) }))
-    .filter(item => item.site && item.text)
-    .map(item => `- job site / ${item.site}: ${item.text} (this process's last search; full detail under Job Search Pipeline)`);
-  const alarmLines = (Array.isArray(alarms) ? alarms : [])
-    .map(alarm => `- ${alarm.surface} / ${alarm.site}: ${alarm.what} (${alarm.bad} of ${alarm.attempts}) · last ${new Date(alarm.at).toISOString()} · first ${new Date(alarm.firstAt).toISOString()}`);
-  if (!alarmLines.length && !jobLines.length) return '\n## Scrape Alarms\n- None on record.\n';
-  const lines = [...alarmLines, ...jobLines];
-  if (!alarmLines.length) lines.push('- No other alarms on record.');
-  return `\n## Scrape Alarms\n${lines.join('\n')}\n`;
-}
