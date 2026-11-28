@@ -42,6 +42,16 @@ function mixBlock(outFrames, offset, fs, candidate, interviewer) {
   return target;
 }
 
+// Closes every descriptor even when an earlier close throws; returns the first close error, if any.
+function closeAll(fds, fs) {
+  let first = null;
+  for (const fd of fds) {
+    if (fd === undefined) continue;
+    try { fs.closeSync(fd); } catch (error) { first ??= error; }
+  }
+  return first;
+}
+
 export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) {
   if (!fs) throw new Error('mixdown: mixTracks requires fs');
   const candidate = openTrack(candidatePath, fs, 'candidate');
@@ -56,6 +66,7 @@ export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) 
   const totalFrames = Math.round((durationMs * OUT_RATE) / 1000);
   const blockFrames = OUT_RATE * BLOCK_SECONDS;
   let outFd;
+  let closeError = null;
   try {
     outFd = fs.openSync(outPath, 'w');
     fs.writeSync(outFd, wavHeader(totalFrames * 2, OUT_RATE), 0, HEADER_BYTES, 0);
@@ -72,14 +83,9 @@ export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) 
       position += chunk.length;
     }
   } finally {
-    // Every descriptor is closed even when an earlier close throws; the first close error is then rethrown.
-    let closeError = null;
-    for (const fd of [outFd, candidate.fd, interviewer.fd]) {
-      if (fd === undefined) continue;
-      try { fs.closeSync(fd); } catch (error) { closeError ??= error; }
-    }
-    if (closeError) throw closeError;
+    closeError = closeAll([outFd, candidate.fd, interviewer.fd], fs);
   }
+  if (closeError) throw closeError;
   return { durationMs, sampleRate: OUT_RATE, frames: totalFrames };
 }
 
