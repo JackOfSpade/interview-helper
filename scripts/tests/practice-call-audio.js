@@ -447,6 +447,16 @@ export default [
       assert.equal(metrics.pausesOver1s, 3);
       assert.equal(metrics.pausesOver2s, 1);
       assert.equal(metrics.fastest20sWindowWpm, 72);
+      const runOf = candidateStartMs => callMetrics({
+        transcript: [
+          { speaker: 'interviewer', text: 'Before we start, a quick note.', startMs: 0, endMs: 4000 },
+          { speaker: 'interviewer', text: 'Tell me about a hard project.', startMs: 5000, endMs: 9000 },
+          { speaker: 'candidate', text: 'Sure, so', startMs: candidateStartMs, endMs: candidateStartMs + 3000 },
+        ],
+      }).candidateInterruptions[0];
+      assert.equal(runOf(2000).beforeQuestionFinished, false, 'started over earlier interviewer speech: talked over');
+      assert.equal(runOf(7000).beforeQuestionFinished, true, 'started inside the question itself');
+      assert.equal(runOf(4500).beforeQuestionFinished, true, 'started in a gap before the question ended');
       const backchannel = callMetrics({
         transcript: [
           { speaker: 'interviewer', text: 'Synthetic question, still going.', startMs: 0, endMs: 5000 },

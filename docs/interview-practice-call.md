@@ -984,7 +984,9 @@ the recording:
 - Pauses longer than 1 s and longer than 2 s; response latency.
 - Answer length flag at about 2 minutes; talk ratio.
 - Candidate interruptions, and whether each came before the question
-  finished.
+  finished (`beforeQuestionFinished` is false when the candidate started over
+  interviewer speech earlier in the run than the question, which the review
+  labels "Talked over the interviewer").
 - Restarts and repetitions, and um/uh, from Scribe's verbatim transcript.
 - Pitch range, P90−P10 of F0, against the candidate's own baseline.
 
