@@ -3,6 +3,7 @@
 // Every suite in scripts/tests. This never starts Electron or imports the app
 // entry. Usage from the repository root (or `npm run test:unit`):
 // node --import ./scripts/test-stubs/register.mjs scripts/run-tests.mjs
+// TEST_SUITES=a,b (suite names without .js) runs only those suites.
 import './test-stubs/register.mjs';
 import fs from 'node:fs/promises';
 import { blockUnexpectedNetworkRequest } from './test-stubs/networkGuard.mjs';

@@ -17,6 +17,7 @@ function getAtPath(obj, dotPath) {
 
 function setAtPath(obj, dotPath, value) {
   const parts = dotPath.split('.');
+  if (parts.some(part => part === '__proto__' || part === 'constructor' || part === 'prototype')) throw new Error(`Refusing to set unsafe key path: ${dotPath}`);
   let cur = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
