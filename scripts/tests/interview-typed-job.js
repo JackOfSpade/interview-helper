@@ -396,6 +396,16 @@ export default [
     },
   },
   {
+    name: 'typed job: an escaped ampersand in a page is decoded once, never into another entity',
+    async run() {
+      const url = 'https://jobs.example.test/o/2';
+      const body = `<html><body><p>Skills: C &amp;lt;b&amp;gt; and R&amp;D, Q&amp;A. ${'Filler text. '.repeat(40)}</p></body></html>`;
+      const out = await composeReadPage({ fetchPage: async () => ({ body, url, contentType: 'text/html' }) })(url, {});
+      assert.equal(out.ok, true);
+      assert.ok(out.text.includes('C &lt;b&gt; and R&D, Q&A.'), out.text.slice(0, 80));
+    },
+  },
+  {
     name: 'typed job: composeReadPage tries the plain fetch, then the rendered page, then the reader',
     async run() {
       const url = 'https://jobs.example.test/o/1';

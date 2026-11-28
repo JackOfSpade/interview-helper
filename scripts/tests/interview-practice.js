@@ -5,7 +5,7 @@ import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
 import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, PRACTICE_FEEDBACK_LIMITS, newPracticeCode, orderPracticeQuestions, practiceCodeHash, trimPracticeFeedback, trimPracticeText, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
-import { listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
+import { listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession, updateInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
 
 async function userData(run) {
@@ -21,6 +21,21 @@ const feedbackPayload = code => ({
 });
 
 export default [
+  { name: 'practice registry: a code armed while the first index read is still running stays findable', async run() {
+    await userData(async dir => {
+      let release; let reads = 0;
+      const gate = new Promise(resolve => { release = resolve; });
+      // Only the first read is slow, so a second one could finish before it.
+      const slowStore = { listInterviewPracticeSessions: async options => { reads += 1; const sessions = await listInterviewPracticeSessions(options); if (reads === 1) await gate; return sessions; },
+        loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPracticeSession, updateInterviewPracticeSession };
+      const registry = createInterviewPracticeRegistry({ userDataPath: dir, store: slowStore });
+      const checking = registry.check('PRACTICE-23456789ABCDEFGHJKLM');
+      setTimeout(release, 250);
+      const code = await registry.arm({ nodeId: 'node-race', company: 'Acme', role: 'Engineer', questionCount: 2 });
+      await checking;
+      assert.equal((await registry.check(code)).status, 'armed', 'the shared index holds the code armed during the first read');
+    });
+  } },
   { name: 'practice feedback: bounded, typed, and rejected with a reason the chat can fix', async run() {
     const ok = validatePracticeFeedback(feedbackPayload('PRACTICE-X'));
     assert.equal(ok.overall.score, 7); assert.equal(ok.planned.length, 2); assert.equal(ok.planned[1].askedAs, ''); assert.equal(ok.moments[0].kind, 'curveball');

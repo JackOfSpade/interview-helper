@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { INTERVIEW_CARD_KIND_NAMES, legacyQuestionEntry } from './interviewCardKinds.js';
 
- const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
+const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
 const STORE_VERSION = 1;
 const MAX_STORE_BYTES = 2 * 1024 * 1024;
 const MAX_CARDS = 80;
@@ -155,14 +155,19 @@ export async function bindInterviewQaPosting({ userDataPath, nodeId, postingKey 
     if (!aliases.has(nodeId) && !(await exists(target)) && await exists(own)) {
       try { await fs.promises.copyFile(own, target, fs.constants.COPYFILE_EXCL); adopted = true; } catch { /* the posting's set appeared meanwhile: share it */ }
     }
-    aliases.delete(nodeId); aliases.set(nodeId, postingKey);
-    while (aliases.size > MAX_ALIASES) aliases.delete(aliases.keys().next().value);
+    // Write the new map first and only then adopt it in memory, so a failed
+    // write cannot leave this process's alias cache ahead of the file.
+    const next = new Map(aliases);
+    next.delete(nodeId); next.set(nodeId, postingKey);
+    while (next.size > MAX_ALIASES) next.delete(next.keys().next().value);
     const file = path.join(root, 'company', ALIAS_FILE);
     const tmp = path.join(root, 'company', `.${ALIAS_FILE}.${crypto.randomBytes(8).toString('hex')}.tmp`);
     try {
-      await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, aliases: Object.fromEntries(aliases) }), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, aliases: Object.fromEntries(next) }), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       await fs.promises.rename(tmp, file);
     } finally { await fs.promises.rm(tmp, { force: true }).catch(() => {}); }
+    aliases.clear();
+    for (const [key, value] of next) aliases.set(key, value);
     // `adopted`: the posting's set started as this interview's own set, so its practice counts belong to it too.
     return { adopted, storeKey: storeKeyOf(aliases, nodeId) };
   });
@@ -221,7 +226,7 @@ async function locked(userDataPath, scope, nodeId, task) {
 // ------------------------------------------------------------- projection --
 
 /** Public, renderer-safe projection (no evidence IDs or private quotes). */
- function toQaCard(card, scope) {
+function toQaCard(card, scope) {
   return {
     id: card.id, scope, question: card.question,
     variants: Array.isArray(card.variants) ? card.variants.filter(item => typeof item === 'string').slice(0, MAX_VARIANTS) : [],
@@ -264,7 +269,7 @@ function userStatement(value, max) {
 }
 
 /** Validate and normalize a user edit payload into the stored card shape. */
- function userCardFromPayload(payload, { id }) {
+function userCardFromPayload(payload, { id }) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('This Q&A card is invalid.');
   const question = typeof payload.question === 'string' ? payload.question.trim() : '';
   if (!question || !text(question, MAX_QUESTION)) throw new Error('Write a question (up to 300 characters) before saving.');

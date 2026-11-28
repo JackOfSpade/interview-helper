@@ -23,13 +23,19 @@ export function createInterviewPracticeRegistry({ userDataPath, now = Date.now, 
   // codeHash -> nodeId. Built once from disk (sessions armed before an app
   // restart), kept current by this registry's own writes. An unknown code is
   // an O(1) miss: the public endpoint never makes the store rescan the disk.
-  let index = null;
-  const loadIndex = async () => {
-    if (index) return index;
-    const built = new Map();
-    for (const item of await store.listInterviewPracticeSessions({ userDataPath })) built.set(item.session.codeHash, item.nodeId);
-    index = built;
-    return index;
+  // The load itself is cached (not its result): two callers that arrive before
+  // the disk read ends must share one map, or the later build would replace the
+  // map an earlier caller had already added a freshly armed code to.
+  let indexLoading = null;
+  const loadIndex = () => {
+    indexLoading ||= (async () => {
+      const built = new Map();
+      for (const item of await store.listInterviewPracticeSessions({ userDataPath })) built.set(item.session.codeHash, item.nodeId);
+      return built;
+    })();
+    // A failed read is not remembered: the next call tries the disk again.
+    indexLoading.catch(() => { indexLoading = null; });
+    return indexLoading;
   };
   const notify = event => { for (const listener of listeners) { try { listener(event); } catch { /* a listener never breaks the registry */ } } };
   const expired = session => {
@@ -62,11 +68,12 @@ export function createInterviewPracticeRegistry({ userDataPath, now = Date.now, 
   async function resolve(code) {
     if (typeof code !== 'string' || !PRACTICE_CODE_RE.test(code.trim())) return null;
     const codeHash = practiceCodeHash(code.trim());
-    const nodeId = (await loadIndex()).get(codeHash);
+    const known = await loadIndex();
+    const nodeId = known.get(codeHash);
     if (!nodeId) return null;
     const practice = await store.loadInterviewPractice({ userDataPath, nodeId });
     if (practice?.session?.codeHash === codeHash) return { nodeId, session: practice.session };
-    index.delete(codeHash);
+    known.delete(codeHash);
     return null;
   }
 
