@@ -301,6 +301,13 @@ export default [
         for (let at = 0; at < whole.length; at += 1001) track.appendUtterance('a', whole.subarray(at, at + 1001), 24000);
       });
       assert.ok(chunked.equals(reference), 'chunked input renders the same bytes as the whole line');
+      // Bytes appended after a whole line, and a render between appends, keep what came before.
+      const mixed = render('mixed.wav', track => {
+        track.addUtterance('a', whole.subarray(0, 5000), 24000);
+        track.appendUtterance('a', whole.subarray(5000, 20001), 24000);
+        track.appendUtterance('a', whole.subarray(20001), 24000);
+      });
+      assert.ok(mixed.equals(reference), 'appending after addUtterance keeps the earlier audio');
     },
   },
   {

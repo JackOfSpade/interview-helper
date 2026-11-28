@@ -59,7 +59,7 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
       const samples = toSamples(pcm16le);
       const durationMs = (samples.length * 1000) / rate;
       const existing = utterances.get(id);
-      utterances.set(id, { samples, parts: null, byteLength: 0, sampleRate: rate, durationMs, segments: existing?.segments ?? [], open: existing?.open ?? null });
+      utterances.set(id, { samples, base: samples, parts: [], byteLength: 0, sampleRate: rate, durationMs, segments: existing?.segments ?? [], open: existing?.open ?? null });
     },
     // Adds bytes to the end of an utterance without converting anything: the chunks are joined and
     // converted once, when the audio is rendered. Only the duration is kept current, from the byte count.
@@ -72,15 +72,14 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
       const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? bytes.length);
       let utterance = utterances.get(id);
       if (!utterance) {
-        utterance = { samples: null, parts: [], byteLength: 0, sampleRate: rate, durationMs: 0, segments: [], open: null };
+        utterance = { samples: null, base: null, parts: [], byteLength: 0, sampleRate: rate, durationMs: 0, segments: [], open: null };
         utterances.set(id, utterance);
       }
-      if (!utterance.parts) { utterance.parts = []; utterance.byteLength = 0; }
       utterance.parts.push(Buffer.from(buffer));
       utterance.byteLength += buffer.length;
       utterance.samples = null;
       utterance.sampleRate = rate;
-      utterance.durationMs = ((utterance.byteLength >> 1) * 1000) / rate;
+      utterance.durationMs = (((utterance.base?.length ?? 0) + (utterance.byteLength >> 1)) * 1000) / rate;
     },
     started(id, atMs) {
       const utterance = utteranceOf(id);
@@ -130,7 +129,10 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
 function samplesOf(utterance) {
   if (!utterance.samples) {
     const joined = Buffer.concat(utterance.parts ?? []);
-    utterance.samples = pcm16ToFloat(joined);
+    const tail = pcm16ToFloat(joined);
+    const base = utterance.base;
+    if (base && base.length) { const all = new Float32Array(base.length + tail.length); all.set(base); all.set(tail, base.length); utterance.samples = all; }
+    else utterance.samples = tail;
     // The joined bytes stand in for the chunks, so later bytes continue after them.
     utterance.parts = [joined];
   }
