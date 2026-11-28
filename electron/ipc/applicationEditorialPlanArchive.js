@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
-import { EDITORIAL_PLAN_MAX_BYTES, EDITORIAL_PLAN_VERSION, parseEditorialPlanResponse } from './applicationEditorialPlan.js';
+import { EDITORIAL_CATALOG_ID, EDITORIAL_PLAN_MAX_BYTES, EDITORIAL_PLAN_VERSION, parseEditorialPlanResponse } from './applicationEditorialPlan.js';
 import { sha256Hex } from '../utils/sha256Hex.js';
 
 const RECORD_VERSION = 1;
@@ -10,11 +10,8 @@ const MAX_RECORD_BYTES = EDITORIAL_PLAN_MAX_BYTES + 16 * 1024;
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
-const CATALOG_ID = /^host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+$/u;
 const RECORD_KEYS = ['version', 'schema', 'jobId', 'laneKey', 'contextKey', 'sourceDigest',
   'writerPromptSha256', 'plan', 'planSha256', 'planRunId', 'planSessionId', 'model', 'createdAt'];
-
-const hash = sha256Hex;
 
 function boundedText(value, max) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !value.includes('\u0000');
@@ -26,7 +23,7 @@ function bindingOf({ jobId, laneKey, contextKey, sourceDigest, allowedIds } = {}
     throw new Error('Invalid editorial plan archive binding.');
   }
   if ((!Array.isArray(allowedIds) && !(allowedIds instanceof Set)) || (!allowedIds.size && !allowedIds.length)
-    || [...allowedIds].some(id => typeof id !== 'string' || !CATALOG_ID.test(id))) {
+    || [...allowedIds].some(id => typeof id !== 'string' || !EDITORIAL_CATALOG_ID.test(id))) {
     throw new Error('Editorial plan archive requires approved catalog IDs.');
   }
   return { jobId, laneKey, contextKey, sourceDigest };
@@ -43,7 +40,7 @@ async function archiveLocation(args) {
   // private directory is inspected or created. The shared helper recognizes
   // macOS's /tmp and /var aliases but refuses arbitrary symbolic-link parents.
   const root = await ensureDirectoryWithinRoot(lexicalRoot, lexicalRoot, { label: 'Editorial plan archive' });
-  const key = hash(JSON.stringify([binding.laneKey, binding.contextKey, binding.sourceDigest]));
+  const key = sha256Hex(JSON.stringify([binding.laneKey, binding.contextKey, binding.sourceDigest]));
   const relativePath = path.join('.local-ai', 'editorial-plans', binding.jobId, `${key}.json`);
   return { root, binding, path: path.join(root, relativePath), relativePath };
 }
@@ -86,7 +83,7 @@ function validateRecord(value, binding, allowedIds) {
     throw new Error('Invalid editorial plan archive metadata.');
   }
   const plan = parseEditorialPlanResponse(JSON.stringify(value.plan), allowedIds);
-  const planSha256 = hash(JSON.stringify(plan));
+  const planSha256 = sha256Hex(JSON.stringify(plan));
   if (value.planSha256 !== planSha256) throw new Error('Editorial plan archive content hash does not match.');
   return { version: RECORD_VERSION, schema: EDITORIAL_PLAN_VERSION, ...binding,
     writerPromptSha256: value.writerPromptSha256, plan, planSha256,
@@ -145,7 +142,7 @@ export async function saveEditorialPlan(args = {}) {
   const location = await archiveLocation(args);
   const plan = parseEditorialPlanResponse(JSON.stringify(args.plan), args.allowedIds);
   const record = validateRecord({ version: RECORD_VERSION, schema: EDITORIAL_PLAN_VERSION, ...location.binding,
-    writerPromptSha256: args.writerPromptSha256, plan, planSha256: hash(JSON.stringify(plan)),
+    writerPromptSha256: args.writerPromptSha256, plan, planSha256: sha256Hex(JSON.stringify(plan)),
     planRunId: args.planRunId, planSessionId: args.planSessionId, model: args.model, createdAt: args.createdAt },
   location.binding, args.allowedIds);
   if (Buffer.byteLength(JSON.stringify(record), 'utf8') > MAX_RECORD_BYTES) throw new Error('Editorial plan archive record exceeds its size limit.');

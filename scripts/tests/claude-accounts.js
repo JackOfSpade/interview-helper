@@ -113,6 +113,22 @@ export default [
     },
   },
   {
+    name: 'claude accounts: a status check that ends after its account was removed changes nothing',
+    async run() {
+      const g = fixture({ statusFor: dir => (dir.includes('acct-') ? { loggedIn: true, email: 'second@example.com' } : { loggedIn: true, email: 'first@example.com' }), login: () => ({ code: 0 }) });
+      const second = await g.accounts.addClaudeAccount();
+      assert.equal(second.ok, true);
+      g.advance(120_000);
+      let pushes = 0;
+      g.accounts.subscribeClaudeAccounts(() => { pushes += 1; });
+      const pending = g.accounts.refreshClaudeAccountStatus(second.account.id);
+      assert.deepEqual(g.accounts.removeClaudeAccount(second.account.id), { ok: true });
+      const afterRemove = pushes;
+      await pending;
+      assert.equal(pushes, afterRemove, 'a removed account does not announce its late status');
+    },
+  },
+  {
     name: 'claude accounts: a duplicate email, an unsigned login, a cancel and a timeout are refused',
     async run() {
       const f = fixture({ statusFor: loggedIn('First@Example.com'), login: () => ({ code: 0 }) });

@@ -42,12 +42,12 @@ import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
 // Parallel search/fetch turns: enough to read several briefs' worth of pages in one session.
 export const INTERVIEW_RESEARCH_MAX_TURNS = 24;
- const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
+const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
 const MAX_REJECTION_CHARS = 6000;
 const SHADOW_STAGES = Object.freeze(['qa-brief', 'qa-write']);
 
 /** The stages that search the web through Parallel: Prepare research and the typed-job company research. */
- function isInterviewResearchStage(stage) {
+function isInterviewResearchStage(stage) {
   return stage === 'qa-research' || stage === 'typed-job-research';
 }
 
@@ -102,10 +102,9 @@ function noteStep(scope, task, attempt) {
 }
 
 function stepLabel(task) {
-  const words = String(task || 'Claude call').replace(/^interview-/u, '').replace(/-/gu, ' ');
+  const words = String(task || '').replace(/^interview-/u, '').replace(/-/gu, ' ').trim() || 'Claude call';
   return `${words[0].toUpperCase()}${words.slice(1)}`;
 }
-
 
 // Every answered AI step of this process, newest last, for the bug report: names, times and outcomes only.
 const AI_STEPS_MAX = 2000;
@@ -214,7 +213,7 @@ export function createInterviewClaudeTransport({
           noteStep(scope, task, attempt);
         }
         const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
-        let usedBuiltIn = false;
+        let ranCliStage = false;
         try {
           if (research) {
             // Read the key per attempt: a rejected key is dropped without failing research.
@@ -226,7 +225,7 @@ export function createInterviewClaudeTransport({
               persistSession: false, ultracode: false, onToolResult: parallelToolResult,
               ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
           } else {
-            usedBuiltIn = true;
+            ranCliStage = true;
             reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools: '',
               ...(pageImages && !claudeStarted ? { pageImages } : {}),
               ...(ultracode ? { ultracode: true } : {}),
@@ -246,7 +245,7 @@ export function createInterviewClaudeTransport({
           attempt -= 1;
           continue;
         } finally { callEnded(); }
-        if (usedBuiltIn) claudeStarted = true;
+        if (ranCliStage) claudeStarted = true;
       }
       if (scope) standaloneClaudeActivity.checking(scope.key);
       onStage({ task, stage, attempt, model: reply?.model, durationMs: Date.now() - started, provider,

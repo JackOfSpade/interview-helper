@@ -572,6 +572,7 @@ export function createClaudeTaskWorker({
       running.set(entry.requestId, { controller, nodeId: entry.nodeId });
       serve(entry, controller)
         .catch(error => handleFailure(entry, error))
+        .catch(error => logger.warn(`[Claude tasks] Could not record a failure for '${entry.task}': ${error?.message || error}`))
         .finally(() => {
           running.delete(entry.requestId);
           settleDrains();

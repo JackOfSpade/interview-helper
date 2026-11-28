@@ -204,6 +204,8 @@ export function createClaudeAccounts({
     if (!entry) return Promise.resolve({ loggedIn: null, email: null, subscriptionType: null });
     const pending = runAuthStatus(entry.dir)
       .then((status) => {
+        // The account may have been removed while the CLI ran; its status must not come back.
+        if (!entryFor(accountId)) return status;
         const before = statusCache.get(accountId)?.status;
         statusCache.set(accountId, { at: now(), status });
         cachedList = null;
