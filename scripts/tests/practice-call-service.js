@@ -1015,11 +1015,21 @@ test('model download reports progress before ringing', async () => {
   assert.equal(states.some(item => item.phase === 'downloading' && item.modelDownload?.receivedBytes === 10), true);
 });
 
+// The precheck reads the voice key only after earlier async steps; a fixed
+// short sleep loses that race on a loaded machine, so wait for the read itself.
+async function waitForKeyRead(released, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (typeof released() !== 'function') {
+    if (Date.now() > deadline) throw new Error('the precheck never read the voice key');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
 test('hang-up from precheck and connecting is safe', async () => {
   let releaseKey;
   const precheck = await startOf({ deps: { readKey: () => new Promise(resolve => { releaseKey = () => resolve('key-1'); }) } });
   const pending = precheck.service.start(ARGS);
-  await new Promise(resolve => setTimeout(resolve, 10));
+  await waitForKeyRead(() => releaseKey);
   assert.equal(precheck.service.getState().phase, 'precheck');
   assert.equal((await precheck.service.hangUp()).phase, 'replay');
   releaseKey();
@@ -1255,7 +1265,7 @@ test('R8 a pre-call abort deletes the directory and never analyses', async () =>
   } });
   const service = createPracticeCallService(deps);
   const pending = service.start(ARGS);
-  await new Promise(resolve => setTimeout(resolve, 10));
+  await waitForKeyRead(() => releaseKey);
   assert.equal(service.getState().phase, 'precheck');
   const callDir = path.join(tmp, 'practice-calls', 'call-1');
   assert.equal((await nodeFs.lstat(callDir)).isDirectory(), true);
