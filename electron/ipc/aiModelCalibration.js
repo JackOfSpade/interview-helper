@@ -164,7 +164,8 @@ export function createModelCalibrationMonitor({
         sources: sources.slice(0, MAX_SOURCES),
       };
       detections = { ...detections, [assessment.modelId]: entry };
-      persist();
+      // A failed save must not hide the detection: the banner still shows for this run and the next call saves again.
+      try { persist(); } catch { /* the in-memory detection stands */ }
       if (created) {
         try { onChange(status()); } catch { /* a listener must not fail the call */ }
       }

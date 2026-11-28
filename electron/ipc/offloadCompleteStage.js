@@ -5,9 +5,11 @@
 // JSON file and each resumed turn replays them: the system message and earlier
 // turns stay byte-identical, which keeps the provider's prefix cache warm.
 import childProcess from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { CLAUDE_HANDOFF_SYSTEM_PROMPT, ClaudeRunnerError, claudeCatalogSystemAppend, splitCareerCatalog } from './claudeApplicationRunner.js';
 import { offloadReasoning } from './aiCallProviders.js';
 
@@ -63,10 +65,16 @@ async function loadSession(files, file) {
 async function saveSession(files, transcriptDir, file, messages) {
   await files.mkdir(transcriptDir, { recursive: true, mode: 0o700 });
   try { await files.chmod(transcriptDir, 0o700); } catch { /* a fake or foreign fs may not support it */ }
-  const temp = `${file}.${process.pid}.tmp`;
-  await files.writeFile(temp, JSON.stringify(messages), { encoding: 'utf8', mode: 0o600 });
-  await files.chmod(temp, 0o600);
-  await files.rename(temp, file);
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await files.writeFile(temp, JSON.stringify(messages), { encoding: 'utf8', mode: 0o600 });
+    await files.chmod(temp, 0o600);
+    await files.rename(temp, file);
+  } catch (error) {
+    // A failed save must not leave a half-written temp copy of the conversation behind.
+    try { await files.rm(temp, { force: true }); } catch { /* best effort cleanup */ }
+    throw error;
+  }
 }
 
 function parseResultLine(stdout) {
@@ -109,6 +117,8 @@ function exchange({ spawnImpl, binPath, nodePath, request, signal }) {
       return;
     }
     let stdout = '';
+    // A multi-byte character can straddle two chunks; decode statefully so it is not corrupted.
+    const decoder = new StringDecoder('utf8');
     let settled = false;
     const finish = (fn, value) => {
       if (settled) return;
@@ -126,12 +136,15 @@ function exchange({ spawnImpl, binPath, nodePath, request, signal }) {
     }
     child.on('error', error => finish(reject, unavailable('The offload CLI could not be run.', error?.code || error?.message)));
     child.stdout?.on('data', chunk => {
-      if (stdout.length < OUTPUT_CAP_BYTES) stdout += String(chunk);
+      if (stdout.length < OUTPUT_CAP_BYTES) stdout += typeof chunk === 'string' ? chunk : decoder.write(chunk);
     });
     child.stderr?.on?.('data', () => { /* diagnostics may echo prompts; never kept */ });
     child.on('close', () => {
+      stdout += decoder.end();
       const result = parseResultLine(stdout);
       if (result) finish(resolve, result);
+      // A call the person cancelled whose CLI died without printing its `cancelled` result is still a cancellation.
+      else if (signal?.aborted) finish(reject, new ClaudeRunnerError('CLAUDE_CANCELLED', 'Offload run was cancelled.'));
       else finish(reject, unavailable('The offload CLI returned no readable result.'));
     });
     child.stdin?.on?.('error', () => { /* a dead child is reported by close */ });

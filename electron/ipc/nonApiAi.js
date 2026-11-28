@@ -1824,12 +1824,16 @@ export function materializeNonApiPrompt({
 // career-profile-repair carries both edit-repair and adjudication answers.
 const EDIT_PROTOCOL_TASKS = new Set(['career-profile-repair']);
 
+function diagnosticCountSummary(counts) {
+  return Object.entries(counts)
+    .map(([key, value]) => `${key.replace(/Count$/, '')} ${value}`)
+    .join(', ');
+}
+
 function safeCorrectionGuidance(diagnostic, validationCode, task) {
   const safe = cloneSafeValidationDiagnostic(diagnostic);
   if (safe?.stage === 'research-sections' && SAFE_RESEARCH_SECTION_REASONS.has(safe.reason)) {
-    const countBits = Object.entries(safe.counts)
-      .map(([key, value]) => `${key.replace(/Count$/, '')} ${value}`)
-      .join(', ');
+    const countBits = diagnosticCountSummary(safe.counts);
     const instruction = {
       MISSING_SECTION: 'Include every requested BEGIN RESEARCH / END RESEARCH section exactly once.',
       EMPTY_SECTION: 'Put non-empty current facts and direct source URLs inside every requested section.',
@@ -1844,9 +1848,7 @@ function safeCorrectionGuidance(diagnostic, validationCode, task) {
     return `The prior raw research response failed the safe section check (${safe.reason.toLowerCase().replace(/_/g, ' ')}${countBits ? `: ${countBits}` : ''}). ${instruction}`;
   }
   if (safe?.stage === 'research-assessment' && SAFE_RESEARCH_ASSESSMENT_REASONS.has(safe.reason)) {
-    const countBits = Object.entries(safe.counts)
-      .map(([key, value]) => `${key.replace(/Count$/, '')} ${value}`)
-      .join(', ');
+    const countBits = diagnosticCountSummary(safe.counts);
     const instruction = {
       ASSESSMENT_COVERAGE_INVALID: 'Return exactly one JSON assessment row for every requested researchId.',
       ASSESSMENT_IDENTITY_INVALID: 'Copy each researchId and preferenceId exactly into its matching JSON assessment row; do not duplicate or swap rows.',
@@ -1857,9 +1859,7 @@ function safeCorrectionGuidance(diagnostic, validationCode, task) {
     return `The prior structured research assessment failed the safe provenance check (${safe.reason.toLowerCase().replace(/_/g, ' ')}${countBits ? `: ${countBits}` : ''}). ${instruction} Return the complete JSON assessment again, not BEGIN/END RESEARCH sections.`;
   }
   if (safe?.stage === 'compensation-assessment' && SAFE_COMPENSATION_ASSESSMENT_REASONS.has(safe.reason)) {
-    const countBits = Object.entries(safe.counts)
-      .map(([key, value]) => `${key.replace(/Count$/, '')} ${value}`)
-      .join(', ');
+    const countBits = diagnosticCountSummary(safe.counts);
     const instruction = {
       COMPENSATION_COHORT_COVERAGE_INVALID: 'Return exactly one cohort JSON object for every requested researchId.',
       COMPENSATION_COHORT_IDENTITY_INVALID: 'Copy each requested researchId exactly once and keep every cohort with its own research section.',
@@ -2329,11 +2329,12 @@ function hostStagedAttachmentMissingError() {
   return error;
 }
 
+const isPlainStagedFile = stat => stat.isFile() && !stat.isSymbolicLink();
+
 async function hostStagedAttachmentsPresent(record) {
   for (const attachmentPath of record.attachmentPaths) {
     try {
-      const stat = await fs.promises.lstat(attachmentPath);
-      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+      if (!isPlainStagedFile(await fs.promises.lstat(attachmentPath))) return false;
     } catch {
       return false;
     }
@@ -2344,8 +2345,7 @@ async function hostStagedAttachmentsPresent(record) {
 function hostStagedAttachmentsPresentSync(record) {
   for (const attachmentPath of record.attachmentPaths) {
     try {
-      const stat = fs.lstatSync(attachmentPath);
-      if (!stat.isFile() || stat.isSymbolicLink()) return false;
+      if (!isPlainStagedFile(fs.lstatSync(attachmentPath))) return false;
     } catch {
       return false;
     }
@@ -3001,7 +3001,9 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
   }
   if (record.comparisonGroup && (transport !== 'worker' || !comparisonProofValid(record.comparisonProof, record.comparisonRun))) {
     const error = comparisonError();
-    await updateDurableStep(record, { status: 'failed', response: null, draft: '' });
+    // The comparison fails whether or not the failed state could be saved; a save error must not strand the request.
+    await updateDurableStep(record, { status: 'failed', response: null, draft: '' })
+      .catch(writeError => logger.warn(`[Non-API AI] Could not persist the failed comparison for '${record.task || 'unknown'}': ${writeError?.message || writeError}`));
     settle(record, { accepted: false, failed: true });
     record.reject(error);
     return { accepted: false, reason: 'comparative_unavailable' };
