@@ -70,26 +70,25 @@ let practiceCallController = null;
 let quitting = false;
 let sessionStore = null;
 
-/** A File menu command for the main window, which owns the list and shows the result. */
 // The menu bar's two faces: the app's own menu, and the short one shown while the call window is in front.
 let appMenu = null;
 let callMenu = null;
 
-/** Opens the Settings dialog in the main window (App menu, ⌘,). */
-function openSettings() {
+/** Sends `channel` (with `payload`) to the main window, after its page has loaded when it is still loading. */
+function sendToMainWindow(channel, ...payload) {
   const win = createMainWindow();
-  const send = () => { try { win.webContents.send('interview-app:open-settings'); } catch { /* the window is going away */ } };
+  const send = () => { try { win.webContents.send(channel, ...payload); } catch { /* the window is going away */ } };
   if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
 }
+
+/** Opens the Settings dialog in the main window (App menu, ⌘,). */
+const openSettings = () => sendToMainWindow('interview-app:open-settings');
+
+/** A File menu command for the main window, which owns the list and shows the result. */
+const sendFileCommand = command => sendToMainWindow('interview-app:file-command', command);
 
 // The candidate's voice in practice calls (female or male), read by the call for every spoken line.
 let practiceVoice = null;
-
-function sendFileCommand(command) {
-  const win = createMainWindow();
-  const send = () => { try { win.webContents.send('interview-app:file-command', command); } catch { /* the window is going away */ } };
-  if (win.webContents.isLoading()) win.webContents.once('did-finish-load', send); else send();
-}
 
 /** The window's newest state, then every queued write, on disk. Never rejects: closing must go on. */
 const saveEverythingNow = win => saveWindowStateNow({ win, ipcMain }).catch(() => false).then(() => sessionStore?.flush()).catch(() => {});

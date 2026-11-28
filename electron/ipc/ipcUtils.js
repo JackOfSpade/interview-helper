@@ -4,7 +4,6 @@
 import electronPkg from 'electron';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from '../logger.js';
-import { ensureListingLivenessRules } from './listingLivenessCalibration.js';
 const { ipcMain } = electronPkg;
 
 // AI handoffs can be reached several async layers below an IPC handler. Keep
@@ -30,8 +29,8 @@ export function __runWithIpcRequestContextForTests(context, callback) {
 // run after a replacement renderer takes ownership.
 const nodeTasks = new Map();
 // File exports/imports can own durable transactions without a canvas node id.
-// Track every invoke by sender as well, so quit can drain those transactions
-// before destroying their renderer. Diagnostics keep using the node-only map.
+// Track every invoke by sender as well, so cancellation can wait for them to
+// settle. Diagnostics keep using the node-only map.
 const senderTasks = new Map();
 // Once an invocation admits a handoff, its prompt/answer owner lives in main.
 // A reload can re-present that handoff; MCP also serves it without a renderer.
@@ -42,44 +41,6 @@ const senderTaskRendererLifecycle = new WeakMap();
 // per invoke; controllers still retain independent handoff/cancellation state.
 const senderLifecycleSubscriptions = new WeakMap();
 const taskRegistrySenders = new WeakSet();
-const quitPausedSenders = new WeakSet();
-const QUIT_PAUSE_WORK_CHANNELS = new Set([
-  'claim-job-analysis-operation', 'begin-job-continuation', 'claim-job-continuation', 'claim-job-board-run',
-  'parse-career-data', 'resolve-job-search-location', 'interpret-job-preferences', 'resolve-search-roles',
-  'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
-  'research-job-compensation', 'score-board-preference-jobs', 'settle-board-research', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
-  'queue-local-application', 'prepare-official-posting-for-generation', 'refresh-official-postings', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief', 'resolve-interview-typed-job', 'convert-interview-career-files',
-  'analyze-photos', 'scrape-price-comps', 'synthesize-prices-batch', 'synthesize-bundle-price',
-  'rescrape-source', 'resolve-captcha', 'assess-platform-fit',
-]);
-// An admitted import may already be promoting output or issuing its export
-// capability. Let already-admitted import/export transactions finish; new ones
-// remain gated and their persisted application result is recoverable on restart.
-// Claims/queue admissions likewise must return their allocated identity rather
-// than orphan a lease or persisted job behind an aborted invoke response.
-const QUIT_FINISH_COMMIT_CHANNELS = new Set([
-  'claim-job-analysis-operation', 'begin-job-continuation', 'claim-job-continuation', 'claim-job-board-run',
-  'queue-local-application', 'import-local-application', 'save-application',
-]);
-
-/** Main-owned admission fence; lifecycle save/pause/read IPC remains available. */
-export function beginSenderQuitPause(sender) {
-  if (!sender || sender.isDestroyed?.()) return false;
-  quitPausedSenders.add(sender);
-  return true;
-}
-
-export function releaseSenderQuitPause(sender) {
-  return sender ? quitPausedSenders.delete(sender) : false;
-}
-
-export function appQuitPauseError() {
-  return cancellationError('App paused for quit', 'app-quit');
-}
-
-export function isAppQuitPauseReason(reason) {
-  return reason?.message === 'App paused for quit' && reason?.cancelCause === 'app-quit';
-}
 // Aborted controllers remain registered until their handleSafe `finally` runs.
 // That makes repeated acknowledged cancellation join the same cleanup barrier
 // instead of falsely reporting success merely because an earlier raw abort
@@ -163,7 +124,6 @@ function ensureSenderRegistryCleanup(sender) {
     for (const ac of bySender?.keys() || []) if (!senderTaskRendererLifecycle.get(ac)?.mcp) bySender.delete(ac);
     if (!bySender?.size) {
       senderTasks.delete(sender);
-      quitPausedSenders.delete(sender);
       acknowledgedManualAiRunIds.delete(sender);
     }
   });
@@ -182,7 +142,7 @@ function senderTaskMap(sender, create = false) {
  * Register an AbortController for a specific node.
  * Allows cancelling background tasks (e.g. search, analysis) when the node is deleted.
  */
-function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null, logTaskRegistration = true) {
+function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null) {
   if (!sender || !nodeId) return;
   ensureSenderRegistryCleanup(sender);
   const tasks = senderTaskMap(sender, true);
@@ -202,9 +162,7 @@ function registerNodeTask(sender, nodeId, ac, channel, manualAiRunId = null, log
   // channel the line cannot be told apart from the same channel being
   // dispatched twice, which would be a renderer-side duplicate. A reader of
   // the bug report had to correlate against source to reach "benign".
-  if (logTaskRegistration) {
-    logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId} channel ${channel || '?'}`);
-  }
+  logger.info(`[IPC] Registered task for sender ${sender.id ?? '?'} node ${nodeId} channel ${channel || '?'}`);
 }
 
 /**
@@ -236,46 +194,6 @@ function unregisterSenderTask(sender, ac) {
   if (tasks?.size === 0) senderTasks.delete(sender);
   nodeTaskSettlements.get(ac)?.resolveSettled?.();
   nodeTaskSettlements.delete(ac);
-}
-
-async function drainQuitTasks(sender, { nodeId = null, timeoutMs = 30_000 } = {}) {
-  const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 30_000);
-  let abortedCount = 0;
-  const manualAiRunIds = new Set();
-  for (;;) {
-    const entries = [...(senderTasks.get(sender)?.entries() || [])]
-      .filter(([, meta]) => !nodeId || meta.nodeId === nodeId);
-    if (entries.length === 0) return { settled: true, abortedCount, manualAiRunIds: [...manualAiRunIds] };
-    const settlements = entries.map(([controller]) => nodeTaskSettlements.get(controller)?.settled).filter(Boolean);
-    for (const [controller, meta] of entries) {
-      if (meta.manualAiRunId) manualAiRunIds.add(meta.manualAiRunId);
-      if (QUIT_PAUSE_WORK_CHANNELS.has(meta.channel) && !QUIT_FINISH_COMMIT_CHANNELS.has(meta.channel)
-        && !controller.signal.aborted) {
-        controller.abort(appQuitPauseError());
-        abortedCount += 1;
-      }
-    }
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return { settled: false, abortedCount, manualAiRunIds: [...manualAiRunIds] };
-    let timer;
-    const settled = await Promise.race([
-      Promise.allSettled(settlements).then(() => true),
-      new Promise(resolve => { timer = setTimeout(() => resolve(false), remaining); }),
-    ]);
-    if (timer) clearTimeout(timer);
-    if (!settled) return { settled: false, abortedCount, manualAiRunIds: [...manualAiRunIds] };
-    // Include persistence invocations already dispatched by an import's
-    // completion before its renderer sees the new admission fence.
-    await new Promise(resolve => setImmediate(resolve));
-  }
-}
-
-export function drainSenderNodeTasksForQuit(sender, options = {}) {
-  return drainQuitTasks(sender, options);
-}
-
-export function drainNodeTasksForQuit(nodeId, sender, options = {}) {
-  return drainQuitTasks(sender, { ...options, nodeId });
 }
 
 /**
@@ -575,10 +493,6 @@ function compactErrorStack(error, maxFrames = 6) {
   return frames.join(' ← ');
 }
 
-export function __compactErrorStackForTests(error, maxFrames) {
-  return compactErrorStack(error, maxFrames);
-}
-
 /**
  * Wraps an IPC handler with standardized error handling, lifecycle-aware abort signaling,
  * and standard `{ success, data, error }` return payloads.
@@ -586,15 +500,11 @@ export function __compactErrorStackForTests(error, maxFrames) {
  * @param {string} channel - The IPC channel name
  * @param {Function} handler - Async function taking (event, args, signal)
  * @param {number|object} timeoutOrOptions - Optional timeout, or lifecycle hooks.
- * Set `logTaskRegistration: false` only for high-frequency routine probes;
- * node-task registration and cancellation remain active.
  * Set `validateArgs(args, event)` for a synchronous route-specific boundary
  * check. It runs before `args.nodeId` is read, registered, or logged, making
  * it safe for routes whose node ID grammar is stricter than the generic task
  * registry. Throws use the normal IPC error payload and cleanup path. Do not
  * return a Promise: registration must not begin until validation has settled.
- * `additionalNodeIds(args, event)` adds bounded secondary owners of the same
- * controller after validation. `reportCancellation` opts into cancelled:true.
  */
 export function handleSafe(channel, handler, timeoutOrOptions = 0) {
   const options = timeoutOrOptions && typeof timeoutOrOptions === 'object'
@@ -602,12 +512,8 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
     : {};
   const timeoutMs = Number.isFinite(timeoutOrOptions) ? timeoutOrOptions : 0;
   ipcMain.handle(channel, async (event, args) => {
-    if (quitPausedSenders.has(event.sender) && QUIT_PAUSE_WORK_CHANNELS.has(channel)) {
-      return { success: false, pausedForQuit: true, errorCode: 'APP_QUIT_PAUSED', error: 'App paused for quit' };
-    }
     const { ac, signal, cleanup, retainHandoffRendererLifecycle, isRendererIndependent, isHandoffRendererGone } = createSenderAbortController(event, timeoutMs);
     let nodeId = null;
-    let additionalNodeIds = [];
     let senderTaskRegistered = false;
 
     try {
@@ -622,28 +528,12 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         }
       }
 
-      if (typeof options.additionalNodeIds === 'function') {
-        const ids = options.additionalNodeIds(args, event);
-        const maxAdditionalNodeIds = Number.isSafeInteger(options.maxAdditionalNodeIds)
-          ? Math.max(1, Math.min(128, options.maxAdditionalNodeIds)) : 8;
-        if (!Array.isArray(ids) || ids.length > maxAdditionalNodeIds || ids.some(id => typeof id !== 'string' || !id || id.length > 300)) {
-          throw new TypeError('Additional IPC task owners must be bounded node identifiers.');
-        }
-        additionalNodeIds = [...new Set(ids)];
-      }
       nodeId = args?.nodeId;
       const manualAiRunId = typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null;
-      const logTaskRegistration = options.logTaskRegistration !== false;
       registerSenderTask(event.sender, ac, { channel, nodeId, manualAiRunId });
       senderTaskRegistered = true;
-      if (nodeId) registerNodeTask(event.sender, nodeId, ac, channel, manualAiRunId, logTaskRegistration);
+      if (nodeId) registerNodeTask(event.sender, nodeId, ac, channel, manualAiRunId);
 
-      for (const ownerId of additionalNodeIds) {
-        if (ownerId !== nodeId) registerNodeTask(event.sender, ownerId, ac, channel, manualAiRunId, logTaskRegistration);
-      }
-
-      const livenessRules = options.captureListingLiveness === true
-        ? await ensureListingLivenessRules() : null;
       if (signal.aborted) throw signal.reason || nodeCancellationError();
       const result = await ipcRequestContext.run(
         {
@@ -653,8 +543,6 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
           channel,
           retainHandoffRendererLifecycle,
           isHandoffRendererGone,
-          livenessEvidence: new Map(),
-          livenessRules,
           // A renderer-created id spanning every manual AI step in one logical
           // workflow. nonApiAi uses it to replay accepted copy/paste steps after
           // a process restart without ever confusing two runs of the same node.
@@ -669,28 +557,16 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         () => handler(event, args, signal),
       );
 
-      // Some workflows must make the handler's terminal result crash-durable
-      // before the invoke can resolve. Keep this inside the same try/finally so
-      // a failed durability barrier is reported as an operation failure and the
-      // normal task/sender cleanup still runs.
-      const beforeReplyResult = typeof options.beforeReply === 'function'
-        ? await options.beforeReply({ event, args, signal, result, channel })
-        : null;
-
       // Guard: Window may have been closed during await
       if (event.sender.isDestroyed() && !isRendererIndependent()) return { success: false, error: 'Window closed', errorCode: ipcErrorCode(signal.reason) || 'IPC_SENDER_DESTROYED' };
       // A cooperative handler may finish just after its cancellation signal
       // fired. Do not report that detached work as successful.
-      if (signal.aborted) return { success: false, error: abortErrorMessage(signal), errorCode: ipcErrorCode(signal.reason), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
+      if (signal.aborted) return { success: false, error: abortErrorMessage(signal), errorCode: ipcErrorCode(signal.reason) };
 
-      return {
-        success: true,
-        ...result,
-        ...(beforeReplyResult && typeof beforeReplyResult === 'object' ? beforeReplyResult : {}),
-      };
+      return { success: true, ...result };
     } catch (e) {
       if (signal.aborted) {
-        return { success: false, error: abortErrorMessage(signal, e), errorCode: ipcErrorCode(signal.reason), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
+        return { success: false, error: abortErrorMessage(signal, e), errorCode: ipcErrorCode(signal.reason) };
       }
       const failureStack = compactErrorStack(e);
       logger.error(`[${channel}] failed:`, e?.message || String(e), ...(failureStack ? [`stack: ${failureStack}`] : []));
@@ -703,10 +579,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         provider: e?.provider
       };
     } finally {
-      if (nodeId) {
-        unregisterNodeTask(event.sender, nodeId, ac);
-      }
-      for (const ownerId of additionalNodeIds) if (ownerId !== nodeId) unregisterNodeTask(event.sender, ownerId, ac);
+      if (nodeId) unregisterNodeTask(event.sender, nodeId, ac);
       try { cleanup(); }
       finally { if (senderTaskRegistered) unregisterSenderTask(event.sender, ac); }
     }

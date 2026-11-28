@@ -5,7 +5,7 @@
 // history and prepared brief stored per id keep lining up.
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
 
 const INTERVIEW_SESSIONS_VERSION = 1;
 const MAX_SESSIONS = 200;
@@ -83,14 +83,7 @@ export function createInterviewSessionStore({ filePath } = {}) {
       // Make sure an existing file was readable before it is ever replaced.
       cached ||= await read();
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-      const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-      try {
-        await fs.promises.writeFile(temporary, body, { mode: 0o600, flag: 'wx' });
-        await fs.promises.rename(temporary, filePath);
-      } catch (error) {
-        await fs.promises.rm(temporary, { force: true }).catch(() => {});
-        throw error;
-      }
+      await atomicWriteFile(filePath, body);
       cached = next;
       return structuredClone(next);
     }),

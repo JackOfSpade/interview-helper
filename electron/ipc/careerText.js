@@ -16,9 +16,10 @@
  * readable from `career-snapshot-store/career-snapshots`, so an interview
  * prepared then keeps working.
  */
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFile } from '../utils/atomicWrite.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 export const CAREER_TEXT_DIR = 'career-text';
 const LEGACY_SNAPSHOT_DIR = path.join('career-snapshot-store', 'career-snapshots');
@@ -33,7 +34,6 @@ const MAX_ITEMS = 400;
 const MAX_ITEM_CHARS = 2000;
 const MAX_CONTEXT_CHARS = 300;
 
-const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 const isObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
 
 export function careerSnapshotStorageRoot(userDataPath) {
@@ -54,7 +54,7 @@ function cleanSources(sources) {
 }
 
 export function careerTextSnapshotId(sources) {
-  return sha256(JSON.stringify({ kind: 'career-text', version: SNAPSHOT_VERSION, sources: cleanSources(sources).map(({ name, text }) => [name, text]) }));
+  return sha256Hex(JSON.stringify({ kind: 'career-text', version: SNAPSHOT_VERSION, sources: cleanSources(sources).map(({ name, text }) => [name, text]) }));
 }
 
 // ------------------------------------------------------------- evidence --
@@ -192,11 +192,7 @@ export async function storeCareerText({ userDataPath, sources } = {}) {
   const root = await privateDirectory(careerSnapshotStorageRoot(userDataPath), { create: true });
   const target = path.join(root, `${snapshotId}.json`);
   const body = JSON.stringify({ version: SNAPSHOT_VERSION, kind: 'career-text', snapshotId, sources: clean });
-  const tmp = path.join(root, `.${snapshotId}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  try {
-    await fs.promises.writeFile(tmp, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-    await fs.promises.rename(tmp, target);
-  } finally { await fs.promises.unlink(tmp).catch(() => undefined); }
+  await atomicWriteFile(target, body);
   return snapshotFrom(snapshotId, clean);
 }
 

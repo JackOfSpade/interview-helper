@@ -420,7 +420,6 @@ const tests = [
       assert.match(main, /registerInputRoot: root => \{ convertedRoot = root; \}/u);
       assert.match(main, /registerCareerTextHandlers\(\{[\s\S]*allowedPrivateRoots: \(\) => \(convertedRoot \? \[convertedRoot\] : \[\]\)/u);
       assert.doesNotMatch(main, /Career data \(text\)/u, 'the chooser no longer filters to text');
-      assert.match(read('electron/ipc/ipcUtils.js'), /'convert-interview-career-files'/u, 'a long conversion pauses at quit like the other career work');
     },
   },
   {

@@ -67,6 +67,7 @@ export function fitWindowToTextSize({ base, current, percent, workArea, opening 
 export function createTextSizeController({ store, getAllWindows, screen = null, logger = null, onChange = null, defer = setImmediate } = {}) {
   if (!store || typeof getAllWindows !== 'function') throw new TypeError('The text size controller needs a store and the window list.');
   let percent = store.read();
+  let saving = Promise.resolve();
   const bases = new WeakMap();
   const adopted = new WeakSet();
   const alive = win => !!win && !win.isDestroyed?.();
@@ -123,8 +124,9 @@ export function createTextSizeController({ store, getAllWindows, screen = null, 
       percent = next;
       for (const win of getAllWindows()) { zoom(win); fit(win, false); }
       try { onChange?.(textSizeState(percent)); } catch { /* a listener cannot undo the change */ }
-      try { await store.write(percent); }
-      catch (error) { logger?.warn?.(`[TextSize] the setting was not saved: ${error?.message || error}`); }
+      // Saves run one after another, so the file always ends with the newest size.
+      saving = saving.then(() => store.write(percent)).catch(error => { logger?.warn?.(`[TextSize] the setting was not saved: ${error?.message || error}`); });
+      await saving;
     }
     return textSizeState(percent);
   }

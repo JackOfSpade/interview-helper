@@ -22,6 +22,7 @@ const isProd = typeof process !== 'undefined' && !process.defaultApp;
 const NORMAL_RING_BUFFER_SIZE = 20_000;
 const HIGH_SIGNAL_RING_BUFFER_SIZE = 5_000;
 const RING_BUFFER_SIZE = NORMAL_RING_BUFFER_SIZE + HIGH_SIGNAL_RING_BUFFER_SIZE;
+const RING_BUFFER_TRIM_SLACK = 500;
 const normalRingBuffer = [];
 const highSignalRingBuffer = [];
 let logSequence = 0;
@@ -43,13 +44,15 @@ function pushRing(level, args) {
     level,
     message: args.map(formatArg).join(' '),
   });
-  if (target.length > ceiling) target.shift();
+  // Trim in blocks: dropping the oldest entry one at a time would move the whole
+  // buffer on every line logged. Readers take only the newest `ceiling` entries.
+  if (target.length > ceiling + RING_BUFFER_TRIM_SLACK) target.splice(0, target.length - ceiling);
 }
 
 export function getRecentLogs(limit = RING_BUFFER_SIZE) {
   const requested = Number.isSafeInteger(limit) ? Math.max(0, limit) : RING_BUFFER_SIZE;
   if (requested === 0) return [];
-  return [...normalRingBuffer, ...highSignalRingBuffer]
+  return [...normalRingBuffer.slice(-NORMAL_RING_BUFFER_SIZE), ...highSignalRingBuffer.slice(-HIGH_SIGNAL_RING_BUFFER_SIZE)]
     .sort((a, b) => a.sequence - b.sequence)
     .slice(-requested);
 }

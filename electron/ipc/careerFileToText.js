@@ -30,6 +30,7 @@ import zlib from 'node:zlib';
 import { htmlToText } from 'html-to-text';
 import { readPlainTextDocumentWithReason } from './docUtils.js';
 import { isSensitivePath } from '../utils/pathSafety.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 export const CAREER_FILE_TO_TEXT_STAGE = 'career-file-to-text';
 // Folder name under the app's data root. It must not contain a component that
@@ -744,7 +745,7 @@ async function cacheLookup(directory, textName) {
     const meta = JSON.parse(await fs.readFile(`${target}.meta.json`, 'utf8'));
     if (!meta || meta.version !== CAREER_CONVERSION_VERSION || typeof meta.method !== 'string' || typeof meta.textSha256 !== 'string') return null;
     // An edited or damaged converted file is not served as the conversion of the original.
-    if (createHash('sha256').update(await fs.readFile(target)).digest('hex') !== meta.textSha256) return null;
+    if (sha256Hex(await fs.readFile(target)) !== meta.textSha256) return null;
     const read = await readPlainTextDocumentWithReason(target, { includeAppPrivate: false });
     if (!read.text) return null;
     return { textPath: target, method: meta.method, note: typeof meta.note === 'string' ? meta.note : null };
@@ -808,7 +809,7 @@ async function convertOne({ filePath, root, taken, readWithAi, signal, loadPdfMo
       await fs.rm(target, { force: true }).catch(() => {});
       return fail(careerConversionReasonSentence(verdict.reason));
     }
-    await writePrivateFile(`${target}.meta.json`, JSON.stringify({ version: CAREER_CONVERSION_VERSION, method: converted.method, note, textSha256: createHash('sha256').update(text).digest('hex') }));
+    await writePrivateFile(`${target}.meta.json`, JSON.stringify({ version: CAREER_CONVERSION_VERSION, method: converted.method, note, textSha256: sha256Hex(text) }));
     taken.add(textName);
     return { ...result, ok: true, textPath: target, textName, method: converted.method, reason: note };
   } catch (error) {

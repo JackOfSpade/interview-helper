@@ -56,6 +56,25 @@ export default [
       assert(!fs.existsSync(path.join(dataRoot, 'practice-models')), 'the marker makes later runs do nothing');
     });
   } },
+  { name: 'interview migrate: an entry that fails to copy leaves no marker and no half copy, and is copied on the next start', async run() {
+    await withRoots(async ({ legacyRoot, dataRoot }) => {
+      const source = path.join(legacyRoot, 'practice-voice-pool.json');
+      await write(source, 'voices');
+      await write(path.join(legacyRoot, 'interview-helper-sessions.json'), '{"sessions":[]}');
+      await fs.promises.chmod(source, 0o000);
+      try {
+        const warnings = [];
+        const first = await migrateInterviewDataFromCanvas({ legacyRoot, dataRoot, logger: { warn: line => warnings.push(line) } });
+        if (fs.existsSync(path.join(dataRoot, 'practice-voice-pool.json'))) return; // a privileged user can still read the file
+        assert.deepEqual(first.copied, ['interview-helper-sessions.json']);
+        assert.equal(warnings.length, 1);
+        assert(!fs.existsSync(path.join(dataRoot, MIGRATION_MARKER)), 'a failed copy is tried again, so the copy is not marked done');
+      } finally { await fs.promises.chmod(source, 0o600); }
+      const second = await migrateInterviewDataFromCanvas({ legacyRoot, dataRoot });
+      assert.deepEqual(second, { copied: ['practice-voice-pool.json'], skipped: false });
+      assert(fs.existsSync(path.join(dataRoot, MIGRATION_MARKER)));
+    });
+  } },
   { name: 'interview migrate: a missing legacy folder still writes the marker', async run() {
     await withRoots(async ({ legacyRoot, dataRoot }) => {
       const result = await migrateInterviewDataFromCanvas({ legacyRoot, dataRoot });
