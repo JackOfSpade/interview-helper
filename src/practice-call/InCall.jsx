@@ -257,6 +257,9 @@ export default function InCall({ state, api }) {
           if (!(await typeStep(step.code))) { why = `${label} typing stopped before it finished`; break; }
         }
       }
+    } catch (error) {
+      why = `failed: ${error?.message || error}`;
+      logEvent('ERROR wand run:', error?.message || error);
     } finally {
       note(`run end: ${why}`);
       if (workRef.current === run) workRef.current = null;
