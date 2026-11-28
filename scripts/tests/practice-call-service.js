@@ -1015,15 +1015,16 @@ test('model download reports progress before ringing', async () => {
   assert.equal(states.some(item => item.phase === 'downloading' && item.modelDownload?.receivedBytes === 10), true);
 });
 
-// The precheck reads the voice key only after earlier async steps; a fixed
-// short sleep loses that race on a loaded machine, so wait for the read itself.
-async function waitForKeyRead(released, timeoutMs = 10_000) {
+// A fixed short sleep loses the race with the service's earlier async steps on a
+// loaded machine, so wait for the step the test is about to have started.
+async function waitUntil(check, what, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
-  while (typeof released() !== 'function') {
-    if (Date.now() > deadline) throw new Error('the precheck never read the voice key');
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting until ${what}`);
     await new Promise(resolve => setTimeout(resolve, 5));
   }
 }
+const waitForKeyRead = released => waitUntil(() => typeof released() === 'function', 'the precheck read the voice key');
 
 test('hang-up from precheck and connecting is safe', async () => {
   let releaseKey;
@@ -4877,7 +4878,7 @@ test('plan: hanging up while the plan is being made aborts it and neither fails 
   });
   const { service } = await startOf({ deps: { planCall, sessionsFactory: () => { sessions += 1; return { start: async () => {} }; } } });
   const starting = service.start(ARGS);
-  await flushAll();
+  await waitUntil(() => signal, 'the plan call started');
   assert.equal(service.getState().notice.message, 'Planning the interview');
   const ended = await service.hangUp();
   assert.equal(signal.aborted, true, 'the planning call is told to stop');
