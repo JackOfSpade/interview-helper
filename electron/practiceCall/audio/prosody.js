@@ -1,6 +1,6 @@
 // Turn-level prosody on synthetic-friendly acoustic measures. Pure: no I/O.
 // Pause times are on the helper timeline (turn startMs plus frame offset).
-import { trackPitch } from './pitch.js';
+import { trackPitch, trackPitchAsync } from './pitch.js';
 
 const FRAME_MS = 20;
 const PAUSE_MIN_MS = 300;
@@ -97,8 +97,7 @@ function countRestarts(tokens) {
   return restarts;
 }
 
-function pitchSummary(samples, sampleRate) {
-  const { f0 } = trackPitch(samples, sampleRate, {});
+function pitchSummaryOf({ f0 }) {
   const voiced = [];
   for (const hz of f0) if (hz > 0) voiced.push(hz);
   if (!voiced.length) return { pitchMedianHz: 0, pitchRangeSt: 0 };
@@ -116,7 +115,7 @@ function wordsInsideTurn(words, startMs, endMs) {
   });
 }
 
-export function turnProsody({ samples, sampleRate, startMs = 0, words = [] }) {
+function measureTurn({ samples, sampleRate, startMs = 0, words = [] }) {
   const pcm = samples instanceof Float32Array ? samples : Float32Array.from(samples ?? []);
   if (!(sampleRate > 0)) throw new Error('turnProsody: sampleRate must be positive');
   const { db, frameMs } = frameDb(pcm, sampleRate);
@@ -135,20 +134,33 @@ export function turnProsody({ samples, sampleRate, startMs = 0, words = [] }) {
   const turnWords = wordsInsideTurn(words, startMs, startMs + durationMs);
   const wordsPerMinute = speechMs > 0 ? round((turnWords.length / speechMs) * 60000, 1) : 0;
   speechDb.sort((a, b) => a - b);
-  const { pitchMedianHz, pitchRangeSt } = pitchSummary(pcm, sampleRate);
 
   return {
-    speechMs,
-    wordsPerMinute,
-    pauses,
-    pauseCount: pauses.length,
-    longestPauseMs: pauses.reduce((longest, pause) => Math.max(longest, pause.endMs - pause.startMs), 0),
-    pitchMedianHz,
-    pitchRangeSt,
-    loudnessDb: speechDb.length ? round(median(speechDb), 1) : SILENCE_DB,
-    restarts: countRestarts(tokenise(turnWords)),
-    wordCount: turnWords.length,
+    pcm,
+    withPitch: ({ pitchMedianHz, pitchRangeSt }) => ({
+      speechMs,
+      wordsPerMinute,
+      pauses,
+      pauseCount: pauses.length,
+      longestPauseMs: pauses.reduce((longest, pause) => Math.max(longest, pause.endMs - pause.startMs), 0),
+      pitchMedianHz,
+      pitchRangeSt,
+      loudnessDb: speechDb.length ? round(median(speechDb), 1) : SILENCE_DB,
+      restarts: countRestarts(tokenise(turnWords)),
+      wordCount: turnWords.length,
+    }),
   };
+}
+
+export function turnProsody(input) {
+  const { pcm, withPitch } = measureTurn(input);
+  return withPitch(pitchSummaryOf(trackPitch(pcm, input.sampleRate, {})));
+}
+
+/** turnProsody without holding the event loop for the pitch track (see trackPitchAsync). */
+export async function turnProsodyAsync(input) {
+  const { pcm, withPitch } = measureTurn(input);
+  return withPitch(pitchSummaryOf(await trackPitchAsync(pcm, input.sampleRate, {})));
 }
 
 export default turnProsody;

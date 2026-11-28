@@ -2,7 +2,7 @@
  * Pure, injectable conversation engine for the live practice-interview call.
  * No I/O: time, sessions, audio and voice are all injected. No word lists: decisions use counts, durations and the classifier.
  */
-import { createReplyStreamParser, formatTurnMessage } from './interviewPracticeCallPrompt.js';
+import { SCREEN_CONTENT_MAX, SCREEN_TITLE_MAX, createReplyStreamParser, formatTurnMessage } from './interviewPracticeCallPrompt.js';
 import * as callPrompt from './interviewPracticeCallPrompt.js'; // formatWatchMessage and parseWatchDecision: read off the namespace so the engine loads whether or not they exist yet
 import { CUT_IN_OVERLAP_MS, fadeOutTail, firstSpeechSample, mixHeadInto, msSamples } from './practiceCall/audio/cutInMix.js';
 
@@ -136,7 +136,6 @@ const LIVE_LOOK_RETRY_MS = 1000;
 // A question was practised once this much followed it; fewer words is a greeting, a "say that again?" or nothing.
 const ANSWER_MIN_WORDS = 15;
 const ANSWER_MIN_PAD_CHARS = 20;
-const SCREEN_TITLE_CAP = 120;
 // Starting to share takes a moment (finding the window, clicking share); swapping what is already shared is quick.
 const SCREEN_FIRST_DELAY = { minMs: 2000, maxMs: 20000, defaultMs: 6000 };
 const SCREEN_SWAP_DELAY = { minMs: 0, maxMs: 3000, defaultMs: 400 };
@@ -146,7 +145,6 @@ const SHARE_GAP_MIN_MS = 1000;
 // A written pause (<pause s="4"/>) is silence the lead chose: kept within what a call can plausibly hold.
 const PAUSE_MIN_MS = 300;
 const PAUSE_MAX_MS = 15000;
-const SCREEN_CONTENT_CAP = 6000;
 const PAD_TEXT_CAP = 20000;
 const FINISH_SLACK_MS = 3000;
 const OVERLAP_LOOKBACK_MS = 250;
@@ -1817,8 +1815,8 @@ export function createPracticeCallEngine({
               }
               const control = {
                 kind: 'screen', speakerId: writerNow(reply),
-                title: String(shown.title ?? '').slice(0, SCREEN_TITLE_CAP),
-                content: String(shown.content ?? '').slice(0, SCREEN_CONTENT_CAP),
+                title: String(shown.title ?? '').slice(0, SCREEN_TITLE_MAX),
+                content: String(shown.content ?? '').slice(0, SCREEN_CONTENT_MAX),
                 delaySeconds: typeof shown.delaySeconds === 'number' ? shown.delaySeconds : null,
                 ...(shown.visualId ? { visualId: shown.visualId } : {}),
               };

@@ -15,7 +15,7 @@ async function defaultInference({ smartTurnPath, tonePath }) {
 }
 
 async function defaultProsody() {
-  return (await import('./audio/prosody.js')).turnProsody;
+  return (await import('./audio/prosody.js')).turnProsodyAsync;
 }
 
 async function defaultBaseline(options) {
@@ -175,7 +175,9 @@ export function createPracticeEar({
       await noteLoaded;
       const measure = await prosodyOf();
       if (closed) return;
-      const measured = measure({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+      // The default measure is async so a long answer's pitch track never stalls the call.
+      const measured = await measure({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+      if (closed) return;
       // The measure has no word timings here, so pace is the segment's word count over its speech time.
       const turn = withPace(measured, Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : 0);
       measuredTurns.push({ ...turn, startMs, endMs, ...(voiced ? { voiced: true } : {}) });
@@ -317,7 +319,8 @@ export function createPracticeEar({
       const active = await voicedBaselineOf();
       if (closed) return null;
       const part = line.samples.subarray(0, Math.floor((heard * EAR_SAMPLE_RATE) / 1000));
-      const measured = measure({ samples: part, sampleRate: EAR_SAMPLE_RATE, startMs, endMs, words: [] });
+      const measured = await measure({ samples: part, sampleRate: EAR_SAMPLE_RATE, startMs, endMs, words: [] });
+      if (closed) return null;
       // Pace over the heard part: the line's word count scaled by how much of it was heard.
       const words = line.wordCount > 0 ? Math.round(line.wordCount * Math.min(1, heard / line.durationMs)) : 0;
       const turn = withPace(measured, words);

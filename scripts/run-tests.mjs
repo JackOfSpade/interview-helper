@@ -40,12 +40,18 @@ async function runWithWatchdog(test, timeoutMs) {
   }
 }
 
+// TEST_SUITES=practice-call-audio,practice-call-service runs only those suites (names without .js).
+const onlySuites = process.env.TEST_SUITES
+  ? new Set(process.env.TEST_SUITES.split(',').map(name => name.trim().replace(/\.js$/u, '')).filter(Boolean))
+  : null;
+
 async function run() {
   const testDirectory = new URL('./tests/', import.meta.url);
   const files = (await fs.readdir(testDirectory, { withFileTypes: true }))
     .filter(entry => entry.isFile() && /^[a-z].*\.js$/u.test(entry.name) && entry.name !== 'testHelpers.js')
-    .map(entry => entry.name).sort();
-  if (!files.length) throw new Error('No test suites were discovered.');
+    .map(entry => entry.name).sort()
+    .filter(name => !onlySuites || onlySuites.has(name.replace(/\.js$/u, '')));
+  if (!files.length) throw new Error(onlySuites ? `No suite matches TEST_SUITES=${process.env.TEST_SUITES}.` : 'No test suites were discovered.');
   const timeoutMs = configuredTimeout();
   let passed = 0;
   let failed = 0;

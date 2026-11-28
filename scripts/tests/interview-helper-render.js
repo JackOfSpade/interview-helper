@@ -4,7 +4,7 @@ import path from 'node:path';
 import { assert } from './testHelpers.js';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
-import { withTimeout } from './fixtures/practice-connector/harness.js';
+import { BUNDLE_TIMEOUT_MS, withTimeout } from './fixtures/practice-connector/harness.js';
 
 const SNAPSHOT_A = 'a'.repeat(64);
 const SNAPSHOT_B = 'b'.repeat(64);
@@ -112,7 +112,7 @@ async function withDomBundledProbe(fn) {
     let bundle;
     try {
       await fsPromises.writeFile(entry, PROBE_SOURCE(path.resolve('src/interview-app/InterviewHelperPanel.jsx')));
-      bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+      bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), BUNDLE_TIMEOUT_MS);
       return await fn(bundle, window);
     } finally {
       controller.abort();

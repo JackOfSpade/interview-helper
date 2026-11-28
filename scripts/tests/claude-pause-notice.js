@@ -4,7 +4,7 @@ import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
-import { withTimeout } from './fixtures/practice-connector/harness.js';
+import { BUNDLE_TIMEOUT_MS, withTimeout } from './fixtures/practice-connector/harness.js';
 import {
   CLAUDE_TASK_PAUSE_CODES,
   CLAUDE_TASK_STATUS_CHANNEL,
@@ -144,7 +144,7 @@ export default [
       const controller = new AbortController();
       let bundle;
       try {
-        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), BUNDLE_TIMEOUT_MS);
         await withDom(async window => {
           const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
           try {

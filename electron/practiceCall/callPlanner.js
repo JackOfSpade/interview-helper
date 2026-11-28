@@ -11,6 +11,7 @@
  * asked again with the specific problems found. Only harmless normalisation is done in code.
  */
 
+import { SCREEN_CONTENT_MAX } from '../interviewPracticeCallPrompt.js';
 import { logNote } from './logNote.js';
 import { padLanguageNames } from '../../src/practice-call/padLanguages.js';
 
@@ -41,7 +42,6 @@ const QUIET_DESCRIPTION = 'How this person deals with a candidate who goes quiet
 
 // Text has a floor but no ceiling: a plan that runs a little long reads fine, and a rejected one costs a whole second plan.
 // The shared screen is the one place with a real limit (SCREEN_CONTENT_MAX), so screen content keeps its cap.
-const SCREEN_CONTENT_LIMIT = 6000;
 const str = (min, description, max) => ({ type: 'string', minLength: min, ...(max ? { maxLength: max } : {}), ...(description ? { description } : {}) });
 
 const PERSON_NAME_DESCRIPTION = "The person's full name, a first name and a surname written by you for this call, fitting the region the voice's accent suggests and the voice's gender.";
@@ -124,7 +124,7 @@ export const PLAN_SCHEMA = Object.freeze({
             type: 'object', additionalProperties: false, required: ['content'],
             description: 'Only for a problem whose later parts build on the earlier ones: the givens every part relies on (the scenario, the data, the definitions or conventions, a diagram). It stays on screen above each part, so moving to the next part replaces only the question. Leave it out when the parts stand on their own.',
             properties: {
-              content: str(1, 'The shared givens, in the screen format.', SCREEN_CONTENT_LIMIT),
+              content: str(1, 'The shared givens, in the screen format.', SCREEN_CONTENT_MAX),
               visual: {
                 type: 'object', additionalProperties: false, required: ['kind', 'shows'],
                 description: 'A picture or diagram every part relies on; it stays on screen for every part.',
@@ -141,7 +141,7 @@ export const PLAN_SCHEMA = Object.freeze({
             items: {
               type: 'object', additionalProperties: false, required: ['title', 'content'],
               properties: {
-                title: str(1), content: str(1, '', SCREEN_CONTENT_LIMIT),
+                title: str(1), content: str(1, '', SCREEN_CONTENT_MAX),
                 visual: {
                   type: 'object', additionalProperties: false, required: ['kind', 'shows'],
                   description: 'When a picture or diagram makes this screen clearer or sets its scene (a real place, animal, object or site to picture); leave it out for code, abstract or general questions.',
@@ -506,7 +506,7 @@ export function validatePlan(raw, { pool, voices, candidateName, candidateVoices
       if (value.setup !== undefined && value.setup !== null) {
         if (!isObject(value.setup)) bad(`${path}.setup must be an object or left out`);
         else {
-          const content = block(value.setup.content, `${path}.setup.content`, 1, SCREEN_CONTENT_LIMIT);
+          const content = block(value.setup.content, `${path}.setup.content`, 1, SCREEN_CONTENT_MAX);
           const visual = value.setup.visual === undefined || value.setup.visual === null ? null : planVisual(value.setup.visual, `${path}.setup.visual`, bad);
           setup = { content, ...(visual ? { visual } : {}) };
         }
@@ -522,9 +522,9 @@ export function validatePlan(raw, { pool, voices, candidateName, candidateVoices
           if (!visual && setup?.visual) {
             if (!setupVisualAt) { visual = setup.visual; setupVisualAt = partIndex + 1; } else visualFrom = setupVisualAt;
           }
-          const own = block(part.content, `${partPath}.content`, 1, SCREEN_CONTENT_LIMIT);
+          const own = block(part.content, `${partPath}.content`, 1, SCREEN_CONTENT_MAX);
           const content = setup?.content && own ? `${setup.content}\n\n${own}` : own;
-          if (setup?.content && own && content.length > SCREEN_CONTENT_LIMIT) bad(`${partPath}.content with the setup above it is ${content.length} characters; together they must stay under ${SCREEN_CONTENT_LIMIT}`);
+          if (setup?.content && own && content.length > SCREEN_CONTENT_MAX) bad(`${partPath}.content with the setup above it is ${content.length} characters; together they must stay under ${SCREEN_CONTENT_MAX}`);
           parts.push({ title: text(part.title, `${partPath}.title`, 1), content, ...(visual ? { visual } : {}), ...(visualFrom ? { visualFrom } : {}) });
         });
       }

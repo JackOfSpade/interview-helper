@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { openGrowingWav } from '../../electron/practiceCall/audio/wavReader.js';
 import { trackPitch } from '../../electron/practiceCall/audio/pitch.js';
-import { turnProsody } from '../../electron/practiceCall/audio/prosody.js';
+import { turnProsody, turnProsodyAsync } from '../../electron/practiceCall/audio/prosody.js';
 import { createVoiceBaseline } from '../../electron/practiceCall/audio/baseline.js';
 import { composeVoiceNote, VOICE_NOTE_THRESHOLDS } from '../../electron/practiceCall/audio/toneNote.js';
 import { createFloorBidDetector, FLOOR_BID_THRESHOLDS } from '../../electron/practiceCall/audio/floorBid.js';
@@ -147,6 +147,20 @@ export default [
       assert.deepEqual(silent.pauses, []);
       assert.equal(silent.wordsPerMinute, 0);
       assert.equal(silent.restarts, 0);
+    },
+  },
+  {
+    name: 'practice call audio: the async prosody gives the sync result and frees the event loop during a long turn',
+    async run() {
+      const samples = concat(...Array.from({ length: 10 }, (_, index) => concat(sine(110 + index * 15, 2500), silence(400))));
+      const words = Array.from({ length: 40 }, (_, index) => ({ text: `w${index}`, startMs: index * 700, endMs: index * 700 + 500 }));
+      const expected = turnProsody({ samples, sampleRate: RATE, startMs: 250, words });
+      let ticks = 0;
+      const ticker = setInterval(() => { ticks += 1; }, 1);
+      let measured;
+      try { measured = await turnProsodyAsync({ samples, sampleRate: RATE, startMs: 250, words }); } finally { clearInterval(ticker); }
+      assert.deepEqual(measured, expected);
+      assert.ok(ticks > 0, 'timers ran while the pitch track was computed');
     },
   },
   {

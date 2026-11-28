@@ -112,7 +112,7 @@ const HANDOFF_LIFECYCLE_REPORT_LIMIT = 20;
 // closed canvases cannot make this process-local diagnostic unbounded.
 const HANDOFF_LIFECYCLE_AGGREGATE_WINDOW_LIMIT = 64;
 export const SAFE_NON_API_AI_CANCEL_CAUSES = Object.freeze([
-  'app-quit', 'manual-ai-cancelled', 'job-board-cancelled', 'board-run-cancelled',
+  'app-quit', 'manual-ai-cancelled',
   'node-deleted', 'sender-destroyed', 'worker-aborted', 'worker-timeout',
   'worker-unavailable', 'comparative-unavailable', 'unknown',
 ]);

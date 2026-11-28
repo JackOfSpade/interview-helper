@@ -54,7 +54,7 @@ function parabolicPeriod(cmnd, tau) {
   return tau + (0.5 * (left - right)) / denom;
 }
 
-export function trackPitch(samples, sampleRate, { hopMs = 10, minHz = 60, maxHz = 400 } = {}) {
+function pitchTracker(samples, sampleRate, { hopMs = 10, minHz = 60, maxHz = 400 } = {}) {
   if (!(sampleRate > 0)) throw new Error('trackPitch: sampleRate must be positive');
   const hop = Math.max(1, Math.round((sampleRate * hopMs) / 1000));
   const windowSamples = Math.max(4, Math.round((sampleRate * FRAME_MS) / 1000));
@@ -68,18 +68,44 @@ export function trackPitch(samples, sampleRate, { hopMs = 10, minHz = 60, maxHz 
   const d = new Float64Array(tauMax + 1);
   const cmnd = new Float64Array(tauMax + 1);
 
-  for (let frame = 0; frame < frameCount; frame += 1) {
+  function track(frame) {
     const start = frame * hop;
-    if (frameRms(samples, start, windowSamples) < floorAmplitude) { f0[frame] = 0; continue; }
+    if (frameRms(samples, start, windowSamples) < floorAmplitude) { f0[frame] = 0; return; }
     differenceFunction(d, samples, start, windowSamples, tauMin, tauMax);
     cumulativeMeanNormalised(cmnd, d, tauMax);
     const found = pickPeriod(cmnd, tauMin, tauMax);
-    if (!found) { f0[frame] = 0; continue; }
+    if (!found) { f0[frame] = 0; return; }
     const period = parabolicPeriod(cmnd, found.tau);
     const hz = period > 0 ? sampleRate / period : 0;
     f0[frame] = hz >= minHz && hz <= maxHz ? Math.round(hz * 100) / 100 : 0;
   }
-  return { hopMs, f0 };
+  return { frameCount, track, result: () => ({ hopMs, f0 }) };
+}
+
+export function trackPitch(samples, sampleRate, options = {}) {
+  const tracker = pitchTracker(samples, sampleRate, options);
+  for (let frame = 0; frame < tracker.frameCount; frame += 1) tracker.track(frame);
+  return tracker.result();
+}
+
+const yieldToEventLoop = () => new Promise(resolve => { setImmediate(resolve); });
+
+/**
+ * The same result as trackPitch, computed in slices of about `sliceMs` with the event loop
+ * free in between. A long answer takes most of a second to track, which on the main
+ * process would stall the live call's audio and IPC.
+ */
+export async function trackPitchAsync(samples, sampleRate, options = {}, { sliceMs = 8 } = {}) {
+  const tracker = pitchTracker(samples, sampleRate, options);
+  let sliceStart = performance.now();
+  for (let frame = 0; frame < tracker.frameCount; frame += 1) {
+    tracker.track(frame);
+    if (performance.now() - sliceStart >= sliceMs) {
+      await yieldToEventLoop();
+      sliceStart = performance.now();
+    }
+  }
+  return tracker.result();
 }
 
 export default trackPitch;

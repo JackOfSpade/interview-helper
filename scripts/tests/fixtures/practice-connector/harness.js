@@ -58,6 +58,12 @@ export function faultAt(port, kth, options = new Error('injected fault')) {
   return Object.freeze({ port: Object.freeze(wrapped), calls, count: () => count });
 }
 
+// Bundling a component with esbuild takes seconds and slows sharply on a busy
+// machine or a hosted runner. Allow half of the per-test watchdog
+// (TEST_TIMEOUT_MS, 30 s by default) so a slow bundle is not reported as a
+// broken component, while a hung one still fails before the watchdog does.
+export const BUNDLE_TIMEOUT_MS = Math.max(10_000, Math.floor((Number(process.env.TEST_TIMEOUT_MS) || 30_000) / 2));
+
 export async function withTimeout(promise, timeoutMs, {
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,

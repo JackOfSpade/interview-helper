@@ -677,8 +677,8 @@ const PARTIAL_SPEAKER_MAX = 40;
 const SCREEN_CLOSE = '</screen>';
 /** True when the text ends inside a fenced code block: an odd number of fence lines so far. */
 const insideFence = value => value.split('\n').filter(line => /^\s*```/.test(line)).length % 2 === 1;
-const SCREEN_TITLE_MAX = 120;
-const SCREEN_CONTENT_MAX = 6000;
+export const SCREEN_TITLE_MAX = 120;
+export const SCREEN_CONTENT_MAX = 6000;
 const PAD_LANG_MAX = 30;
 const PARTIAL_TAG_MAX = 300;
 const CONTROL_NAME = /^<(screen-stop|screen|pad-open|pad-close)(?=[\s/>]|$)/;

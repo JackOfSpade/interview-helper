@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
-import { withTimeout } from './fixtures/practice-connector/harness.js';
+import { BUNDLE_TIMEOUT_MS, withTimeout } from './fixtures/practice-connector/harness.js';
 import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, PRACTICE_FEEDBACK_LIMITS, newPracticeCode, orderPracticeQuestions, practiceCodeHash, trimPracticeFeedback, trimPracticeText, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
 import { listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession, updateInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
@@ -147,7 +147,7 @@ export default [
       let bundle;
       try {
         await fs.promises.writeFile(entry, `import React from 'react';\nimport { FeedbackView } from ${JSON.stringify(path.resolve('src/components/InterviewPracticePanel.jsx'))};\nexport function PracticeProbe({ feedback }) { return <FeedbackView feedback={feedback} />; }\n`);
-        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), BUNDLE_TIMEOUT_MS);
         const root = bundle.module.createRoot(window.document.getElementById('root'));
         await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PracticeProbe, { feedback: validatePracticeFeedback(feedbackPayload('x')) })); await new Promise(resolve => setTimeout(resolve, 0)); });
         const view = window.document.querySelector('[data-testid="practice-feedback"]');
@@ -187,7 +187,7 @@ export default [
       let bundle;
       try {
         await fs.promises.writeFile(entry, `import React from 'react';\nimport { InterviewPracticePanel } from ${JSON.stringify(path.resolve('src/components/InterviewPracticePanel.jsx'))};\nexport function PanelProbe(props) { return <InterviewPracticePanel {...props} />; }\n`);
-        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), BUNDLE_TIMEOUT_MS);
         const started = [];
         window.electronAPI = { startPracticeCall: async args => { started.push(args); return { success: true }; } };
         const root = bundle.module.createRoot(window.document.getElementById('root'));
@@ -217,7 +217,7 @@ export default [
       let bundle;
       try {
         await fs.promises.writeFile(entry, `import React from 'react';\nimport { InterviewPracticePanel } from ${JSON.stringify(path.resolve('src/components/InterviewPracticePanel.jsx'))};\nexport function PanelProbe(props) { return <InterviewPracticePanel {...props} />; }\n`);
-        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), BUNDLE_TIMEOUT_MS);
         const started = [];
         const removed = [];
         let saved = [];
