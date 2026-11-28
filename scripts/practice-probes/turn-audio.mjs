@@ -19,8 +19,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isMainModule } from '../lib/entrypoint.mjs';
+import { resamplePcm16 } from '../lib/pcm.mjs';
 import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
 import { buildInterviewerInstructions, buildOpenerInstructions, createReplyStreamParser, formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 import { connectedMarker, DEFAULT_CALL_THRESHOLDS, joinPauseMs } from '../../electron/interviewPracticeCallEngine.js';
@@ -33,15 +34,6 @@ import { pairsFrom } from './opener-ack.mjs';
 const RATE = 24000;
 const words = value => String(value ?? '').replace(/\[[^\]]*\]/g, ' ').split(/\s+/).filter(Boolean);
 const strip = value => String(value ?? '').replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
-
-function toRate(pcm, from) {
-  const input = new Int16Array(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.length - (pcm.length % 2)));
-  if (from === RATE) return input;
-  const ratio = from / RATE;
-  const out = new Int16Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < out.length; i += 1) { const x = i * ratio; const a = Math.floor(x); const b = Math.min(input.length - 1, a + 1); out[i] = Math.round(input[a] + (input[b] - input[a]) * (x - a)); }
-  return out;
-}
 
 /** One turn's audio timeline: streams play one after another; a chunk plays after the one before it, never before it arrives. */
 function createTimeline(t0) {
@@ -72,6 +64,7 @@ async function main() {
     allowPositionals: true,
     options: { model: { type: 'string', default: 'opus' }, 'stability-add': { type: 'string', default: '0' }, turns: { type: 'string', default: '2,4,6,12,13,17' }, 'text-only': { type: 'boolean', default: false }, limit: { type: 'string', default: '26' }, out: { type: 'string', default: 'turn-audio' } },
   });
+  if (!positionals[0]) throw new Error('Usage: turn-audio.mjs <call.json> --model opus|sonnet [--turns 2,4,6] [--out DIR] [--text-only [--limit 26]]');
   const call = JSON.parse(await fs.readFile(positionals[0], 'utf8'));
   const stabilityAdd = Number.parseFloat(values['stability-add']) || 0;
   const steadier = value => Math.min(0.75, (Number.isFinite(value) ? value : 0.3) + stabilityAdd);
@@ -113,7 +106,7 @@ async function main() {
         const factory = factories[id] ?? factories.A;
         const opened = factory.open({ utteranceId: `t${turn}-${id}-${finishes.length}` });
         const rate = factory.sampleRate;
-        opened.onAudio(pcm => timeline.place(toRate(pcm, rate)));
+        opened.onAudio(pcm => timeline.place(resamplePcm16(pcm, rate, RATE)));
         opened.words = [];
         opened.onWords?.(list => opened.words.push(...list));
         return opened;
@@ -164,7 +157,9 @@ async function main() {
       };
       const mainMessage = formatTurnMessage({ elapsedMs: elapsed[at], candidateText: pair.candidate, channel: pair.channel, lastSpoken: last, ...(ackSpoken ? { acknowledgement: ackSpoken } : {}) });
       const mainStartMs = Math.round(performance.now() - t0);
-      const result = await mainSession.turn(mainMessage, { onDelta: delta => take(parser.push(delta)) });
+      let result;
+      try { result = await mainSession.turn(mainMessage, { onDelta: delta => take(parser.push(delta)) }); }
+      catch (error) { clearTimeout(flushTimer); throw error; }
       take(parser.end());
       last = strip(result.text).slice(0, 400);
       if (textOnly) { index.push({ turn, model: values.model, candidate: pair.candidate, acknowledgement: ackSpoken, reply: result.text.trim(), firstPieceMs: pieces[0]?.atMs ?? null, ackWrittenMs: ackAtMs }); console.log(`#${turn} ${ackSpoken} || ${strip(result.text).slice(0, 120)}`); continue; }
@@ -193,8 +188,9 @@ async function main() {
     }
   } finally {
     await Promise.allSettled([opener.close(), mainSession.close()]);
+    // Written even when a turn failed, so the turns that did finish are kept.
+    await fs.writeFile(path.join(values.out, 'index.json'), JSON.stringify(index, null, 2));
   }
-  await fs.writeFile(path.join(values.out, 'index.json'), JSON.stringify(index, null, 2));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error?.stack ?? error); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch(error => { console.error(error?.stack ?? error); process.exit(1); });

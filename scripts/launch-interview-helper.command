@@ -7,8 +7,7 @@
 #
 # Interview Helper is a separate app from Infinite Canvas: its own build command
 # (npm run build), release folder, build stamp and lock. Building or
-# relaunching it never touches Infinite Canvas, and the reverse. This file mirrors
-# scripts/launch-app.command; keep fixes to the shared logic in step.
+# relaunching it never touches Infinite Canvas, and the reverse.
 #
 # This is the canonical, version-controlled launcher. "~/Desktop/Interview
 # Helper.command" is a thin wrapper that exec's this file — edit THIS one.
@@ -67,7 +66,7 @@ source_manifest() {
   {
     if [[ -n "$inputs" && -f "$inputs" ]]; then
       node -e 'for (const file of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) process.stdout.write(file + "\0")' "$inputs" || return 1
-      printf '%s\0' package.json package-lock.json interview.html vite.interview.config.js vite.main-externals.js \
+      printf '%s\0' package.json package-lock.json interview.html vite.interview.config.js vite.main-externals.js vite.build-inputs.js \
         electron-builder.interview.json config/application-model.json scripts/build-macos.mjs \
         scripts/build-practice-audio-helper.mjs \
         scripts/launch-interview-helper.command scripts/source-manifest.mjs || return 1

@@ -15,7 +15,7 @@ export function buildInputsManifest(manifestFile, name = 'build-inputs') {
       const file = id.split('?')[0]
       if (!path.isAbsolute(file) || file.includes(`${path.sep}node_modules${path.sep}`)) continue
       const relative = path.relative(root, file)
-      if (!relative.startsWith('..') && fs.existsSync(file)) seen.add(relative.split(path.sep).join('/'))
+      if (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) && fs.existsSync(file)) seen.add(relative.split(path.sep).join('/'))
     }
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true })
     fs.writeFileSync(manifestPath, `${JSON.stringify([...seen].sort(), null, 1)}\n`)

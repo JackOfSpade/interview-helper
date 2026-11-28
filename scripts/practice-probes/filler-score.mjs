@@ -10,7 +10,7 @@
 // Reference and hypothesis are aligned with word-level Levenshtein + backtrace.
 
 import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { isMainModule } from '../lib/entrypoint.mjs';
 
 // Recall of at least 4/5 keeps analysis local; kept as integers to avoid float error at the boundary.
 const RECALL_NUMERATOR = 4;
@@ -195,6 +195,6 @@ export function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   process.exitCode = main();
 }

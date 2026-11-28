@@ -48,6 +48,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isPathInside } from './lib/outside-repo.mjs';
+import { isMainModule } from './lib/entrypoint.mjs';
 import { TAVILY_RESEARCH_TOOLS, readTavilyKey, tavilyMcpServers } from './lib/tavily-arm.mjs';
 import { PARALLEL_RESEARCH_TOOLS, readParallelKey, parallelMcpServers } from '../electron/ipc/parallelSearch.js';
 
@@ -75,8 +77,6 @@ export const RESEARCH_SOURCE_LABELS = Object.freeze({
   parallel: 'SOURCE SET B (Parallel search)',
 });
 const INPUT_FILES = ['Application.html', 'Original Job Listing.md', 'Generation Audit.json', 'Resume.pdf', 'Cover Letter.pdf'];
-const inside = (parent, child) => child === parent || (!path.relative(parent, child).startsWith(`..${path.sep}`)
-  && path.relative(parent, child) !== '..' && !path.isAbsolute(path.relative(parent, child)));
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 
@@ -163,7 +163,7 @@ export function installWriteGuard(roots) {
   const check = value => {
     if (typeof value === 'number') { if (!writableFds.has(value)) fail('INPUT_WRITE_REFUSED'); return; }
     const target = path.resolve(value instanceof URL ? fileURLToPath(value) : Buffer.isBuffer(value) ? value.toString() : String(value));
-    const root = roots.find(candidate => inside(candidate, target));
+    const root = roots.find(candidate => isPathInside(candidate, target));
     if (!root) fail('INPUT_WRITE_REFUSED');
     let current = root;
     for (const part of ['', ...path.relative(root, target).split(path.sep).filter(Boolean)]) {
@@ -213,14 +213,14 @@ export function installWriteGuard(roots) {
   replace(fs, 'openSync', original => function (target, flags, ...rest) {
     if (writeFlags(flags)) check(target);
     const fd = original.call(this, target, flags, ...rest);
-    if (roots.some(root => inside(root, path.resolve(String(target))))) writableFds.add(fd);
+    if (roots.some(root => isPathInside(root, path.resolve(String(target))))) writableFds.add(fd);
     return fd;
   });
   replace(fs, 'open', original => function (target, flags, ...rest) {
     if (writeFlags(flags)) check(target);
     const callback = rest.pop();
     return original.call(this, target, flags, ...rest, (error, fd) => {
-      if (!error && roots.some(root => inside(root, path.resolve(String(target))))) writableFds.add(fd);
+      if (!error && roots.some(root => isPathInside(root, path.resolve(String(target))))) writableFds.add(fd);
       callback(error, fd);
     });
   });
@@ -670,6 +670,13 @@ export function summarizeStageTotals({ calls = [], transportCalls = [] } = {}) {
   return { stages, totals };
 }
 
+// How runHarness wires each live research arm (tools, server label, turn cap).
+const RESEARCH_ARM_SETUP = Object.freeze({
+  native: { create: createNativeResearchCall, tools: NATIVE_RESEARCH_TOOLS, mcpServer: null, maxTurns: NATIVE_RESEARCH_MAX_TURNS },
+  tavily: { create: createTavilyResearchCall, readKey: readTavilyKey, tools: TAVILY_RESEARCH_TOOLS, mcpServer: 'tavily', maxTurns: TAVILY_RESEARCH_MAX_TURNS },
+  parallel: { create: createParallelResearchCall, readKey: readParallelKey, tools: PARALLEL_RESEARCH_TOOLS, mcpServer: 'parallel', maxTurns: PARALLEL_RESEARCH_MAX_TURNS },
+});
+
 export async function runHarness(args) {
   // Loaded dynamically so importing this module (tests) never needs Electron.
   const electronPkg = (await import('electron')).default;
@@ -680,20 +687,20 @@ export async function runHarness(args) {
   const mergeDirectories = [];
   for (const directory of args.mergeFrom ?? []) mergeDirectories.push(await realDirectory(directory));
   for (const source of [sourceUserData, bundleDirectory, ...mergeDirectories]) {
-    if (inside(source, output) || inside(output, source)) fail('OUTPUT_OVERLAPS_INPUT');
+    if (isPathInside(source, output) || isPathInside(output, source)) fail('OUTPUT_OVERLAPS_INPUT');
   }
   // Refuse symlink output leaves, including a dangling symlink.
   try { if ((await fs.promises.lstat(args.out)).isSymbolicLink()) fail('UNSAFE_OUTPUT'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   await fs.promises.mkdir(output, { recursive: true, mode: 0o700 });
   await fs.promises.chmod(output, 0o700);
-  const restoreGuard = installWriteGuard([output]);
   // A live run must start in a directory without transcripts, or a later
   // replay could mix one run's prompts with another run's responses.
   if (args.transport === 'claude') {
     const existing = (await fs.promises.readdir(output)).filter(name => /^\d{3,}\.response\.txt$/u.test(name));
     if (existing.length) fail('LIVE_OUTPUT_HAS_TRANSCRIPTS');
   }
+  const restoreGuard = installWriteGuard([output]);
   const writeText = async (name, value) => {
     const file = path.join(output, name);
     await fs.promises.writeFile(file, value, { mode: 0o600, flag: 'w' });
@@ -843,10 +850,13 @@ export async function runHarness(args) {
       callPath: args.research === 'merged' ? 'merged' : 'runClaudeSdkStage' });
     const transportRaw = measured(transport.callRaw);
     let researchCall = null;
-    if (args.research === 'native') {
+    if (args.research in RESEARCH_ARM_SETUP) {
+      const { create, readKey, tools, mcpServer, maxTurns } = RESEARCH_ARM_SETUP[args.research];
       const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
-      researchCall = createNativeResearchCall({
+      researchCall = create({
         runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
+        // An unset or unreadable Parallel key is fine: Parallel also answers anonymously.
+        ...(readKey ? { readKey } : {}),
         profile: researchProfile,
         recorder,
         // Booked like a transport call, so stageTotals counts the research handoff.
@@ -856,41 +866,7 @@ export async function runHarness(args) {
           return { task, stage: researchStage, attempt: 0 };
         },
       });
-      Object.assign(report.research, { tools: [...NATIVE_RESEARCH_TOOLS], mcpServer: null,
-        maxTurns: NATIVE_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
-    } else if (args.research === 'tavily') {
-      const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
-      researchCall = createTavilyResearchCall({
-        runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
-        readKey: readTavilyKey,
-        profile: researchProfile,
-        recorder,
-        // Booked like a transport call, so stageTotals counts the research handoff.
-        beginCall: ({ task, stage: researchStage }) => {
-          currentCall = { task, stage: researchStage, attempts: 0 };
-          transportCalls.push(currentCall);
-          return { task, stage: researchStage, attempt: 0 };
-        },
-      });
-      Object.assign(report.research, { tools: [...TAVILY_RESEARCH_TOOLS], mcpServer: 'tavily',
-        maxTurns: TAVILY_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
-    } else if (args.research === 'parallel') {
-      const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
-      researchCall = createParallelResearchCall({
-        runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
-        // An unset or unreadable key is fine: Parallel also answers anonymously.
-        readKey: readParallelKey,
-        profile: researchProfile,
-        recorder,
-        // Booked like a transport call, so stageTotals counts the research handoff.
-        beginCall: ({ task, stage: researchStage }) => {
-          currentCall = { task, stage: researchStage, attempts: 0 };
-          transportCalls.push(currentCall);
-          return { task, stage: researchStage, attempt: 0 };
-        },
-      });
-      Object.assign(report.research, { tools: [...PARALLEL_RESEARCH_TOOLS], mcpServer: 'parallel',
-        maxTurns: PARALLEL_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
+      Object.assign(report.research, { tools: [...tools], mcpServer, maxTurns, persistSession: false, ultracode: false });
     } else if (args.research === 'merged') {
       // No research: both source sets come from two earlier runs' accepted research.
       const sources = [];
@@ -948,7 +924,7 @@ export async function runHarness(args) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   // Restrict file modes for everything this process and the Claude CLI create.
   process.umask(0o077);
   try {

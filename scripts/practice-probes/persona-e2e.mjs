@@ -14,7 +14,6 @@
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { readElevenLabsKey } from '../../electron/practiceCall/eleven/elevenKey.js';
@@ -28,6 +27,8 @@ import {
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { buildInterviewerInstructions } from '../../electron/interviewPracticeCallPrompt.js';
 import { wavHeader } from '../../electron/practiceCall/audio/wavFormat.js';
+import { mulberry32 } from '../lib/prng.mjs';
+import { isMainModule } from '../lib/entrypoint.mjs';
 
 const SPEAK_TIMEOUT_MS = 20000;
 const greetingFor = firstName => `Hi, I'm ${firstName}. Thanks for making the time today. Shall we get started?`;
@@ -91,18 +92,6 @@ function parseCliArgs(argv) {
 }
 
 // ---------------------------------------------------------------- seeded PRNG and statistics
-
-/** mulberry32: tiny deterministic 32-bit PRNG returning values in [0, 1). */
-function mulberry32(seed) {
-  let state32 = (Number(seed) || 0) >>> 0;
-  return function random() {
-    state32 = (state32 + 0x6d2b79f5) >>> 0;
-    let t = state32;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 function shuffle(list, random) {
   const copy = [...list];
@@ -534,35 +523,9 @@ function withTimeout(promise, timeoutMs, onTimeout) {
 
 async function speakOne({ key, tier, voice, index, outDir }) {
   const factory = createDialogueVoiceFactory({ key, voiceId: voice.voiceId, tier });
-  const stream = factory.open({ utteranceId: `e2e-${index}` });
-  const chunks = [];
-  const words = [];
-  let firstAudioAt = null;
-  let audioRate = stream.sampleRate;
-  let streamError = '';
-  stream.onWords(list => { for (const word of Array.isArray(list) ? list : []) words.push(word); });
-  stream.onError(error => { streamError = redact(error?.message ?? error, key); });
-  stream.onAudio(chunk => {
-    if (firstAudioAt === null) {
-      firstAudioAt = performance.now();
-      audioRate = stream.sampleRate;
-    }
-    chunks.push(Buffer.from(chunk));
-  });
-
   const firstName = firstNameOf(STAND_IN_NAME);
-  const sentAt = performance.now();
-  const accepted = stream.sendText(greetingFor(firstName));
-  let timedOut = false;
-  try {
-    await withTimeout(stream.finish(), SPEAK_TIMEOUT_MS, () => { timedOut = true; stream.cancel(); });
-  } catch (error) {
-    streamError = streamError || redact(error?.message ?? error, key);
-  }
-
-  const pcm = Buffer.concat(chunks);
-  const audioMs = (pcm.length / 2 / audioRate) * 1000;
-  const firstAudioMs = firstAudioAt === null ? null : firstAudioAt - sentAt;
+  const spoken = await speakLine({ factory, key, text: greetingFor(firstName), utteranceId: `e2e-${index}` });
+  const { pcm, sampleRate: audioRate } = spoken;
   const wavPath = path.join(outDir, `${slug(voice.voiceName)}-${slug(firstName)}.wav`);
   let wavProblems = [];
   if (pcm.length > 0) {
@@ -572,18 +535,18 @@ async function speakOne({ key, tier, voice, index, outDir }) {
     await fs.writeFile(wavPath, Buffer.concat([header, pcm]));
   }
   const problems = [];
-  if (!accepted) problems.push('sendText rejected');
+  if (!spoken.accepted) problems.push('sendText rejected');
   if (pcm.length === 0) problems.push('no audio');
-  if (streamError) problems.push(`stream error: ${streamError}`);
-  if (timedOut) problems.push('completion timeout');
+  if (spoken.error) problems.push(`stream error: ${spoken.error}`);
+  if (spoken.timedOut) problems.push('completion timeout');
   if (wavProblems.length > 0) problems.push(`bad wav: ${wavProblems.join(',')}`);
   return {
     voiceName: voice.voiceName || voice.voiceId,
     name: STAND_IN_NAME,
     sampleRate: audioRate,
-    firstAudioMs,
-    audioMs,
-    words: words.length,
+    firstAudioMs: spoken.firstAudioMs,
+    audioMs: spoken.audioMs,
+    words: spoken.words,
     wavPath: pcm.length > 0 ? wavPath : '',
     ok: problems.length === 0,
     problems,
@@ -713,9 +676,11 @@ async function step9FullLibraryDraw({ key, args }) {
 async function speakLine({ factory, key, text, utteranceId }) {
   const stream = factory.open({ utteranceId });
   const chunks = [];
+  let words = 0;
   let firstAudioAt = null;
   let audioRate = stream.sampleRate;
   let streamError = '';
+  stream.onWords?.(list => { words += Array.isArray(list) ? list.length : 0; });
   stream.onError(error => { streamError = redact(error?.message ?? error, key); });
   stream.onAudio(chunk => {
     if (firstAudioAt === null) {
@@ -739,6 +704,7 @@ async function speakLine({ factory, key, text, utteranceId }) {
     sampleRate: audioRate,
     firstAudioMs: firstAudioAt === null ? null : firstAudioAt - sentAt,
     audioMs: (pcm.length / 2 / audioRate) * 1000,
+    words,
     error: streamError,
     timedOut,
   };
@@ -827,7 +793,7 @@ async function main() {
   return summarize();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isMainModule(import.meta.url)) {
   let exitCode = 1;
   try {
     exitCode = await main();

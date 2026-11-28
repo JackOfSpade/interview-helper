@@ -9,8 +9,9 @@
 // reads like a real listener is for the reader of the printout.
 import fs from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isMainModule } from '../lib/entrypoint.mjs';
+import { percentile } from './main-first-sentence.mjs';
 import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
 import { buildOpenerInstructions, formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 
@@ -47,12 +48,6 @@ export function pairsFrom(transcript) {
   return pairs;
 }
 
-function percentile(values, p) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
-}
-
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -68,28 +63,24 @@ async function main() {
   try {
     await session.start({ instructions: buildOpenerInstructions({ persona: call.persona, panel }) });
     for (const [index, pair] of pairs.entries()) {
-      // The engine's length note: the target words for this turn (0 = none), left out after a line of one or two words.
-      const target = 0; // the acknowledgement chooses its own length (no target note since 2026-11-19)
       const message = formatTurnMessage({ elapsedMs: pair.startMs, candidateText: pair.candidate, channel: pair.channel, lastSpoken: pair.lastSpoken });
       const begun = performance.now();
       const result = await session.turn(message, {});
       const text = String(result.text ?? '').trim();
-      rows.push({ turn: index + 1, target, candidate: pair.candidate, text, words: words(text).length, firstMs: result.firstDeltaMs, totalMs: Math.round(performance.now() - begun), breaks: ruleBreaks(text, pair.candidate) });
+      rows.push({ turn: index + 1, candidate: pair.candidate, text, words: words(text).length, firstMs: result.firstDeltaMs, totalMs: Math.round(performance.now() - begun), breaks: ruleBreaks(text, pair.candidate) });
     }
   } finally {
     await session.close();
   }
   for (const row of rows) {
-    console.log(`#${String(row.turn).padStart(2)} first ${String(row.firstMs).padStart(4)} ms  total ${String(row.totalMs).padStart(4)} ms  ${String(row.words).padStart(2)}w/${String(row.target || '-').padStart(2)}  ${row.breaks.length ? `BREAK ${row.breaks.join(',')}  ` : ''}${row.text}`);
+    console.log(`#${String(row.turn).padStart(2)} first ${String(row.firstMs).padStart(4)} ms  total ${String(row.totalMs).padStart(4)} ms  ${String(row.words).padStart(2)}w  ${row.breaks.length ? `BREAK ${row.breaks.join(',')}  ` : ''}${row.text}`);
     console.log(`      candidate: ${row.candidate.slice(0, 140).replace(/\n/g, ' ')}`);
   }
   const first = rows.map(row => row.firstMs);
   const total = rows.map(row => row.totalMs);
   console.log(`\nturns ${rows.length}; first delta p50 ${percentile(first, 0.5)} ms p95 ${percentile(first, 0.95)} ms; whole reply p50 ${percentile(total, 0.5)} ms p95 ${percentile(total, 0.95)} ms`);
   console.log(`words min ${Math.min(...rows.map(row => row.words))} median ${percentile(rows.map(row => row.words), 0.5)} max ${Math.max(...rows.map(row => row.words))}; turns with a rule break ${rows.filter(row => row.breaks.length).length}`);
-  const aimed = rows.filter(row => row.target);
-  if (aimed.length) console.log(`target ${values.target}: ${aimed.filter(row => Math.abs(row.words - row.target) <= 2).length} of ${aimed.length} within 2 words, ${aimed.filter(row => row.words >= row.target).length} at or above it; mean ${(aimed.reduce((sum, row) => sum + row.words, 0) / aimed.length).toFixed(1)} words`);
   if (values.json) await fs.writeFile(values.json, JSON.stringify(rows, null, 2));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error?.message ?? error); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch(error => { console.error(error?.message ?? error); process.exit(1); });

@@ -51,31 +51,11 @@ export default defineConfig([
     },
   },
   {
-    files: ['**/*.{mjs,cjs}', 'electron/**/*.{js,mjs,cjs}', 'scripts/**/*.{js,mjs,cjs}', 'local_ai/**/*.mjs', 'vite.config.js', 'eslint.config.js'],
+    files: ['**/*.{mjs,cjs}', 'electron/**/*.{js,mjs,cjs}', 'scripts/**/*.{js,mjs,cjs}', 'vite*.js', 'eslint.config.js'],
     languageOptions: {
       globals: {
         ...globals.node,
       },
-    },
-  },
-  {
-    // Design-system build gates and handoff checks are plain CommonJS Node
-    // scripts (require/module.exports/Buffer/process), not browser ESM. Their
-    // shared harness destructuring intentionally keeps `ok`/`fail` uniform
-    // even in tests that only use `assert`; retain the checks and exempt only
-    // those conventional aliases.
-    files: [
-      'Job Application Design System/build/**/*.js',
-      'Job Application Design System/handoff/**/*.js',
-    ],
-    languageOptions: {
-      sourceType: 'commonjs',
-      globals: {
-        ...globals.node,
-      },
-    },
-    rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^(?:[A-Z_]+|ok|fail)$' }],
     },
   },
 ])

@@ -5,7 +5,8 @@
  * (scripts/fixtures/ami-within-turn-pauses.json); everything else is SYNTHETIC: latencies are sampled from lognormals fitted to the
  * Phase 0 p50/p95 numbers and the candidate is scripted (see scripts/fixtures/interview-practice-call-scenarios.mjs).
  */
-import { pathToFileURL } from 'node:url';
+import { mulberry32 } from './lib/prng.mjs';
+import { isMainModule } from './lib/entrypoint.mjs';
 import { createPracticeCallEngine, DEFAULT_CALL_THRESHOLDS } from '../electron/interviewPracticeCallEngine.js';
 import { SCENARIOS, getScenario, AMI_PAUSES, PAUSE_SOURCE_LINE, ACK_REACTION } from './fixtures/interview-practice-call-scenarios.mjs';
 
@@ -43,16 +44,7 @@ export const VOICE_LATER_LINE_MS = 250;
 /** What a spoken word costs in the fake voice for the acknowledgement: about 330 ms per word. */
 export const ACK_MS_PER_WORD = 330;
 
-export function mulberry32(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6D2B79F5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+export { mulberry32 };
 
 /** mu = ln p50, sigma = (ln p95 - ln p50) / 1.645. */
 export function lognormalParams({ p50, p95 }) {
@@ -906,5 +898,4 @@ async function main(argv) {
   console.log(json ? JSON.stringify(out, null, 2) : out.map(row => Object.values(row).join('\t')).join('\n'));
 }
 
-const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
-if (entry === import.meta.url) main(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });
+if (isMainModule(import.meta.url)) main(process.argv.slice(2)).catch(error => { console.error(error); process.exitCode = 1; });

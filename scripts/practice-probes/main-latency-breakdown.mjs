@@ -12,8 +12,8 @@
 import fs from 'node:fs/promises';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isMainModule } from '../lib/entrypoint.mjs';
 import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
 import { buildInterviewerInstructions, formatTurnMessage } from '../../electron/interviewPracticeCallPrompt.js';
 import { connectedMarker } from '../../electron/interviewPracticeCallEngine.js';
@@ -49,6 +49,7 @@ async function main() {
     allowPositionals: true,
     options: { model: { type: 'string', default: 'opus' }, effort: { type: 'string', default: 'low' }, thinking: { type: 'string', default: 'on' }, settings: { type: 'string' }, limit: { type: 'string', default: '12' }, json: { type: 'string' } },
   });
+  if (!positionals[0]) throw new Error('Usage: main-latency-breakdown.mjs <call.json> [--model opus] [--effort low] [--thinking off] [--settings JSON] [--limit 12] [--json OUT]');
   const call = JSON.parse(await fs.readFile(positionals[0], 'utf8'));
   const lines = (call.transcript || []).filter(e => e.speaker === 'candidate' && String(e.text ?? '').trim()).slice(0, Number.parseInt(values.limit, 10) || 12);
   let turn = null;
@@ -97,4 +98,4 @@ async function main() {
   if (values.json) await fs.writeFile(values.json, JSON.stringify(rows, null, 2));
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error?.stack ?? error); process.exit(1); });
+if (isMainModule(import.meta.url)) main().catch(error => { console.error(error?.stack ?? error); process.exit(1); });

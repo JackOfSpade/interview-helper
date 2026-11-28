@@ -59,8 +59,8 @@ function commandFailure(label, result) {
 }
 
 export function packagingLockPath(projectDir = process.cwd()) {
-  // Deliberately separate from scripts/launch-app.command's
-  // release/.launcher/build.lock: direct npm builds and Finder launches need
+  // Deliberately separate from the launcher's
+  // release-interview/.launcher/build.lock: direct npm builds and Finder launches need
   // distinct ownership protocols, but concurrent direct package builds must
   // serialize writes to the same electron-builder output directory.
   return path.join(projectDir, activeTarget.releaseDirectory, PACKAGING_LOCK_DIRECTORY);
@@ -534,15 +534,15 @@ export function buildMacApplication(projectDir = process.cwd()) {
 
 export function buildApplication(projectDir = process.cwd(), platform = process.platform) {
   return withPackagingLock(projectDir, () => {
-  // Preserve the project's generic electron-builder behavior on non-macOS
-  // hosts. A macOS signature cannot be inspected there, so do not pretend to
-  // offer the Darwin integrity guarantee or invoke codesign at all.
-  if (!usesMacIntegrityGate(platform)) {
-    compileApplication(projectDir);
-    packageApplication(projectDir);
-    return [];
-  }
-  return buildMacApplication(projectDir);
+    // Preserve the project's generic electron-builder behavior on non-macOS
+    // hosts. A macOS signature cannot be inspected there, so do not pretend to
+    // offer the Darwin integrity guarantee or invoke codesign at all.
+    if (!usesMacIntegrityGate(platform)) {
+      compileApplication(projectDir);
+      packageApplication(projectDir);
+      return [];
+    }
+    return buildMacApplication(projectDir);
   });
 }
 

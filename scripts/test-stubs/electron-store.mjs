@@ -1,4 +1,4 @@
-// Minimal stand-in for the `electron-store` package for scripts/test-runner.js.
+// Minimal stand-in for the `electron-store` package for scripts/run-tests.mjs.
 // electron-store v11 imports the real `electron` package unconditionally at
 // its own module top level, so it fails to even load without a real Electron
 // binary present — independent of anything in this app's code. This stub
