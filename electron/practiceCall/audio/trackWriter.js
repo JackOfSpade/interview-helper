@@ -59,7 +59,27 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
       const samples = toSamples(pcm16le);
       const durationMs = (samples.length * 1000) / rate;
       const existing = utterances.get(id);
-      utterances.set(id, { samples, sampleRate: rate, durationMs, segments: existing?.segments ?? [], open: existing?.open ?? null });
+      utterances.set(id, { samples, base: samples, parts: [], byteLength: 0, sampleRate: rate, durationMs, segments: existing?.segments ?? [], open: existing?.open ?? null });
+    },
+    // Adds bytes to the end of an utterance without converting anything: the chunks are joined and
+    // converted once, when the audio is rendered. Only the duration is kept current, from the byte count.
+    appendUtterance(id, pcm16le, rate) {
+      if (!(rate > 0)) throw new Error('trackWriter: utterance sampleRate must be positive');
+      if (typeof pcm16le === 'string') throw new Error('trackWriter: pcm16le must be bytes, not a string');
+      let bytes = pcm16le instanceof ArrayBuffer ? new Uint8Array(pcm16le) : pcm16le;
+      if (!bytes || typeof bytes.length !== 'number') throw new Error('trackWriter: pcm16le must be a byte buffer');
+      if (bytes instanceof Int16Array) bytes = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? bytes.length);
+      let utterance = utterances.get(id);
+      if (!utterance) {
+        utterance = { samples: null, base: null, parts: [], byteLength: 0, sampleRate: rate, durationMs: 0, segments: [], open: null };
+        utterances.set(id, utterance);
+      }
+      utterance.parts.push(Buffer.from(buffer));
+      utterance.byteLength += buffer.length;
+      utterance.samples = null;
+      utterance.sampleRate = rate;
+      utterance.durationMs = (((utterance.base?.length ?? 0) + (utterance.byteLength >> 1)) * 1000) / rate;
     },
     started(id, atMs) {
       const utterance = utteranceOf(id);
@@ -105,9 +125,24 @@ export function createInterviewerTrack({ sampleRate = 24000 } = {}) {
   };
 }
 
+// The utterance's samples, converted once from its appended chunks.
+function samplesOf(utterance) {
+  if (!utterance.samples) {
+    const joined = Buffer.concat(utterance.parts ?? []);
+    const tail = pcm16ToFloat(joined);
+    const base = utterance.base;
+    if (base && base.length) { const all = new Float32Array(base.length + tail.length); all.set(base); all.set(tail, base.length); utterance.samples = all; }
+    else utterance.samples = tail;
+    // The joined bytes stand in for the chunks, so later bytes continue after them.
+    utterance.parts = [joined];
+  }
+  return utterance.samples;
+}
+
 // Place one played span of one utterance into the output timeline, summing.
 function renderSegment(mix, utterance, segment, targetRate) {
-  const { samples, sampleRate: sourceRate } = utterance;
+  const { sampleRate: sourceRate } = utterance;
+  const samples = samplesOf(utterance);
   const startSource = (segment.audioStartMs * sourceRate) / 1000;
   const spanSource = ((segment.audioEndMs - segment.audioStartMs) * sourceRate) / 1000;
   const spanTarget = Math.round((spanSource * targetRate) / sourceRate);
